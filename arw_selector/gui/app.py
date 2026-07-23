@@ -108,13 +108,17 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).warning("설정 마이그레이션 실패", exc_info=True)
 
-    # 기본 카메라 프로파일 프리셋을 한 번 설치합니다 (실패해도 앱은 뜹니다).
+    # 기본 프리셋(보정·판정)을 한 번 설치합니다 (실패해도 앱은 뜹니다).
     try:
-        from ..core.presets import install_default_profiles
+        from ..core.presets import (
+            install_default_profiles,
+            install_default_select_presets,
+        )
 
         install_default_profiles()
+        install_default_select_presets()
     except Exception:  # noqa: BLE001
-        logging.getLogger(__name__).warning("기본 프로파일 설치 실패", exc_info=True)
+        logging.getLogger(__name__).warning("기본 프리셋 설치 실패", exc_info=True)
 
     from .main_window import main as run
 

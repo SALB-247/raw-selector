@@ -270,3 +270,43 @@ def install_default_profiles(root: Path | None = None) -> int:
             installed += 1
     marker.write_text("1", encoding="utf-8")
     return installed
+
+
+def default_select_presets() -> dict[str, dict]:
+    """기본으로 제공하는 판정(셀렉트) 프리셋.
+
+    코드 기본값(ScoreConfig·GroupConfig) 그대로입니다. 개인 촬영 맥락이 담긴
+    프리셋을 배포본에 담지 않으려고, 배포에는 이 일반값만 코드에서 만들어
+    넣습니다 — 보정 프리셋과 같은 방식입니다.
+    """
+    from dataclasses import asdict
+
+    from .config import GroupConfig, ScoreConfig
+
+    return {
+        "기본": {
+            "score": asdict(ScoreConfig()),
+            "group": asdict(GroupConfig()),
+        }
+    }
+
+
+def install_default_select_presets(root: Path | None = None) -> int:
+    """기본 판정 프리셋을 한 번 설치합니다. 설치한 개수를 반환.
+
+    install_default_profiles와 같은 규칙입니다(마커로 한 번만, 사용자 것은
+    덮지 않음). 예전에는 판정 프리셋에 기본값이 없어, 개인 프리셋을 배포에
+    담지 않으면 배포본에 판정 프리셋이 아예 없었습니다.
+    """
+    store = select_presets(root)
+    store.ensure_dir()
+    marker = store.directory / ".select_installed"
+    if marker.exists():
+        return 0
+    installed = 0
+    for name, data in default_select_presets().items():
+        if not store.exists(name):
+            store.save(name, data)
+            installed += 1
+    marker.write_text("1", encoding="utf-8")
+    return installed
