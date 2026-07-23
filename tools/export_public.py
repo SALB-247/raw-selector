@@ -25,7 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 공개할 폴더. 그 아래는 아래 EXCLUDE에 걸리지 않는 한 전부 나갑니다.
 INCLUDE_DIRS = (
     "arw_selector",
-    "tests",
+    # tests/ 는 공개하지 않습니다 — 개발용이고, 실제 촬영 파일명 참조가
+    # 섞여 있어 공개 표면만 넓힙니다. 테스트는 비공개 원본에 남습니다.
     "tools",
     "assets",
     "data/lensfun",

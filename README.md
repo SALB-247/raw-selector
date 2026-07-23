@@ -221,18 +221,6 @@ for the same folder would be a bug. `core` never imports Qt — analysis runs in
 startup for nothing. User-facing text lives only in the GUI layer, with English
 source strings and Korean shipped as a Qt translation.
 
-## Tests
-
-```bash
-pytest
-```
-
-~1,560, running on synthetic images without any RAW files. A handful of tests
-that need real sample files are skipped unless you point an environment variable
-at them (e.g. `ARW_NIKON_SAMPLES`). `test_gui_rendering.py` actually paints the
-widgets and counts pixels — logic tests miss bugs where every computation is
-correct but nothing reaches the screen.
-
 ## Cross-platform
 
 Paths are all `pathlib.Path`; worker functions are module top-level with
