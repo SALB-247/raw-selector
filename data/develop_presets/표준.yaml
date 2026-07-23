@@ -1,0 +1,139 @@
+name: 표준
+saved: '2026-07-21T10:55:48'
+data:
+  basic:
+    temperature: 0
+    tint: 0
+    exposure: 0.0
+    contrast: 0
+    highlights: 0
+    shadows: 0
+    whites: 0
+    blacks: 0
+    texture: 0
+    clarity: 0
+    dehaze: 0
+    vibrance: 0
+    saturation: 0
+  curve:
+    highlights: 0
+    lights: 0
+    darks: 0
+    shadows: 0
+    points_rgb: []
+    points_red: []
+    points_green: []
+    points_blue: []
+  detail:
+    sharpen_amount: 0
+    sharpen_radius: 1.0
+    noise_reduction: 0
+    color_noise_reduction: 0
+  hsl:
+    red:
+      hue: 0
+      saturation: 0
+      luminance: 0
+    orange:
+      hue: 0
+      saturation: 0
+      luminance: 0
+    yellow:
+      hue: 0
+      saturation: 0
+      luminance: 0
+    green:
+      hue: 0
+      saturation: 0
+      luminance: 0
+    aqua:
+      hue: 0
+      saturation: 0
+      luminance: 0
+    blue:
+      hue: 0
+      saturation: 0
+      luminance: 0
+    purple:
+      hue: 0
+      saturation: 0
+      luminance: 0
+    magenta:
+      hue: 0
+      saturation: 0
+      luminance: 0
+  color_grade:
+    shadows:
+      hue: 0
+      saturation: 0
+      luminance: 0
+    midtones:
+      hue: 0
+      saturation: 0
+      luminance: 0
+    highlights:
+      hue: 0
+      saturation: 0
+      luminance: 0
+    blending: 50
+    balance: 0
+  effects:
+    grain_amount: 0
+    grain_size: 25
+    vignette_amount: 0
+    vignette_midpoint: 50
+  optics:
+    auto_enabled: false
+    auto_distortion: true
+    auto_vignetting: true
+    auto_chromatic: true
+    lens_override: ''
+    distortion: 0
+    manual_vignetting: 0
+    defringe_purple: 0
+    defringe_green: 0
+    defringe_purple_hue: 145
+    defringe_green_hue: 65
+  geometry:
+    crop_left: 0.0
+    crop_top: 0.0
+    crop_right: 1.0
+    crop_bottom: 1.0
+    straighten: 0.0
+    rotate_quarters: 0
+    flip_horizontal: false
+    flip_vertical: false
+    ratio: free
+  watermark:
+    enabled: false
+    text: ''
+    image_path: ''
+    position: bottom_right
+    opacity: 70
+    scale: 5
+    margin: 3
+    offset_x: 0.0
+    offset_y: 0.0
+    rotation: 0
+    color:
+    - 255
+    - 255
+    - 255
+    shadow: true
+  metadata:
+    enabled: false
+    include: []
+    artist: ''
+    copyright: ''
+  exif_strip:
+    enabled: false
+    dark_background: true
+    include:
+    - camera
+    - lens
+    - focal_length
+    - aperture
+    - shutter
+    - iso
+    height_percent: 6.0
+    custom_text: ''

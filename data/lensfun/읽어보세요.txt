@@ -1,0 +1,31 @@
+렌즈 프로필 (lensfun 데이터베이스)
+==================================
+
+이 폴더의 XML은 lensfun 프로젝트의 렌즈 데이터베이스입니다.
+왜곡·비네팅·색수차 자동 보정에 쓰입니다.
+
+  출처    : https://github.com/lensfun/lensfun  (data/db)
+  라이선스 : Creative Commons Attribution-ShareAlike 3.0
+             전문은 이 폴더의 COPYING.CC_BY-SA_3.0 참고
+  수정 여부: 원본 그대로 동봉 (내용 변경 없음)
+
+
+새 렌즈를 추가하려면
+--------------------
+위 저장소에서 XML을 받아 이 폴더에 넣고, 보정 창 광학 섹션의
+[렌즈 DB 다시 읽기]를 누르면 바로 반영됩니다.
+
+
+포맷 버전에 대해
+----------------
+lensfun 최신 DB는 포맷 "버전 2"인데, 함께 쓰는 lensfun 라이브러리는
+"버전 1"까지만 읽습니다. 그래서 이 앱은 버전 2 파일을 발견하면
+.v1cache 폴더에 버전 1 사본을 만들어 사용합니다.
+
+두 포맷의 차이는 real focal length 표기 한 군데뿐이라 변환은 무손실입니다.
+
+  버전 1: <distortion .../> 와 <real-focal-length focal=".." real-focal=".."/>
+  버전 2: <distortion ... real-focal=".."/>
+
+.v1cache 는 자동 생성물이라 지워도 됩니다 (다음 실행 때 다시 만듭니다).
+원본 XML은 변환하지 않고 그대로 둡니다.

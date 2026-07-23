@@ -1,0 +1,13 @@
+# 줄바꿈은 저장소 안에서 LF로 통일합니다. 이게 없으면 윈도우에서 만든
+# 파일이 CRLF로 들어가, macOS에서 열 때 파일 전체가 바뀐 것처럼 보입니다
+# (이 프로젝트는 macOS가 배포 대상입니다).
+* text=auto eol=lf
+
+*.bat text eol=crlf
+
+*.png binary
+*.ico binary
+*.onnx binary
+*.CR3 binary
+*.ARW binary
+*.NEF binary

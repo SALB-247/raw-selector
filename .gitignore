@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+build/
+dist/
+
+# Photos and anything derived from them stay out of the repository.
+*.ARW
+*.CR2
+*.CR3
+*.NEF
+*.RAF
+*.ORF
+*.RW2
+*.DNG
+*.HIF
+*.HEIC
+
+# Regenerable: analysis cache, thumbnails, logs.
+*.sqlite
+*.sqlite-journal
+.raw_selector_cache/
+.arw_selector_cache/
+thumbs/
+data/logs/
+data/lensfun/.v1cache/
+
+# Personal: judgement presets and hand-made ground-truth labels.
+data/select_presets/
+labels/
+
+.DS_Store
+Thumbs.db
