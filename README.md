@@ -13,9 +13,6 @@ window. See [CHANGELOG.md](CHANGELOG.md) for what changed per release and what t
 do when upgrading, and **[SUPPORTED.md](SUPPORTED.md)** for the full list of
 decodable formats, colour-calibrated cameras, and lens-correction profiles.
 
-> A much more detailed guide, with measured numbers throughout, is in Korean at
-> [README.ko.md](README.ko.md).
-
 ## Why it's fast
 
 Full-demosaicing 4,000 frames with rawpy takes 1–2 seconds each — over 1.5
