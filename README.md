@@ -46,8 +46,8 @@ models ship in the repo (`arw_selector/core/models/`):
 | `face_mesh_192x192.onnx` | 2.3MB | 468-point mesh — face/eye masks, eye-closed |
 
 Both **fail soft**: if a model is missing the app still runs, it just loses face
-detection or the mask/eye-closed features. Because that failure is silent, a
-packaged build checks for them with `RAW_selector --selftest`.
+detection or the mask/eye-closed features. That failure is silent, so if the
+face features seem to be missing, check the startup log.
 
 ## Usage
 
