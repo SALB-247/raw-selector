@@ -10,7 +10,8 @@ don't shoot RAW.
 
 Select, develop (tone/colour/masks/watermark), and export all work from one
 window. See [CHANGELOG.md](CHANGELOG.md) for what changed per release and what to
-do when upgrading.
+do when upgrading, and **[SUPPORTED.md](SUPPORTED.md)** for the full list of
+decodable formats, colour-calibrated cameras, and lens-correction profiles.
 
 > A much more detailed guide, with measured numbers throughout, is in Korean at
 > [README.ko.md](README.ko.md).
