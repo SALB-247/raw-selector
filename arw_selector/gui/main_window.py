@@ -502,23 +502,71 @@ class MainWindow(QMainWindow):
             tr("{count} files selected — press Analyse to start").format(
                 count=len(paths))
         )
-        self.start_analysis()
+        # 파일을 직접 골라 넘어온 흐름은 바로 분석합니다 — 방금 고른 것을
+        # 또 확인창으로 되묻지 않습니다. 다이얼로그는 툴바의 분석 버튼용입니다.
+        self.start_analysis(show_dialog=False)
 
-    def start_analysis(self) -> None:
+    def start_analysis(self, show_dialog: bool = True) -> None:
         if self.folder is None or (self.analysis_worker and self.analysis_worker.isRunning()):
             return
 
         self.config.recursive = self.recursive_check.isChecked()
+
+        # 무엇을 몇 장 분석하는지 먼저 보여 주고 옵션을 고르게 합니다.
+        # 폴더를 열 때의 자동 분석(show_dialog=False)은 지금처럼 바로 시작합니다.
+        if show_dialog and not self._confirm_analysis():
+            return
+
+        use_cache = getattr(self, "_pending_use_cache", True)
         self._set_busy(True)
         self._begin_task(tr("Preparing to analyse…"))
 
         self.analysis_worker = AnalysisWorker(
-            self.folder, self.config, paths=self._explicit_paths
+            self.folder, self.config, use_cache=use_cache,
+            paths=self._explicit_paths,
         )
         self.analysis_worker.progressed.connect(self.on_progress)
         self.analysis_worker.finished_ok.connect(self.on_analysis_done)
         self.analysis_worker.failed.connect(self.on_worker_failed)
         self.analysis_worker.start()
+
+    def _confirm_analysis(self) -> bool:
+        """분석 시작 다이얼로그. 취소하면 False, 시작하면 옵션을 반영하고 True.
+
+        사진 수와 캐시 상태를 세는 것은 가벼운 작업이라(파일 스캔 + 지문
+        조회, payload 역직렬화 없음) 창을 띄우기 전에 바로 셉니다.
+        """
+        from ..core.cache import AnalysisCache, default_cache_path
+        from ..core.raw_io import iter_raw_files
+        from .analysis_dialog import AnalysisStartDialog
+
+        if self._explicit_paths:
+            paths = list(self._explicit_paths)
+        else:
+            paths = iter_raw_files(self.folder, recursive=self.config.recursive)
+        if not paths:
+            self.set_status(tr("No photos found in this folder."))
+            return False
+
+        cached = 0
+        try:
+            cache = AnalysisCache(
+                default_cache_path(self.folder), self.config.analyze.cache_key())
+            cache.open()
+            cached = cache.count_ready(paths)
+            cache.close()
+        except Exception:  # noqa: BLE001 - 캐시를 못 세도 분석은 할 수 있습니다
+            cached = 0
+
+        options = AnalysisStartDialog.ask(
+            len(paths), cached, self.config.analyze, self)
+        if options is None:
+            return False
+
+        self.config.analyze.noise_compensation = options.noise_compensation
+        self.config.analyze.af_roi_hint = options.af_roi_hint
+        self._pending_use_cache = options.use_cache
+        return True
 
     def on_progress(self, progress) -> None:
         self.status_progress.setMaximum(progress.total)

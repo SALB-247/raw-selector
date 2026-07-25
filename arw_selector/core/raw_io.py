@@ -853,7 +853,7 @@ def read_metadata(path: Path) -> RawMetadata:
     iso = tags.get("EXIF ISOSpeedRatings")
     orientation = tags.get("Image Orientation")
 
-    return RawMetadata(
+    metadata = RawMetadata(
         path=path,
         capture_time=capture_time,
         camera_model=str(tags["Image Model"]).strip() if "Image Model" in tags else None,
@@ -867,6 +867,26 @@ def read_metadata(path: Path) -> RawMetadata:
         latitude=_gps_degrees(tags, "GPS GPSLatitude", "GPS GPSLatitudeRef"),
         longitude=_gps_degrees(tags, "GPS GPSLongitude", "GPS GPSLongitudeRef"),
     )
+
+    if path.suffix.lower() == ".rw2" and (metadata.iso is None or not metadata.lens_model):
+        # RW2는 TIFF 매직이 85라 exifread가 파일째 거부합니다. 위에서 온
+        # 값들은 내장 프리뷰 EXIF 폴백인데 거기엔 ISO·렌즈가 없습니다.
+        # 정작 IFD0 0x0017(ISO)과 내장 JPEG의 MakerNote 0x0051(렌즈)에
+        # 평문으로 있어서, 그 둘만 직접 읽어 채웁니다 (RESEARCH_METADATA.md).
+        from dataclasses import replace as _replace
+
+        from .maker_meta import rw2_extras
+
+        extras = rw2_extras(path)
+        patch = {}
+        if metadata.iso is None and "iso" in extras:
+            patch["iso"] = extras["iso"]
+        if not metadata.lens_model and "lens" in extras:
+            patch["lens_model"] = extras["lens"]
+        if patch:
+            metadata = _replace(metadata, **patch)
+
+    return metadata
 
 
 def _gps_degrees(tags: dict, value_key: str, ref_key: str) -> float | None:

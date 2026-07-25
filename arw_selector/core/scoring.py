@@ -23,6 +23,10 @@ def roi_trust(source: FocusSource, config: ScoreConfig) -> float:
     return {
         FocusSource.EYE: config.trust_eye,
         FocusSource.FACE: config.trust_face,
+        # AF 위치는 "카메라가 초점을 건 곳"이라 타일 추정과 같은 급으로
+        # 신뢰합니다. 별도 설정을 늘리지 않습니다 — 존 AF는 피사체(몸통)를
+        # 가리키지만 눈만큼 정확하지는 않습니다(RESEARCH_METADATA.md).
+        FocusSource.AF: config.trust_tile,
         FocusSource.TILE: config.trust_tile,
         FocusSource.FRAME: config.trust_frame,
     }.get(source, 0.5)

@@ -34,6 +34,23 @@ class AnalyzeConfig:
     laplacian_k: float = focus.LAPLACIAN_K
     tenengrad_k: float = focus.TENENGRAD_K
 
+    noise_compensation: bool = True
+    """선명도에서 노이즈 기여분을 차감 (초점판독 v4).
+
+    끄면 v3과 같은 측정입니다. 실측(2846장)에서 켰을 때 노이즈 낀 소프트
+    연사가 강등되고 keep 수는 그대로였습니다 — 끄는 것은 비교·검증용입니다.
+    분석 다이얼로그의 "정밀 분석" 항목으로 노출됩니다.
+    """
+
+    af_roi_hint: bool = False
+    """얼굴을 못 찾은 컷에서 카메라 AF 위치를 판정 영역으로 사용.
+
+    소니 0x2027·니콘 AFInfo2에서 읽습니다(maker_meta). 얼굴·눈 ROI가
+    있으면 절대 개입하지 않습니다 — 존 AF의 기록 위치는 눈이 아니라서
+    (실측 47장, RESEARCH_METADATA.md) 얼굴 검출을 이길 수 없습니다.
+    기본 꺼짐: 켜면 TILE로 판정되던 컷의 점수가 달라지므로 선택 사항입니다.
+    """
+
     def cache_key(self) -> str:
         """분석 결과에 영향을 주는 모든 것의 지문.
 

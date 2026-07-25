@@ -152,9 +152,11 @@ SLIDER_BINDINGS: dict[str, tuple[str, str, type, float]] = {
     "detail.sharpen_amount": ("detail", "sharpen_amount", int, 1),
     "detail.sharpen_radius": ("detail", "sharpen_radius", float, 1),
     "detail.noise_reduction": ("detail", "noise_reduction", int, 1),
+    "detail.noise_passes": ("detail", "noise_passes", int, 1),
     "detail.noise_detail": ("detail", "noise_detail", int, 1),
     "detail.color_noise_reduction": ("detail", "color_noise_reduction", int, 1),
     "detail.color_noise_radius": ("detail", "color_noise_radius", int, 1),
+    "detail.color_noise_shadow": ("detail", "color_noise_shadow", int, 1),
     "detail.face_priority": ("detail", "face_priority", int, 1),
     "detail.destripe": ("detail", "destripe", int, 1),
 
@@ -783,6 +785,23 @@ class DevelopPanel(QWidget):
                       tooltip=tr("Luminance (brightness) noise. The strength adapts\n"
                                  "automatically to the photo's real noise, so the same\n"
                                  "value gives a similar result across different ISOs"))
+        passes_row = self._add_row(
+            section, "detail.noise_passes", tr("Passes"), 1, 4, 1,
+            tooltip=tr(
+                "Runs the noise reduction several times, weaker each pass.\n"
+                "For the same amount of noise removed, several gentle passes\n"
+                "hurt detail far less than one strong pass.\n\n"
+                "Measured (A6700 ISO3200, strong-edge detail retained at\n"
+                "equal noise removal):\n"
+                "  70% removed:  1 pass 74% / 2 passes 97% / 3 passes 99%\n"
+                "  80% removed:  1 pass cannot reach / 4 passes 85%\n\n"
+                "The heavier the reduction (concert shots at ISO 2000+),\n"
+                "the more passes matter. Time scales with the pass count.\n"
+                "Applies to the non-local-means methods only."))
+        passes_row.slider.setSingleStep(1)
+        self._noise_passes_row = passes_row
+        self.noise_algorithm.currentIndexChanged.connect(self._sync_noise_passes)
+        self._sync_noise_passes()
         self._add_row(section, "detail.noise_detail", tr("Detail preservation"), 0, 100, 50,
                       gradient="mono",
                       tooltip=tr("Restores the original where there is fine texture like\n"
@@ -795,6 +814,19 @@ class DevelopPanel(QWidget):
                       0, 100, 50, gradient="mono",
                       tooltip=tr("How large a colour blob to catch. Blobs grow larger at\n"
                                  "higher ISO. Raising it also bleeds true colour edges"))
+        self._add_row(section, "detail.color_noise_shadow", tr("Shadow color noise"),
+                      0, 100, 0, gradient="mono",
+                      tooltip=tr(
+                          "Extra colour-noise suppression in dark areas only.\n"
+                          "Colour blotches are worst in shadows (they get amplified\n"
+                          "with the exposure), but matching the overall blur to the\n"
+                          "shadows would bleed true colour edges in bright areas.\n\n"
+                          "Measured (3 real concert files, colour noise remaining):\n"
+                          "  uniform only:  dark 25~29% / bright 25~42%\n"
+                          "  with this on:  dark  6~15% / bright unchanged\n"
+                          "  bright colour edges: identical in both cases\n\n"
+                          "Works together with colour noise reduction — it does\n"
+                          "nothing while that is 0"))
         self._add_row(section, "detail.destripe", tr("Destripe"), 0, 100, 0,
                       gradient="mono",
                       tooltip=tr("Removes the horizontal banding that appears when an LED\n"
@@ -817,6 +849,16 @@ class DevelopPanel(QWidget):
                                  " 85 — skin -33% / background detail -6% (default)\n"
                                  "100 — skin -34% / background detail -2%, twice as fast\n\n"
                                  "Ignored on photos with no face"))
+
+    def _sync_noise_passes(self, *_args) -> None:
+        """패스 수는 비국소 평균 계열에만 적용됩니다 — 다른 방식에서는 잠급니다.
+
+        만질 수 있게 두면 적용되는 줄 알고 값을 맞추다 왜 아무 변화가
+        없는지 찾게 됩니다 (JPEG 잠금에서 이미 한 번 겪은 일입니다).
+        """
+        algorithm = self.noise_algorithm.currentData()
+        supported = algorithm in (NoiseAlgorithm.NLMEANS, NoiseAlgorithm.NLMEANS_HQ)
+        self._noise_passes_row.setEnabled(supported)
 
     # ------------------------------------------------------------ 마스크
 

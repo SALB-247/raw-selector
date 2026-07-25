@@ -71,11 +71,25 @@ def analyze_file(
 
     try:
         preview = load_preview(path)
+
+        # 카메라 AF 위치 힌트 (선택). 프리뷰는 EXIF 방향이 이미 적용된
+        # 상태라, maker_meta가 방향까지 반영해 프리뷰 좌표로 돌려줍니다.
+        af_box = None
+        if config.af_roi_hint:
+            from .maker_meta import af_preview_box
+
+            orientation = metadata.orientation if metadata is not None else 1
+            af_box = af_preview_box(
+                path, orientation, preview.shape[1], preview.shape[0]
+            )
+
         result = focus_module.analyze_focus(
             preview,
             detect_long_edge=config.detect_long_edge,
             laplacian_k=config.laplacian_k,
             tenengrad_k=config.tenengrad_k,
+            af_box=af_box,
+            noise_compensation=config.noise_compensation,
         )
         # 프리뷰가 메모리에 올라와 있는 지금 장면 지문과 썸네일을 같이 뜹니다.
         # 나중에 구하려면 4000장을 전부 다시 디코딩해야 합니다.

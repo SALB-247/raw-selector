@@ -34,6 +34,7 @@ class FocusSource(str, Enum):
 
     EYE = "eye"          # 얼굴 랜드마크의 눈 영역 — 가장 신뢰도 높음
     FACE = "face"        # 얼굴은 찾았지만 눈 ROI가 너무 작음
+    AF = "af"            # 얼굴 없음, 카메라가 기록한 AF 위치 (maker_meta)
     TILE = "tile"        # 얼굴 없음, 격자 타일 중 최고 선명 영역
     FRAME = "frame"      # 폴백: 프레임 전체
 

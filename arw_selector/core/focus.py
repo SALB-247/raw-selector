@@ -27,7 +27,7 @@ from .types import FocusResult, FocusSource
 
 log = logging.getLogger(__name__)
 
-ALGORITHM_VERSION = 3
+ALGORITHM_VERSION = 4
 """측정 알고리즘 버전. 캐시 키에 들어갑니다.
 
 설정값이 그대로여도 알고리즘이 바뀌면 예전 결과는 무횹니다. 이 값을 올리지
@@ -39,6 +39,9 @@ v2: 저분산 영역 게이트(MIN_VARIANCE) 추가, 타일 선정을 원시 그
 v3: 주 피사체 얼굴을 면적×신뢰도로 고르도록 변경(큰 오검출이 ROI를
     가로채던 문제), 얼굴 ROI일 때 배경 선명도(background_sharpness)를
     따로 측정 — "초점이 얼굴이 아니라 배경에 맞은" 컷을 가리기 위함
+v4: 선명도에서 노이즈 기여분을 해석적으로 차감(measure_patch의 noise_var).
+    노이즈가 선명도를 부풀려(실측 1.63배) 5개 기종 11개 실측 ROI 중
+    3개에서 '노이즈 낀 흐린 컷'이 '선명한 컷'을 이겼던 문제 — 차감 후 0개
 """
 
 MODEL_PATH = Path(__file__).parent / "models" / "face_detection_yunet_2023mar.onnx"
@@ -181,30 +184,96 @@ def detect_faces(image_bgr: np.ndarray) -> np.ndarray | None:
 # ---------------------------------------------------------------- 선명도 측정
 
 
-def measure_patch(gray_patch: np.ndarray) -> tuple[float, float]:
+def measure_patch(gray_patch: np.ndarray, noise_var: float = 0.0) -> tuple[float, float]:
     """그레이스케일 패치의 (정규화 Laplacian, 정규화 Tenengrad)를 반환합니다.
 
     둘 다 패치의 분산으로 나눠 콘트라스트 불변으로 만듭니다. Tenengrad는
     Laplacian보다 방향성 모션블러에 민감해서 손떨림 컷을 더 잘 잡아냅니다.
+
+    noise_var(프레임 노이즈 분산 σ², frame_noise_sigma 참고)를 주면 노이즈
+    기여분을 빼고 잽니다. 그 나눗셈이 노이즈 함정의 근원이었습니다 —
+    노이즈는 분자와 분모를 함께 올리는데 분자를 더 크게 올려서, 고감도의
+    노이즈 낀 소프트 컷이 선명 점수를 받습니다(실측 1.63배 부풀림, 5개 기종
+    11개 눈 ROI 중 3개에서 순위 역전).
+
+    백색 노이즈 σ²의 기여분은 커널 계수 제곱합으로 정확히 계산됩니다:
+    3×3 Laplacian 분산에 **20σ²**, Sobel x·y 제곱합 평균에 **24σ²**, 패치
+    분산에 **σ²**. 각각 빼면 역전이 0이 되고 분리력·모션블러 반응은
+    유지됩니다(RESEARCH_FOCUS_NOISE.md). 기본값 0.0이면 예전과 동일합니다.
     """
     if gray_patch.size == 0:
         return 0.0, 0.0
 
     patch = gray_patch.astype(np.float32)
-    variance = float(patch.var())
+    variance = float(patch.var()) - noise_var
 
     # 신호가 없는 영역은 판정 불가로 처리한다 (MIN_VARIANCE 주석 참고).
     # 여기서 걸러내지 않으면 어두운 배경 노이즈가 피사체를 이깁니다.
+    # 노이즈 분산을 뺀 값으로 판정하므로, '노이즈뿐인' 패치는 보정만으로도
+    # 자연스럽게 걸러집니다 — 게이트는 이중 방어로 남습니다.
     if variance < MIN_VARIANCE:
         return 0.0, 0.0
 
-    laplacian = float(cv2.Laplacian(patch, cv2.CV_32F).var()) / variance
+    laplacian = max(
+        float(cv2.Laplacian(patch, cv2.CV_32F).var()) - 20.0 * noise_var, 0.0
+    ) / variance
 
     gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=3)
-    tenengrad = float(np.mean(gx * gx + gy * gy)) / variance
+    tenengrad = max(
+        float(np.mean(gx * gx + gy * gy)) - 24.0 * noise_var, 0.0
+    ) / variance
 
     return laplacian, tenengrad
+
+
+_NOISE_KERNEL = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float32)
+"""Immerkær(1996) 노이즈 추정 마스크. 백색 노이즈에 대한 응답 표준편차가
+정확히 6σ라서(계수 제곱합 36), 중앙절대편차로 σ를 역산할 수 있습니다."""
+
+
+def frame_noise_sigma(gray: np.ndarray, grid: int = 5, tile: int = 96) -> float:
+    """프레임 전체의 노이즈 표준편차를 추정합니다 (measure_patch에 넘길 값).
+
+    **패치별이 아니라 프레임 단위로 한 번만 잽니다.** 눈 ROI에서 패치별로
+    재면 속눈썹·머리카락 같은 실제 텍스처가 마스크 응답에 새어 들어,
+    선명한 패치일수록 σ̂이 부풉니다(실측 2~3배) — 그러면 선명한 눈에서
+    과대 차감되어 분리력을 깎습니다. 중앙값이라 프레임의 절반 이상이
+    평탄하면 텍스처에 끌려가지 않습니다.
+
+    ISO를 사전정보로 쓰지 않습니다. 실측(A6700 표본 90장)에서 같은
+    ISO 2000의 프리뷰 σ̂이 0.49~6.42까지 벌어졌습니다 — 장면 밝기와 카메라
+    NR이 지배해서 ISO는 거의 정보가 없고, Panasonic RW2처럼 ISO 자체가
+    안 읽히는 파일도 있습니다.
+
+    전체에 filter2D를 돌리면 26MP에서 판독 예산(장당 ~30ms)을 넘으므로
+    격자 표본 타일에만 돌립니다. 타일 가장자리 2px는 filter2D 경계 반사가
+    섞여 버립니다.
+    """
+    h, w = gray.shape[:2]
+    if h < 8 or w < 8:
+        return 0.0
+
+    patches = []
+    if h <= tile * 2 or w <= tile * 2:
+        patches.append(gray.astype(np.float32))
+    else:
+        ys = np.linspace(0, h - tile, grid).astype(int)
+        xs = np.linspace(0, w - tile, grid).astype(int)
+        for y in ys:
+            for x in xs:
+                patches.append(gray[y:y + tile, x:x + tile].astype(np.float32))
+
+    samples = []
+    for patch in patches:
+        response = cv2.filter2D(patch, -1, _NOISE_KERNEL)
+        trimmed = response[2:-2, 2:-2]
+        if trimmed.size:
+            samples.append(np.abs(trimmed).ravel())
+    if not samples:
+        return 0.0
+    pooled = np.concatenate(samples)
+    return float(1.4826 * np.median(pooled) / 6.0)
 
 
 def gradient_energy(gray_patch: np.ndarray) -> float:
@@ -434,11 +503,11 @@ def _best_tile(gray_small: np.ndarray, scale: float, shape: tuple[int, int],
 
 def _measure_sharpness(
     gray_full: np.ndarray, box: tuple[int, int, int, int],
-    laplacian_k: float, tenengrad_k: float,
+    laplacian_k: float, tenengrad_k: float, noise_var: float = 0.0,
 ) -> float:
     """박스 영역의 최종 선명도(0~100)를 ROI와 같은 방식으로 잽니다."""
     x, y, w, h = box
-    lap_raw, ten_raw = measure_patch(gray_full[y:y + h, x:x + w])
+    lap_raw, ten_raw = measure_patch(gray_full[y:y + h, x:x + w], noise_var)
     return 0.4 * _saturate(lap_raw, laplacian_k) + 0.6 * _saturate(ten_raw, tenengrad_k)
 
 
@@ -498,6 +567,8 @@ def analyze_focus(
     laplacian_k: float = LAPLACIAN_K,
     tenengrad_k: float = TENENGRAD_K,
     force_main_face: int | None = None,
+    af_box: tuple[int, int, int, int] | None = None,
+    noise_compensation: bool = True,
 ) -> FocusResult:
     """프리뷰 이미지 한 장의 초점 상태를 측정합니다.
 
@@ -577,6 +648,16 @@ def analyze_focus(
             if min(candidate[2], candidate[3]) >= MIN_ROI_PX:
                 roi, source = candidate, FocusSource.FACE
 
+    if roi is None and af_box is not None:
+        # 카메라가 기록한 AF 위치. 얼굴·눈 ROI가 있으면 여기 오지 않습니다 —
+        # 존 AF의 기록은 눈이 아니라 존(몸통)이라(실측 47장,
+        # RESEARCH_METADATA.md) 얼굴 검출을 이길 수 없습니다. 얼굴이 없는
+        # 컷에서만 "가장 선명한 타일" 추측 대신 카메라의 실제 초점 위치를
+        # 씁니다.
+        candidate = _clip_box(af_box[0], af_box[1], af_box[2], af_box[3], shape)
+        if candidate and min(candidate[2], candidate[3]) >= MIN_ROI_PX:
+            roi, source = candidate, FocusSource.AF
+
     if roi is None:
         candidate = _best_tile(gray_small, scale, shape)
         if candidate and min(candidate[2], candidate[3]) >= MIN_ROI_PX:
@@ -585,8 +666,14 @@ def analyze_focus(
     if roi is None:
         roi, source = (0, 0, full_w, full_h), FocusSource.FRAME
 
+    # 노이즈 차감용 프레임 σ². ROI·배경은 원본 해상도에서 재므로 원본
+    # 해상도의 σ를 씁니다. 축소본(frame_gray)은 축소가 노이즈를 평균해
+    # σ가 전혀 달라지므로 그쪽은 따로 잽니다.
+    # noise_compensation=False면 v3과 동일한 측정입니다(차감 없음).
+    noise_var = frame_noise_sigma(gray_full) ** 2 if noise_compensation else 0.0
+
     x, y, w, h = roi
-    laplacian_raw, tenengrad_raw = measure_patch(gray_full[y:y + h, x:x + w])
+    laplacian_raw, tenengrad_raw = measure_patch(gray_full[y:y + h, x:x + w], noise_var)
 
     laplacian = _saturate(laplacian_raw, laplacian_k)
     tenengrad = _saturate(tenengrad_raw, tenengrad_k)
@@ -599,7 +686,7 @@ def analyze_focus(
         bg_box = _best_tile(gray_small, scale, shape, exclude=face_box_small)
         if bg_box and min(bg_box[2], bg_box[3]) >= MIN_ROI_PX:
             background_sharpness = _measure_sharpness(
-                gray_full, bg_box, laplacian_k, tenengrad_k
+                gray_full, bg_box, laplacian_k, tenengrad_k, noise_var
             )
 
     # ROI와 무관한 기준선. 반드시 FRAME_LONG_EDGE 스케일에서 재야 합니다.
@@ -608,7 +695,10 @@ def analyze_focus(
         frame_gray = gray_small
     else:
         frame_gray = resize_long_edge(gray_full, FRAME_LONG_EDGE)
-    frame_lap_raw, frame_ten_raw = measure_patch(frame_gray)
+    frame_lap_raw, frame_ten_raw = measure_patch(
+        frame_gray,
+        frame_noise_sigma(frame_gray) ** 2 if noise_compensation else 0.0,
+    )
     frame_sharpness = 0.4 * _saturate(frame_lap_raw, FRAME_LAPLACIAN_K) + 0.6 * _saturate(
         frame_ten_raw, FRAME_TENENGRAD_K
     )

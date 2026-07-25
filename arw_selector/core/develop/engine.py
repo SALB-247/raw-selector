@@ -534,18 +534,11 @@ _MIN_NOISE_SIGMA = 0.4
 """
 
 
-def estimate_noise_sigma(luma: np.ndarray) -> float:
-    """평탄 영역의 노이즈 표준편차를 추정합니다.
-
-    같은 슬라이더 값이 ISO 100에서도 ISO 6400에서도 "적당히"가 되려면
-    필터 강도가 그 사진의 실제 노이즈에 비례해야 합니다. 고정 강도로
-    두면 저감도에서는 과하게 뭉개고 고감도에서는 손도 못 댑니다.
+def _high_frequency_sigma(luma: np.ndarray) -> float:
+    """백색(고주파) 노이즈 σ — Immerkær 마스크 MAD.
 
     평균이 아니라 중앙절대편차를 쓰므로 피사체의 엣지·텍스처에 끌려가지
     않습니다. 7화소 간격으로만 훑어 32MP에서도 0.05초입니다.
-
-    실측(디모자이크 직후): R6M3 ISO6400 = 2.47, R6m2 ISO800 = 0.99,
-    a1 ISO800 = 0.99, S1R = 5.44.
     """
     response = cv2.filter2D(luma.astype(np.float32), cv2.CV_32F, _NOISE_MASK)
     sample = np.abs(response[::7, ::7])
@@ -554,7 +547,77 @@ def estimate_noise_sigma(luma: np.ndarray) -> float:
     return max(_MIN_NOISE_SIGMA, float(1.4826 * np.median(sample) / 6.0))
 
 
-def _reduce_color_noise(ycc: np.ndarray, amount: int, radius: int) -> None:
+def _total_sigma_floor(luma: np.ndarray, tile: int = 96) -> float:
+    """저주파 성분까지 포함한 총 노이즈 σ의 근사 — 타일 잔차 MAD 하위 20%.
+
+    평탄한 타일이 분포의 바닥에 깔리므로 하위 백분위가 노이즈 바닥을
+    근사합니다. **단독으로 쓰면 안 됩니다** — 평탄이 없는 질감뿐인
+    사진에서 2배까지 과대합니다(실측). 아래 보정비 산정에만 씁니다.
+    """
+    h, w = luma.shape[:2]
+    if h < tile or w < tile:
+        return 0.0
+    mads = []
+    ys = np.linspace(0, h - tile, min(10, max(2, h // tile))).astype(int)
+    xs = np.linspace(0, w - tile, min(10, max(2, w // tile))).astype(int)
+    for y in ys:
+        for x in xs:
+            patch = luma[y:y + tile, x:x + tile].astype(np.float32)
+            mean = float(patch.mean())
+            if not 12 <= mean <= 243:   # 클리핑 타일은 σ가 눌려 보입니다
+                continue
+            residual = patch - cv2.GaussianBlur(patch, (0, 0), 3.0)
+            mads.append(float(1.4826 * np.median(
+                np.abs(residual - np.median(residual)))))
+    if not mads:
+        return 0.0
+    return float(np.percentile(mads, 20.0))
+
+
+def estimate_noise_sigma(luma: np.ndarray) -> float:
+    """평탄 영역의 노이즈 표준편차를 추정합니다.
+
+    같은 슬라이더 값이 ISO 100에서도 ISO 6400에서도 "적당히"가 되려면
+    필터 강도가 그 사진의 실제 노이즈에 비례해야 합니다. 고정 강도로
+    두면 저감도에서는 과하게 뭉개고 고감도에서는 손도 못 댑니다.
+
+    고주파 추정(백색 가정)만으로는 부족합니다. 디모자이크 노이즈는 보간
+    때문에 공간 상관이 있어 고주파만 보면 총 σ를 놓칩니다 — 실측으로
+    참값의 1/1.53~1/1.22 (노이즈가 클수록 심함). 그래서 고감도일수록
+    같은 슬라이더가 상대적으로 약해졌습니다("노이즈 감소가 너무 약해").
+
+    타일 잔차로 총 σ 바닥을 따로 재고, 그 **비율만** 보정에 씁니다
+    (1.0~1.4로 제한 — 총 σ 추정은 질감뿐인 사진에서 과대하므로 그대로
+    믿으면 안 됩니다). 실측 오차: 보정 전 -22~-35% → 보정 후 ±14%.
+
+        파일               참값   보정 전   보정 후
+        A6700 ISO3200      4.92    3.21     4.49
+        A6700 ISO3200 b    3.81    2.97     4.16
+        R6M3 ISO6400       3.53    2.72     3.88
+        R6M2 ISO800        1.26    0.99     1.39
+        S1R                5.75    4.69     6.57
+
+    백색 노이즈(상관 없음)에서는 비율이 1.0으로 잘려 예전과 같습니다.
+    """
+    hf = _high_frequency_sigma(luma)
+    total = _total_sigma_floor(luma)
+    if total <= 0.0:
+        return hf
+    correction = min(max(total / hf, 1.0), 1.4)
+    return hf * correction
+
+
+SHADOW_CHROMA_LUMA = 70.0
+"""이 휘도 아래를 '어두운 곳'으로 봅니다 (0에서 1로 선형 램프).
+
+색 노이즈는 섀도 증폭 때문에 어두운 곳에서 특히 심한데, 균일 블러를
+거기에 맞추면 밝은 곳의 진짜 색 경계까지 번집니다. 램프가 부드러워서
+경계선이 보이지 않습니다.
+"""
+
+
+def _reduce_color_noise(ycc: np.ndarray, amount: int, radius: int,
+                        shadow: int = 0) -> None:
     """색 노이즈를 지웁니다 (제자리 수정).
 
     색 노이즈는 화소 단위 알갱이가 아니라 수십 화소에 걸친 얼룩입니다.
@@ -564,6 +627,11 @@ def _reduce_color_noise(ycc: np.ndarray, amount: int, radius: int) -> None:
     줄여 놓고 지운 뒤 다시 키우면 큰 얼룩을 1/16 비용으로 잡습니다.
     휘도 채널은 건드리지 않으므로 디테일 손실이 원리적으로 0입니다
     (실측: 엣지 그래디언트 97.720 → 97.724, 측정 오차 범위).
+
+    shadow(0~100)를 주면 어두운 곳(SHADOW_CHROMA_LUMA 미만)에만 3배 반경
+    블러를 섞습니다. 실측(콘서트 3파일): 어두운 곳 색 노이즈 잔여
+    25~29% → 6~15%, 밝은 곳 잔여율·색 경계는 완전 동일. 0이면 예전과
+    같은 동작입니다.
     """
     height, width = ycc.shape[:2]
     # 원본 해상도 기준 흐림 반경. 조정량과 반경을 곱해 하나의 연속값으로
@@ -576,25 +644,57 @@ def _reduce_color_noise(ycc: np.ndarray, amount: int, radius: int) -> None:
     small_sigma = max(0.3, blur / scale)
     small_size = (max(1, width // scale), max(1, height // scale))
 
+    shadow_weight = None
+    if shadow > 0:
+        # 가중치는 축소 공간에서 만듭니다 — 채널 블렌드도 거기서 하므로
+        # 비용이 사실상 공짜입니다. 휘도를 살짝 흐려 경계를 부드럽게.
+        luma_small = cv2.resize(ycc[:, :, 0], small_size,
+                                interpolation=cv2.INTER_AREA)
+        luma_small = cv2.GaussianBlur(luma_small, (0, 0), 4.0)
+        shadow_weight = np.clip(
+            (SHADOW_CHROMA_LUMA - luma_small) / SHADOW_CHROMA_LUMA, 0.0, 1.0
+        ) * (shadow / 100.0)
+
     for channel in (1, 2):
         plane = ycc[:, :, channel]
         if scale > 1:
             small = cv2.resize(plane, small_size, interpolation=cv2.INTER_AREA)
         else:
             small = plane
-        small = cv2.GaussianBlur(small, (0, 0), small_sigma)
+        blurred = cv2.GaussianBlur(small, (0, 0), small_sigma)
+        if shadow_weight is not None:
+            heavy = cv2.GaussianBlur(small, (0, 0), small_sigma * 3.0)
+            blurred = blurred * (1.0 - shadow_weight) + heavy * shadow_weight
         if scale > 1:
-            small = cv2.resize(small, (width, height), interpolation=cv2.INTER_LINEAR)
-        ycc[:, :, channel] = small
+            blurred = cv2.resize(blurred, (width, height),
+                                 interpolation=cv2.INTER_LINEAR)
+        ycc[:, :, channel] = blurred
 
 
-def _denoise_luma_plane(luma: np.ndarray, algorithm, strength: float, sigma: float) -> np.ndarray:
+_PASS_H_FACTOR = {1: 1.0, 2: 0.556, 3: 0.465, 4: 0.432}
+"""패스 수에 따른 h 배율. 같은 슬라이더가 비슷한 감소량을 내게 합니다.
+
+여러 번 돌리면 패스당 h가 작아도 같은 만큼 지워집니다. 실측(A6700
+ISO3200·R6M3 ISO6400, 평탄부 70% 감소 지점에서 1패스 대비 필요한 h의
+기하평균): 2패스 0.556, 3패스 0.465, 4패스 0.432. 파일에 따라 ±0.15쯤
+벌어지지만 — h/σ 곡선 자체가 한 기종 실측 캘리브레이션이므로 그 오차
+범위 안입니다. 약한 감소 구간에서는 다패스가 같은 슬라이더에서 조금 더
+지우는 쪽으로 치우치는데, 그 구간은 디테일 보존이 어차피 100%라 무해합니다.
+"""
+
+
+def _denoise_luma_plane(luma: np.ndarray, algorithm, strength: float, sigma: float,
+                        passes: int = 1) -> np.ndarray:
     """휘도 한 채널을 방식에 따라 지웁니다. 입출력 모두 float 0~255.
 
     OpenCV의 비국소 평균은 8비트만 받습니다. 그런데 이 시점 값은 14비트
     RAW에서 온 소수점까지 살아 있는 float라, 8비트로 바꿔 돌려주면 계조가
     한 단계 뭉갭니다. 결과가 아니라 **변화량**만 8비트에서 가져와 float
     원본에 더해 정밀도를 지킵니다.
+
+    passes(1~4)는 비국소 평균 계열에만 적용됩니다. 같은 감소량이면 약하게
+    여러 번이 디테일을 훨씬 덜 다칩니다 — DetailSettings.noise_passes의
+    실측표 참고. 양방향 필터는 반복해도 이득이 없어 무시합니다.
     """
     as_uint8 = np.clip(luma, 0.0, 255.0).astype(np.uint8)
 
@@ -606,19 +706,26 @@ def _denoise_luma_plane(luma: np.ndarray, algorithm, strength: float, sigma: flo
         space_sigma = 1.0 + 2.5 * strength
         color_sigma = float(sigma * (1.0 + 4.0 * strength))
         denoised = cv2.bilateralFilter(as_uint8, 0, color_sigma, space_sigma)
-    else:
-        # h는 "이만큼의 차이는 노이즈로 본다"는 뜻이라 사진의 실제 σ에
-        # 비례해야 합니다. 실측(R6M3 ISO6400, σ=2.41)한 h/σ 대 노이즈 감소·
-        # 디테일 보존: 0.8σ에서 11%·100%, 1.2σ에서 57%·99%, 1.6σ에서
-        # 74%·91%, 1.8σ에서 77%·84%, 2.0σ부터 디테일이 무너집니다(75%).
-        # 슬라이더 전 구간이 쓸모 있도록 0.7σ~1.8σ에 펼칩니다.
-        h = float(sigma * (0.7 + 1.1 * strength))
-        template, search = (
-            (7, 21) if algorithm is NoiseAlgorithm.NLMEANS_HQ else (5, 11)
-        )
-        denoised = cv2.fastNlMeansDenoising(as_uint8, None, h, template, search)
+        return luma + (denoised.astype(np.float32) - as_uint8.astype(np.float32))
 
-    return luma + (denoised.astype(np.float32) - as_uint8.astype(np.float32))
+    # h는 "이만큼의 차이는 노이즈로 본다"는 뜻이라 사진의 실제 σ에
+    # 비례해야 합니다. 실측(R6M3 ISO6400)한 h/σ 대 노이즈 감소·디테일
+    # 보존: 0.8σ에서 11%·100%, 1.2σ에서 57%·99%, 1.6σ에서 74%·91%,
+    # 1.8σ에서 77%·84%, 2.0σ부터 디테일이 무너집니다(75%).
+    # 슬라이더 전 구간이 쓸모 있도록 0.7σ~1.8σ에 펼칩니다.
+    # (σ̂에 상관 보정이 들어가면서 실제 h는 예전보다 1.0~1.4배 커졌습니다 —
+    #  고감도에서 슬라이더가 약해지던 것을 바로잡은 것입니다.)
+    passes = max(1, min(4, int(passes)))
+    h = float(sigma * (0.7 + 1.1 * strength)) * _PASS_H_FACTOR[passes]
+    template, search = (
+        (7, 21) if algorithm is NoiseAlgorithm.NLMEANS_HQ else (5, 11)
+    )
+    out = luma
+    for _ in range(passes):
+        as_uint8 = np.clip(out, 0.0, 255.0).astype(np.uint8)
+        denoised = cv2.fastNlMeansDenoising(as_uint8, None, h, template, search)
+        out = out + (denoised.astype(np.float32) - as_uint8.astype(np.float32))
+    return out
 
 
 def _protect_detail(original: np.ndarray, denoised: np.ndarray,
@@ -749,7 +856,10 @@ def apply_noise_reduction(
     # 색을 먼저 합니다. 휘도를 먼저 지우면 색 얼룩이 그대로 남은 채
     # 디테일 보존 판정을 하게 되어, 얼룩을 무늬로 착각합니다.
     if detail.color_noise_reduction:
-        _reduce_color_noise(ycc, detail.color_noise_reduction, detail.color_noise_radius)
+        _reduce_color_noise(
+            ycc, detail.color_noise_reduction, detail.color_noise_radius,
+            getattr(detail, "color_noise_shadow", 0),
+        )
 
     if detail.noise_reduction:
         luma = ycc[:, :, 0]
@@ -774,7 +884,8 @@ def apply_noise_reduction(
         # 약해졌다"로 보입니다.
         sigma = estimate_noise_sigma(luma)
         denoised = _denoise_luma_plane(
-            patch, detail.noise_algorithm, detail.noise_reduction / 100.0, sigma
+            patch, detail.noise_algorithm, detail.noise_reduction / 100.0, sigma,
+            getattr(detail, "noise_passes", 1),
         )
         if detail.noise_detail:
             denoised = _protect_detail(patch, denoised, detail.noise_detail, sigma)

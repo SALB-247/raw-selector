@@ -23,6 +23,7 @@ def _roi_name(source: str) -> str:
     return {
         FocusSource.EYE.value: tr("eye area"),
         FocusSource.FACE.value: tr("face area"),
+        FocusSource.AF.value: tr("camera AF point"),
         FocusSource.TILE.value: tr("estimated subject"),
         FocusSource.FRAME.value: tr("whole frame"),
     }.get(source, source)

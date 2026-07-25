@@ -397,6 +397,32 @@ class AnalysisCache:
 
         return hits
 
+    def count_ready(self, paths: list[Path]) -> int:
+        """이 경로들 중 캐시를 그대로 쓸 수 있는 장수.
+
+        분석 시작 다이얼로그가 "몇 장은 즉시, 몇 장은 새로 분석"을 보여 주는
+        데 씁니다. get_many와 같은 판정(파라미터 지문 + 파일 지문)을 쓰되
+        payload를 역직렬화하지 않아 수천 장에서도 즉답입니다.
+        """
+        if self._conn is None or not paths:
+            return 0
+        wanted = {str(p): p for p in paths}
+        ready = 0
+        keys = list(wanted)
+        for start in range(0, len(keys), 500):
+            chunk = keys[start:start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"SELECT path, mtime, size FROM analysis "
+                f"WHERE params_key = ? AND path IN ({placeholders})",
+                (self.params_key, *chunk),
+            ).fetchall()
+            for path_str, mtime, size in rows:
+                current = self.fingerprint(wanted[path_str])
+                if current is not None and current[0] == mtime and current[1] == size:
+                    ready += 1
+        return ready
+
     def put_many(self, records: list[ImageRecord]) -> None:
         if self._conn is None or not records:
             return
