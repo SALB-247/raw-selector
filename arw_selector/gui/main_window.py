@@ -514,8 +514,17 @@ class MainWindow(QMainWindow):
 
         self.config.recursive = self.recursive_check.isChecked()
 
+        # 어느 경로로 들어왔는지 남깁니다. "분석 버튼을 눌렀는데 옵션 창이
+        # 안 뜬다"는 신고가 왔을 때, 창이 생략된 것인지(파일을 직접 고른
+        # 흐름) 창이 떴는데 안 보인 것인지를 로그만으로 가르기 위해서입니다.
+        log.info(
+            "분석 요청: 옵션 창 %s, 대상 %s",
+            "표시" if show_dialog else "생략",
+            f"고른 파일 {len(self._explicit_paths)}개"
+            if self._explicit_paths else f"폴더 {self.folder}",
+        )
         # 무엇을 몇 장 분석하는지 먼저 보여 주고 옵션을 고르게 합니다.
-        # 폴더를 열 때의 자동 분석(show_dialog=False)은 지금처럼 바로 시작합니다.
+        # 파일을 직접 고른 흐름(show_dialog=False)은 지금처럼 바로 시작합니다.
         if show_dialog and not self._confirm_analysis():
             return
 
