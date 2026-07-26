@@ -98,3 +98,22 @@ def uninstall(app: QCoreApplication) -> None:
 
 def current_language() -> str:
     return "en" if _translator is None else "ko"
+
+
+def format_duration(seconds: float) -> str:
+    """A rough duration to read, not a stopwatch.
+
+    Seconds alone give no feel for a large batch, so this steps up to
+    minutes and hours. Anything under two minutes reads as "about 1m" —
+    rounding 90 seconds down to "about 1m" is honest at this precision,
+    while "about 2m" is not.
+    """
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return tr("about {seconds}s").format(seconds=f"{seconds:.0f}")
+    if seconds < 3600:
+        minutes = seconds / 60
+        if minutes < 2:
+            return tr("about 1m")
+        return tr("about {minutes}m").format(minutes=f"{minutes:.0f}")
+    return tr("about {hours}h").format(hours=f"{seconds / 3600:.1f}")

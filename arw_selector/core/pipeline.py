@@ -301,15 +301,8 @@ def estimate_analysis_seconds(count: int, workers: int | None = None) -> float:
             + count * SECONDS_PER_PHOTO_PER_WORKER / max(1, workers))
 
 
-def format_duration(seconds: float) -> str:
-    """사람이 읽는 소요 시간. 초만 찍으면 큰 배치에서 감이 안 옵니다."""
-    seconds = max(0.0, float(seconds))
-    if seconds < 60:
-        return f"약 {seconds:.0f}초"
-    if seconds < 3600:
-        minutes = seconds / 60
-        return f"약 {minutes:.0f}분" if minutes >= 2 else "약 1분"
-    return f"약 {seconds / 3600:.1f}시간"
+# 소요 시간을 사람이 읽는 문구로 바꾸는 일은 gui.i18n에 있습니다. 여기서
+# 만들면 번역을 못 걸어 영어 UI에 한국어가 섞입니다(실제로 그랬습니다).
 
 
 # ---------------------------------------------------------------- 배치 실행

@@ -23,8 +23,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.config import AnalyzeConfig
-from ..core.pipeline import estimate_analysis_seconds, format_duration
-from .i18n import tr
+from ..core.pipeline import estimate_analysis_seconds
+from .i18n import format_duration, tr
 
 
 @dataclass(frozen=True)

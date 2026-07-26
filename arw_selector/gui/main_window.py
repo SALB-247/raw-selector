@@ -40,7 +40,7 @@ from ..core.cache import cache_stats, clear_cache, default_cache_path
 from ..core.config import Config
 from ..core.export_options import ExportOptions
 from ..core.ordering import SortMode, sort_records
-from ..core.pipeline import estimate_analysis_seconds, format_duration
+from ..core.pipeline import estimate_analysis_seconds
 from ..core.raw_io import RAW_FILE_FILTER
 from ..core.export_queue import ExportQueue
 from ..core.session import SelectionSession
@@ -57,7 +57,7 @@ from .flow_layout import FlowLayout
 from .grid_view import ThumbnailGrid
 from . import i18n
 from .attention import ButtonPulse
-from .i18n import tr
+from .i18n import format_duration, tr
 from .loupe import LoupeDialog
 from .ordering_text import sort_label
 from .score_card import ScoreCard
@@ -293,7 +293,9 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.open_files_button)
 
         self.analyze_button = QPushButton(tr("Analyse"))
-        self.analyze_button.clicked.connect(self.start_analysis)
+        # clicked carries a `checked` bool. Bound straight to the slot it
+        # lands on the first parameter, so the dialog gets skipped.
+        self.analyze_button.clicked.connect(lambda: self.start_analysis())
         self.analyze_button.setEnabled(False)
         bar.addWidget(self.analyze_button)
 
@@ -506,7 +508,7 @@ class MainWindow(QMainWindow):
         # 또 확인창으로 되묻지 않습니다. 다이얼로그는 툴바의 분석 버튼용입니다.
         self.start_analysis(show_dialog=False)
 
-    def start_analysis(self, show_dialog: bool = True) -> None:
+    def start_analysis(self, *, show_dialog: bool = True) -> None:
         if self.folder is None or (self.analysis_worker and self.analysis_worker.isRunning()):
             return
 
