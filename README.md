@@ -9,7 +9,8 @@ formats). It also judges and develops **JPEG and HEIF** directly, for people who
 don't shoot RAW.
 
 Select, develop (tone/colour/masks/watermark), and export all work from one
-window. See [CHANGELOG.md](CHANGELOG.md) for what changed per release and what to
+window. See **[docs/HOWTO.md](docs/HOWTO.md)** for the full manual with
+screenshots. See [CHANGELOG.md](CHANGELOG.md) for what changed per release and what to
 do when upgrading, and **[SUPPORTED.md](SUPPORTED.md)** for the full list of
 decodable formats, colour-calibrated cameras, and lens-correction profiles.
 
