@@ -9,10 +9,11 @@ Every screen, button and shortcut, in workflow order, with screenshots.
 
 ![The main window](docs/screenshots/main-window.png)
 
-Shot on a Sony A6700 (ARW), but the same pipeline works for other bodies —
-anything LibRaw 0.22 opens (**CR3 / CR2 / NEF / RAF / ORF / RW2 / DNG**, ~20
-formats). It also judges and develops **JPEG and HEIF** directly, for people who
-don't shoot RAW.
+It reads **anything LibRaw 0.22 opens** (ARW / CR3 / CR2 / NEF / RAF / ORF /
+RW2 / DNG, ~20 formats) and judges and develops **JPEG and HEIF** directly, for
+people who don't shoot RAW. Development and measurement were done on Sony,
+Canon and Nikon bodies — Sony A6700, Canon R3/R5/R6/1DX Mark II/5D Mark III,
+Nikon Z9/Z50 II — including the camera AF metadata each maker writes.
 
 Select, develop (tone/colour/masks/watermark), and export all work from one
 window. See [CHANGELOG.md](CHANGELOG.md) for what changed per release and what to
@@ -22,9 +23,9 @@ decodable formats, colour-calibrated cameras, and lens-correction profiles.
 ## Why it's fast
 
 Full-demosaicing 4,000 frames with rawpy takes 1–2 seconds each — over 1.5
-hours. Instead it pulls the **full-size embedded JPEG preview** (6192×4128 on the
-A6700). That resolution is plenty for a focus decision, and it finishes in ~30ms
-per frame.
+hours. Instead it pulls the **full-size embedded JPEG preview** that the camera
+already wrote (6192×4128 on an A6700, 8256×5504 on a Z9). That resolution is
+plenty for a focus decision, and it finishes in ~30ms per frame.
 
 Measured (32 cores, 31 workers):
 
