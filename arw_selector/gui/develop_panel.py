@@ -111,10 +111,15 @@ _CURVE_BUTTON_STYLE = (
 
 
 def _curve_channel_style(color: str) -> str:
-    """채널 버튼(밝기/R/G/B) — 선택되면 그 채널 색으로 채웁니다."""
+    """채널 버튼(밝기/R/G/B) — 선택되면 그 채널 색으로 채웁니다.
+
+    패딩을 명시하는 이유: 안 쓰면 전역 BUTTON의 8px 16px이 그대로 걸리고,
+    34px 고정 폭에서는 내용 폭이 0이 되어 글자가 통째로 잘립니다.
+    """
     return (
         "QPushButton { background: #2f2f35; color: #aaa; border: 1px solid #444;"
-        " border-radius: 3px; font-size: 11px; font-weight: bold; }"
+        " border-radius: 3px; font-size: 11px; font-weight: bold;"
+        " padding: 1px 2px; }"
         "QPushButton:hover { background: #3a3a42; }"
         f"QPushButton:checked {{ background: {color}; color: #16161a;"
         f" border-color: {color}; }}"
@@ -339,6 +344,10 @@ class DevelopPanel(QWidget):
     brush_mode_changed = Signal(bool)  # 브러시로 직접 칠하기 on/off
     brush_changed = Signal()           # 붓 크기·지우개 변경 (미리보기 원 갱신)
 
+    camera_match_requested = Signal()
+    """'카메라 JPEG에 맞추기' 버튼. 피팅에는 원본과 내장 JPEG이 필요한데
+    둘 다 루페가 들고 있으므로, 패널은 요청만 올립니다."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._loading = False
@@ -376,6 +385,13 @@ class DevelopPanel(QWidget):
         wrapper_layout = QVBoxLayout(preset_wrapper)
         wrapper_layout.setContentsMargins(8, 8, 8, 0)
         wrapper_layout.addWidget(self.preset_bar)
+
+        # 카메라 룩 매칭 — 노출·커브·채도에 걸치는 원클릭이라 특정 섹션이
+        # 아니라 프리셋 줄 곁에 둡니다. 접힌 섹션 안에 숨으면 못 찾습니다.
+        self.match_camera_button = QPushButton(tr("Match camera JPEG"))
+        self.match_camera_button.clicked.connect(self.camera_match_requested.emit)
+        wrapper_layout.addWidget(self.match_camera_button)
+        self._sync_match_camera_button(True)
         outer.addWidget(preset_wrapper)
 
         scroll = QScrollArea()
@@ -667,7 +683,8 @@ class DevelopPanel(QWidget):
         reset_curve.setFixedSize(28, 24)
         reset_curve.setToolTip(tr("Reset this channel's curve"))
         reset_curve.clicked.connect(self._reset_curve_channel)
-        reset_curve.setStyleSheet(_CURVE_BUTTON_STYLE)
+        # 클리핑 버튼과 달리 폭이 고정이라, 전역 패딩을 빼야 ↺가 보입니다
+        reset_curve.setStyleSheet(_CURVE_BUTTON_STYLE + theme.COMPACT_BUTTON)
         button_row.addWidget(reset_curve)
         section.add_layout(button_row)
 
@@ -802,6 +819,11 @@ class DevelopPanel(QWidget):
         self._noise_passes_row = passes_row
         self.noise_algorithm.currentIndexChanged.connect(self._sync_noise_passes)
         self._sync_noise_passes()
+        # 강한 감소를 1패스로 걸면 디테일이 무너집니다(실측: 감소 70%에서
+        # 엣지 보존 1패스 74% vs 2패스 97%, 80%는 1패스로 도달 불가).
+        # 사용자가 강도를 그 영역으로 올리면 패스를 2로 **보이게** 올립니다 —
+        # 몰래 바꾸면 화면=결과가 깨지고, 슬라이더로 되돌릴 수도 있습니다.
+        self.rows["detail.noise_reduction"].value_changed.connect(self._suggest_passes)
         self._add_row(section, "detail.noise_detail", tr("Detail preservation"), 0, 100, 50,
                       gradient="mono",
                       tooltip=tr("Restores the original where there is fine texture like\n"
@@ -849,6 +871,21 @@ class DevelopPanel(QWidget):
                                  " 85 — skin -33% / background detail -6% (default)\n"
                                  "100 — skin -34% / background detail -2%, twice as fast\n\n"
                                  "Ignored on photos with no face"))
+
+    #: 이 강도를 넘으면 1패스로는 디테일 손실이 커집니다 (settings.py의
+    #: noise_passes 실측표 참조 — 70%에서 보존율이 74%로 떨어짐).
+    PASS_PROMOTE_ABOVE = 70
+
+    def _suggest_passes(self, *_args) -> None:
+        """강한 감소로 올리면 패스를 2로 올려 줍니다 (되돌릴 수 있음)."""
+        if self._loading:
+            return
+        passes_row = self.rows.get("detail.noise_passes")
+        if passes_row is None or not self._noise_passes_row.isEnabled():
+            return
+        strength = self.rows["detail.noise_reduction"].value()
+        if strength > self.PASS_PROMOTE_ABOVE and passes_row.value() <= 1:
+            passes_row.set_value(2)
 
     def _sync_noise_passes(self, *_args) -> None:
         """패스 수는 비국소 평균 계열에만 적용됩니다 — 다른 방식에서는 잠급니다.
@@ -1517,6 +1554,9 @@ class DevelopPanel(QWidget):
         if not is_raw:
             self.optics_auto.setChecked(False)
         self.calibration_button.setEnabled(is_raw)
+        # 카메라 룩 매칭도 센서 기반입니다 — JPEG·HEIF는 파일 자체가 이미
+        # 카메라 렌더라 맞출 대상이 따로 없습니다.
+        self._sync_match_camera_button(is_raw)
 
         self.source_note.setText(
             "" if is_raw else tr(
@@ -1526,6 +1566,26 @@ class DevelopPanel(QWidget):
         )
         self.source_note.setVisible(not is_raw)
         self._refresh_calibration_label()
+
+    def _sync_match_camera_button(self, is_raw: bool) -> None:
+        """매칭 버튼의 활성 여부와 툴팁. 잠글 때는 이유를 툴팁으로 말합니다.
+
+        말없이 회색이면 고장으로 보입니다 — 자동 렌즈 보정에서 이미 겪은
+        일이라 여기서도 같은 규칙을 따릅니다.
+        """
+        self.match_camera_button.setEnabled(is_raw)
+        self.match_camera_button.setToolTip(
+            tr(
+                "Fits exposure, tone curve and saturation so the develop\n"
+                "starts close to this shot's embedded camera JPEG.\n"
+                "The fit lands on the sliders as ordinary values, so\n"
+                "everything stays editable. The camera's local tone mapping\n"
+                "cannot be copied by global controls, so small differences remain."
+            ) if is_raw else tr(
+                "JPEG and HEIF are already the camera's own rendering —\n"
+                "there is nothing to match against."
+            )
+        )
 
     def _refresh_calibration_label(self) -> None:
         """**지금 사진의 기종** 보정만 보여 줍니다.

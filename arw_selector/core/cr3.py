@@ -130,6 +130,18 @@ _ALIASES = {
     "EXIF FocalLength": ("Image FocalLength", "EXIF FocalLength"),
     "EXIF SubSecTimeOriginal": ("Image SubSecTimeOriginal", "EXIF SubSecTimeOriginal"),
     "Image Orientation": ("Image Orientation",),
+    # 환산 초점거리 계산용. 캐논은 FocalLengthIn35mmFilm을 안 써서
+    # FocalPlane 해상도로 센서 크기를 역산합니다 (raw_io._focal_35mm_from_tags).
+    "EXIF FocalLengthIn35mmFilm": (
+        "Image FocalLengthIn35mmFilm", "EXIF FocalLengthIn35mmFilm"),
+    "EXIF FocalPlaneXResolution": (
+        "Image FocalPlaneXResolution", "EXIF FocalPlaneXResolution"),
+    "EXIF FocalPlaneYResolution": (
+        "Image FocalPlaneYResolution", "EXIF FocalPlaneYResolution"),
+    "EXIF FocalPlaneResolutionUnit": (
+        "Image FocalPlaneResolutionUnit", "EXIF FocalPlaneResolutionUnit"),
+    "EXIF ExifImageWidth": ("Image ExifImageWidth", "EXIF ExifImageWidth"),
+    "EXIF ExifImageLength": ("Image ExifImageLength", "EXIF ExifImageLength"),
 }
 
 

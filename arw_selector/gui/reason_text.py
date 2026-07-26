@@ -53,6 +53,8 @@ def _template(key: str) -> str | None:
         scoring.REASON_BETTER_IN_GROUP: tr(
             "a shot {deficit:.0f} points better exists in this scene"),
         scoring.REASON_NOT_RAW: tr("{format} source — less latitude than RAW"),
+        scoring.REASON_AF_MISMATCH:
+            tr("main subject uncertain — camera focused on someone else"),
     }.get(key)
 
 

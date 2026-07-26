@@ -16,7 +16,7 @@ import time
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from . import focus as focus_module
 from .cache import AnalysisCache, default_cache_path
@@ -72,15 +72,17 @@ def analyze_file(
     try:
         preview = load_preview(path)
 
-        # 카메라 AF 위치 힌트 (선택). 프리뷰는 EXIF 방향이 이미 적용된
-        # 상태라, maker_meta가 방향까지 반영해 프리뷰 좌표로 돌려줍니다.
+        # 카메라 AF 위치. 프리뷰는 EXIF 방향이 이미 적용된 상태라, maker_meta가
+        # 방향까지 반영해 프리뷰 좌표로 돌려줍니다. **항상** 읽습니다 —
+        # af_face(AF↔주 피사체 불일치 신뢰도 신호)는 옵션이 아니라 기본
+        # 신호라서입니다. ROI로 쓰는 것(af_roi_hint)만 선택입니다.
+        # 메타를 못 읽는 파일(read_metadata 실패)은 방향도 모르므로 건너뜁니다.
         af_box = None
-        if config.af_roi_hint:
+        if metadata is not None:
             from .maker_meta import af_preview_box
 
-            orientation = metadata.orientation if metadata is not None else 1
             af_box = af_preview_box(
-                path, orientation, preview.shape[1], preview.shape[0]
+                path, metadata.orientation, preview.shape[1], preview.shape[0]
             )
 
         result = focus_module.analyze_focus(
@@ -89,6 +91,8 @@ def analyze_file(
             laplacian_k=config.laplacian_k,
             tenengrad_k=config.tenengrad_k,
             af_box=af_box,
+            use_af_roi=config.af_roi_hint,
+            center_priority=config.center_priority,
             noise_compensation=config.noise_compensation,
         )
         # 프리뷰가 메모리에 올라와 있는 지금 장면 지문과 썸네일을 같이 뜹니다.
@@ -127,9 +131,37 @@ def _worker(payload: tuple[str, AnalyzeConfig, str | None]) -> ImageRecord:
     return analyze_file(Path(path_str), config, Path(cache_dir) if cache_dir else None)
 
 
-#: 워커 하나가 쓰는 대략적인 메모리(MB). 파이썬·OpenCV·rawpy를 올린 값에
-#: 프리뷰(73MB)와 흑백 사본(24MB)을 더한 실측 근사치입니다.
-WORKER_MEMORY_MB = 350
+#: 워커 하나가 쓰는 최대 메모리(MB). 워커 수 산정의 분모입니다.
+#:
+#: 맥(M1 Pro) 실측 — 워커 프로세스의 ru_maxrss 최고 수위, 30~100장 배치
+#: (tools/research/research_worker_memory.py):
+#:
+#:   NEF Z50II 20.7MP    385MB   ARW A6700 25.6MP    448MB
+#:   CR3 R6M3  32.3MP    525MB   JPEG 45MP         1,347MB
+#:   HIF(HEIF) 25.6MP  1,225MB
+#:
+#: RAW는 프리뷰 화소에 비례합니다(≈65MB + 15MB/MP — 파이썬·OpenCV·rawpy를
+#: 올린 바닥 65MB 위에 프리뷰 BGR과 측정용 float 사본이 얹힙니다). JPEG은
+#: 원본을 통째로 디코드한 뒤 EXIF 방향을 읽으려 파일을 한 번 더 읽고 회전
+#: 사본까지 떠서 화소당 두 배, HEIF은 libheif 디코더 때문에 세 배입니다.
+#:
+#: 350은 가장 싼 경로(NEF 385MB)에도 못 미쳤습니다. 8GB 맥에서 HEIF 폴더를
+#: 열면 워커 4개가 4.3GB를 잡아(실측 4,261MB) 스왑이 걸립니다 — 총 RSS는
+#: 워커 수에 선형입니다(ARW 1/4/8워커 448 / 1,748 / 3,268MB). 그래서
+#: 지원하는 최악의 포맷을 기준으로 잡습니다.
+#:
+#: 대가는 RAW 폴더에서 워커가 줄어드는 것인데, 맥에서는 손해가 작습니다 —
+#: ARW 100장이 1워커 14.2초 / 3워커 8.9초 / 4워커 5.9초 / 8워커 6.8초로
+#: 4를 넘으면 더 빨라지지 않습니다(윈도 32코어의 12워커와 다릅니다).
+#: 그래서 **포맷을 보고 가릅니다** — resolve_workers에 분석할 목록을
+#: 넘기면 RAW 전용 배치는 550, JPEG·HEIF가 섞이면 1300을 씁니다. 목록이
+#: 없으면(ETA 추정 등) 안전하게 최악값을 씁니다.
+WORKER_MEMORY_MB = 1300
+
+#: RAW만 있는 배치의 워커 예산. 실측 최악은 CR3 32.3MP의 525MB이고,
+#: 더 큰 센서(60MP급)를 감안해 여유를 둔 값입니다. 이 앱의 주 용도가
+#: RAW 셀렉트라, 여기서 워커가 깎이면 체감 손해가 가장 큽니다.
+RAW_WORKER_MEMORY_MB = 550
 
 #: 이 지점을 넘으면 오히려 느려집니다.
 #:
@@ -202,13 +234,33 @@ def _available_memory_mb() -> int | None:
         return None
 
 
-def resolve_workers(requested: int | None) -> int:
+def worker_memory_mb(paths: Iterable[Path] | None = None) -> int:
+    """이 배치의 워커 1개가 잡을 메모리 예산(MB).
+
+    RAW만 있으면 550, JPEG·HEIF가 하나라도 섞이면 1300입니다 — 실측에서
+    JPEG(1,347MB)·HEIF(1,225MB)이 RAW(385~525MB)의 2~3배를 씁니다.
+    목록을 모르면 안전하게 최악값을 씁니다.
+    """
+    if paths is None:
+        return WORKER_MEMORY_MB
+    from .raw_io import is_raw
+
+    for path in paths:
+        if not is_raw(Path(path)):
+            return WORKER_MEMORY_MB
+    return RAW_WORKER_MEMORY_MB
+
+
+def resolve_workers(requested: int | None,
+                    paths: Iterable[Path] | None = None) -> int:
     """워커 수를 정합니다.
 
     코어 수만 보고 늘리면 저사양 PC에서 램이 모자라 스왑이 걸립니다.
     스왑이 시작되면 코어를 더 써도 오히려 느려집니다. 그래서 세 가지로
     묶습니다: 코어 수(한 코어는 UI/OS 몫), 쓸 수 있는 램, 그리고 실측상
     이득이 사라지는 지점.
+
+    paths를 주면 포맷에 맞는 메모리 예산을 씁니다(worker_memory_mb).
     """
     if requested and requested > 0:
         return requested
@@ -219,7 +271,7 @@ def resolve_workers(requested: int | None) -> int:
     available = _available_memory_mb()
     if available:
         # 절반만 씁니다. 나머지는 UI와 OS 몫입니다.
-        by_memory = int(available * 0.5 // WORKER_MEMORY_MB)
+        by_memory = int(available * 0.5 // worker_memory_mb(paths))
         workers = max(1, min(workers, by_memory))
     return workers
 
@@ -303,7 +355,7 @@ def analyze_paths(
         progress_cb(Progress(done, total, cached_count, failed, 0.0))
 
     if pending:
-        workers = resolve_workers(config.workers)
+        workers = resolve_workers(config.workers, pending)
         fresh: list[ImageRecord] = []
         log.info("%d장 분석 시작 (워커 %d개)", len(pending), workers)
 

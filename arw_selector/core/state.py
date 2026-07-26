@@ -86,6 +86,20 @@ def set_language(code: str | None) -> None:
     update_state(language=code or "")
 
 
+def camera_match_on_open() -> bool:
+    """보정창을 열 때 카메라 룩 매칭을 자동 적용할지. **기본은 꺼짐입니다.**
+
+    켜져 있어도 그 컷에 이미 보정이 있으면(중립이 아니면) 절대 건드리지
+    않습니다 — 자동 기능이 사용자의 편집을 덮으면 안 됩니다. 판단 자체는
+    보정창이 합니다(core는 화면 사정을 모릅니다).
+    """
+    return bool(load_state().get("camera_match_on_open", False))
+
+
+def set_camera_match_on_open(enabled: bool) -> None:
+    update_state(camera_match_on_open=bool(enabled))
+
+
 def update_check_enabled() -> bool:
     """업데이트 확인을 켜 두었는지. **기본은 꺼짐입니다.**
 

@@ -4,113 +4,113 @@
 <context>
     <name></name>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="55"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="58"/>
         <source>Analysis failed</source>
         <translation>분석 실패</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="56"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="59"/>
         <source>Sharpness</source>
         <translation>선명도</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="57"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="60"/>
         <source>Focus missed the face</source>
         <translation>얼굴 초점 빗나감</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="58"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="61"/>
         <source>Focus on the face</source>
         <translation>얼굴에 초점 맞음</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="59"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="62"/>
         <source>No face</source>
         <translation>얼굴 없음</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="60"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="63"/>
         <location filename="../../arw_selector/gui/settings_panel.py" line="419"/>
         <source>Face detected</source>
         <translation>얼굴 검출</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="61"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="64"/>
         <location filename="../../arw_selector/gui/settings_panel.py" line="427"/>
         <source>Face size</source>
         <translation>얼굴 크기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="62"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="65"/>
         <location filename="../../arw_selector/gui/settings_panel.py" line="424"/>
         <source>Eyes detected</source>
         <translation>눈 검출</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="63"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="66"/>
         <source>Eyes closed</source>
         <translation>눈 감김</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="64"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="67"/>
         <source>Eyes open</source>
         <translation>눈 뜸</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="65"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="68"/>
         <source>Eyes not measured</source>
         <translation>눈 못 잼</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="66"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="69"/>
         <location filename="../../arw_selector/gui/settings_panel.py" line="471"/>
         <source>Blown highlights</source>
         <translation>하이라이트 날아감</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="67"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="70"/>
         <location filename="../../arw_selector/gui/settings_panel.py" line="473"/>
         <source>Crushed shadows</source>
         <translation>섀도우 뭉개짐</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="68"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="71"/>
         <location filename="../../arw_selector/gui/settings_panel.py" line="476"/>
         <source>Lens cap / stray shutter</source>
         <translation>렌즈캡/오발 셔터</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="69"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="72"/>
         <source>Clamped to range</source>
         <translation>범위 제한</translation>
     </message>
     <message>
         <location filename="../../arw_selector/gui/reason_text.py" line="24"/>
-        <location filename="../../arw_selector/gui/score_card.py" line="75"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="78"/>
         <source>eye area</source>
         <translation>눈 영역</translation>
     </message>
     <message>
         <location filename="../../arw_selector/gui/reason_text.py" line="25"/>
-        <location filename="../../arw_selector/gui/score_card.py" line="76"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="79"/>
         <source>face area</source>
         <translation>얼굴 영역</translation>
     </message>
     <message>
         <location filename="../../arw_selector/gui/reason_text.py" line="26"/>
-        <location filename="../../arw_selector/gui/score_card.py" line="77"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="80"/>
         <source>camera AF point</source>
         <translation>카메라 AF 지점</translation>
     </message>
     <message>
         <location filename="../../arw_selector/gui/reason_text.py" line="27"/>
-        <location filename="../../arw_selector/gui/score_card.py" line="78"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="81"/>
         <source>estimated subject</source>
         <translation>피사체 추정</translation>
     </message>
     <message>
         <location filename="../../arw_selector/gui/reason_text.py" line="28"/>
-        <location filename="../../arw_selector/gui/score_card.py" line="79"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="82"/>
         <source>whole frame</source>
         <translation>전체 프레임</translation>
     </message>
@@ -180,52 +180,57 @@
         <translation>{format} 원본 — RAW보다 보정 여유가 적음</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="94"/>
+        <location filename="../../arw_selector/gui/reason_text.py" line="57"/>
+        <source>main subject uncertain — camera focused on someone else</source>
+        <translation>주 피사체 불확실 — 카메라는 다른 사람에 초점</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/score_card.py" line="97"/>
         <source>{roi_name} {roi:.0f} × trust {trust:.2f} + frame {frame:.0f} × {frame_weight:.2f}, ×{scale:g}</source>
         <translation>{roi_name} {roi:.0f} × 신뢰도 {trust:.2f} + 전체 {frame:.0f} × {frame_weight:.2f}, ×{scale:g}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="99"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="102"/>
         <source>background {background:.0f} &gt; face {face:.0f}</source>
         <translation>배경 {background:.0f} &gt; 얼굴 {face:.0f}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="101"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="104"/>
         <source>face {area:.2f}% of {threshold:.1f}% → ×{weight:.2f}</source>
         <translation>얼굴 {area:.2f}% / 기준 {threshold:.1f}% → 배율 {weight:.2f}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="104"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="107"/>
         <source>EAR {ear:.2f} &lt; threshold {threshold:.2f}</source>
         <translation>EAR {ear:.2f} &lt; 임계 {threshold:.2f}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="106"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="109"/>
         <source>EAR {ear:.2f} ≥ threshold {threshold:.2f}</source>
         <translation>EAR {ear:.2f} ≥ 임계 {threshold:.2f}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="108"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="111"/>
         <source>{clipped:.1f}% (allowed {allowed:.1f}%)</source>
         <translation>{clipped:.1f}% (허용 {allowed:.1f}%)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="110"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="113"/>
         <source>mean brightness {luma:.0f}</source>
         <translation>평균 밝기 {luma:.0f}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="112"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="115"/>
         <source>{total:.1f} clamped into 0–100</source>
         <translation>합계 {total:.1f} → 0~100으로 자름</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="167"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="181"/>
         <source>score {score:.1f}</source>
         <translation>점수 {score:.1f}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/score_card.py" line="181"/>
+        <location filename="../../arw_selector/gui/score_card.py" line="195"/>
         <source>Total</source>
         <translation>합계</translation>
     </message>
@@ -354,14 +359,15 @@ ARW·CR3·NEF·RAF·ORF·RW2·DNG 등 RAW 포맷을 모두 엽니다.</translati
     </message>
     <message>
         <location filename="../../arw_selector/gui/main_window.py" line="310"/>
-        <location filename="../../arw_selector/gui/main_window.py" line="760"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="761"/>
         <source>Criteria ▸</source>
         <translation>판정 기준 ▸</translation>
     </message>
     <message>
         <location filename="../../arw_selector/gui/main_window.py" line="315"/>
         <location filename="../../arw_selector/gui/main_window.py" line="348"/>
-        <location filename="../../arw_selector/gui/main_window.py" line="958"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="960"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="117"/>
         <source>Develop</source>
         <translation>보정</translation>
     </message>
@@ -386,7 +392,7 @@ Gather across folders and export in one go</source>
     </message>
     <message>
         <location filename="../../arw_selector/gui/main_window.py" line="333"/>
-        <location filename="../../arw_selector/gui/main_window.py" line="966"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="968"/>
         <source>Queue ▸</source>
         <translation>대기열 ▸</translation>
     </message>
@@ -411,500 +417,508 @@ Gather across folders and export in one go</source>
         <translation>더블클릭하면 RAW를 디모자이크해 정확한 색·계조로 보정합니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="441"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="457"/>
         <source>Reset all</source>
         <translation>전체 초기화</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="577"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="593"/>
         <source>Basic</source>
         <translation>기본</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="583"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="873"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="599"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="890"/>
         <source>Temperature</source>
         <translation>색온도</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="586"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="602"/>
         <source>Absolute value based on the capture colour temperature. Lower it for cooler, raise it for warmer</source>
         <translation>촬영 색온도 기준 절대값. 낮추면 차갑게, 높이면 따뜻하게</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="591"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="607"/>
         <source>Tint</source>
         <translation>색조</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="592"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="608"/>
         <source>Positive is magenta, negative is green</source>
         <translation>양수는 마젠타, 음수는 초록</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="593"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="869"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="609"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="886"/>
+        <location filename="../../arw_selector/gui/shot_details.py" line="85"/>
         <source>Exposure</source>
         <translation>노출</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="595"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="611"/>
         <source>Multiplies the whole image to brighten it. Raising it blows the highlights first</source>
         <translation>전체를 곱해 밝힙니다. 올리면 하이라이트부터 날아갑니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="597"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="613"/>
         <source>Brightness</source>
         <translation>밝기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="599"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="615"/>
         <source>Adjusts only the midtones, leaving whites and blacks alone.
 Better than exposure for lifting just the face of a backlit subject</source>
         <translation>흰색·검정은 두고 중간톤만 조정합니다.
 역광 인물의 얼굴만 살릴 때 노출보다 이쪽이 맞습니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="601"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="870"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="617"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="887"/>
         <source>Contrast</source>
         <translation>대비</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="602"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="688"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="871"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1330"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="618"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="705"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="888"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1347"/>
         <source>Highlights</source>
         <translation>하이라이트</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="604"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="692"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="872"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1330"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="620"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="709"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="889"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1347"/>
         <source>Shadows</source>
         <translation>그림자</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="605"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="621"/>
         <source>Whites</source>
         <translation>흰색 계열</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="606"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="622"/>
         <source>Blacks</source>
         <translation>검정 계열</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="607"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="875"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="623"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="892"/>
         <source>Texture</source>
         <translation>텍스처</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="608"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="624"/>
         <source>Mid-frequency detail</source>
         <translation>중간 주파수 디테일</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="609"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="876"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="625"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="893"/>
         <source>Clarity</source>
         <translation>명료도</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="610"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="626"/>
         <source>Local contrast — the large radius makes it the slowest to render</source>
         <translation>국소 대비 — 반경이 커서 렌더가 가장 느립니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="611"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="627"/>
         <source>Dehaze</source>
         <translation>디헤이즈</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="612"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="628"/>
         <source>Vibrance</source>
         <translation>생동감</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="613"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="629"/>
         <source>Touches already-saturated colours less (protects skin tones)</source>
         <translation>이미 진한 색은 덜 건드린다 (피부색 보호)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="614"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="874"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1297"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="630"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="891"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1314"/>
         <source>Saturation</source>
         <translation>채도</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="618"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="634"/>
         <source>Curve</source>
         <translation>곡선</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="244"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="628"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="249"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="644"/>
         <source>Red</source>
         <translation>빨강</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="214"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="219"/>
         <source>Free</source>
         <translation>자유</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="215"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="220"/>
         <source>Original ratio</source>
         <translation>원본 비율</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="221"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="226"/>
         <source>↖ Top-left</source>
         <translation>↖ 좌상단</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="222"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="227"/>
         <source>↑ Top-center</source>
         <translation>↑ 상단 가운데</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="223"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="228"/>
         <source>↗ Top-right</source>
         <translation>↗ 우상단</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="224"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="229"/>
         <source>← Middle-left</source>
         <translation>← 좌측 가운데</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="225"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="230"/>
         <source>· Center</source>
         <translation>· 정가운데</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="226"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="231"/>
         <source>→ Middle-right</source>
         <translation>→ 우측 가운데</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="227"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="232"/>
         <source>↙ Bottom-left</source>
         <translation>↙ 좌하단</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="228"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="233"/>
         <source>↓ Bottom-center</source>
         <translation>↓ 하단 가운데</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="229"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="234"/>
         <source>↘ Bottom-right</source>
         <translation>↘ 우하단</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="235"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="240"/>
         <source>Standard (non-local means)</source>
         <translation>표준 (비국소 평균)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="236"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="241"/>
         <source>High quality (non-local means, slow)</source>
         <translation>고품질 (비국소 평균, 느림)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="237"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="242"/>
         <source>Fast (bilateral filter)</source>
         <translation>빠름 (양방향 필터)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="238"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="243"/>
         <source>Legacy (reproduces old versions)</source>
         <translation>기존 방식 (구버전 재현용)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="244"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="249"/>
         <source>Orange</source>
         <translation>주황</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="244"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="249"/>
         <source>Yellow</source>
         <translation>노랑</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="245"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="628"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1446"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="250"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="644"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1463"/>
         <source>Green</source>
         <translation>녹색</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="245"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="629"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="250"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="645"/>
         <source>Blue</source>
         <translation>파랑</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="245"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="250"/>
         <source>Aqua</source>
         <translation>아쿠아</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="246"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="251"/>
         <source>Magenta</source>
         <translation>마젠타</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="252"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="257"/>
         <source>Camera (make/model)</source>
         <translation>카메라 (제조사/모델)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="254"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="259"/>
         <source>Exposure (shutter/aperture/ISO)</source>
         <translation>노출 (셔터/조리개/ISO)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="255"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="268"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="260"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="273"/>
+        <location filename="../../arw_selector/gui/shot_details.py" line="75"/>
         <source>Focal length</source>
         <translation>초점거리</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="256"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="272"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="261"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="277"/>
         <source>Date taken</source>
         <translation>촬영 일시</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="257"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="262"/>
         <source>Artist</source>
         <translation>작가</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="258"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="263"/>
         <source>Copyright</source>
         <translation>저작권</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="259"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="264"/>
         <source>Software</source>
         <translation>소프트웨어</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="265"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="270"/>
         <location filename="../../arw_selector/gui/export_dialog.py" line="295"/>
         <source>Filename</source>
         <translation>파일명</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="266"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="271"/>
+        <location filename="../../arw_selector/gui/shot_details.py" line="62"/>
         <source>Camera</source>
         <translation>카메라</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="269"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="274"/>
         <source>Aperture</source>
         <translation>조리개</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="270"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="275"/>
         <source>Shutter</source>
         <translation>셔터</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="271"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="276"/>
         <source>ISO</source>
         <translation>ISO</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="278"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="283"/>
         <source>Portrait</source>
         <translation>인물</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="280"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="285"/>
         <source>Light &amp; sky</source>
         <translation>조명·하늘</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="286"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="291"/>
         <source>Under-eye retouch</source>
         <translation>언더아이 리터치</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="287"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="292"/>
         <source>Smooth skin</source>
         <translation>피부 매끄럽게</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="288"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="293"/>
         <source>Sharpen irises</source>
         <translation>눈동자 또렷하게</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="289"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="294"/>
         <source>Whiten teeth</source>
         <translation>치아 화이트닝</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="290"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="295"/>
         <source>Brighten face</source>
         <translation>얼굴 밝히기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="291"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="296"/>
         <source>Emphasize subject (darken background)</source>
         <translation>인물 강조 (배경 어둡게)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="292"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="297"/>
         <source>Blur background (bokeh)</source>
         <translation>배경 흐리게 (아웃포커스)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="293"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="298"/>
         <source>Bluer sky</source>
         <translation>하늘 파랗게</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="294"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="299"/>
         <source>Spotlight (darken surroundings)</source>
         <translation>스포트라이트 (주변 어둡게)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="295"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="300"/>
         <source>Brighten area (radial)</source>
         <translation>부분 밝게 (원형)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="296"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="301"/>
         <source>Darken area (radial)</source>
         <translation>부분 어둡게 (원형)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="303"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="308"/>
         <source>Softens under-eye lines and dark circles, and lifts brightness a touch.</source>
         <translation>눈밑 주름·다크서클을 은은하게 펴고 아주 살짝 밝힙니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="305"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="310"/>
         <source>Smooths skin across the whole face; texture eased slightly.</source>
         <translation>얼굴 전체 피부를 부드럽게. 질감은 살짝 낮춥니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="307"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="312"/>
         <source>Adds clarity and sharpening to the irises to bring out the gaze.</source>
         <translation>눈동자에 명료도·샤픈을 더해 시선을 살립니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="309"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="314"/>
         <source>Removes the yellow cast from teeth and brightens slightly. Only affects shots with the mouth open.</source>
         <translation>치아의 노란기를 빼고 살짝 밝힙니다. 입을 벌린 컷에만 효과가 있습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="311"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="316"/>
         <source>Lifts a face darkened by backlight or shade.</source>
         <translation>역광·그늘로 어두운 얼굴을 끌어올립니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="313"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="318"/>
         <source>Darkens and desaturates the background to make the subject stand out.</source>
         <translation>배경을 어둡게·덜 진하게 눌러 인물을 도드라지게.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="315"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="320"/>
         <source>Softly blurs only the background for a shallow depth-of-field look.</source>
         <translation>배경만 부드럽게 흐려 얕은 심도 느낌을 냅니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="316"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="321"/>
         <source>A top linear mask makes the sky bluer and deeper.</source>
         <translation>위쪽 선형 마스크로 하늘을 더 파랗고 진하게.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="317"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="322"/>
         <source>Darkens outside a central oval to draw the eye in.</source>
         <translation>가운데 원형 밖을 어둡게 눌러 시선을 모읍니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="319"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="324"/>
         <source>A radial mask brightens just where you want; adjust position and size afterward.</source>
         <translation>원형 마스크로 원하는 곳만 밝힙니다. 위치·크기는 이후 조정.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="321"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="326"/>
         <source>A radial mask darkens just where you want.</source>
         <translation>원형 마스크로 원하는 곳만 어둡게.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="638"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="391"/>
+        <source>Match camera JPEG</source>
+        <translation>카메라 JPEG에 맞추기</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="654"/>
         <source>Clipping</source>
         <translation>클리핑</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="642"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="658"/>
         <source>Show where the curve clips tonal values</source>
         <translation>곡선이 계조를 잘라내는 구간 표시</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="651"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="667"/>
         <source>RGB</source>
         <translation>밝기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="657"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="673"/>
         <source>{label} channel curve</source>
         <translation>{label} 채널 곡선</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="668"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="684"/>
         <source>Reset this channel&apos;s curve</source>
         <translation>이 채널 곡선 초기화</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="676"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="693"/>
         <source>Click to add · drag to move · right-click/double-click to delete</source>
         <translation>클릭 추가 · 드래그 이동 · 우클릭/더블클릭 삭제</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="690"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="707"/>
         <source>Lights</source>
         <translation>밝음</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="691"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="708"/>
         <source>Darks</source>
         <translation>어두움</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="756"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="773"/>
         <source>Detail</source>
         <translation>세부</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="757"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="878"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="774"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="895"/>
         <source>Sharpening</source>
         <translation>선명 효과</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="759"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="776"/>
         <source>Radius</source>
         <translation>반경</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="766"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="783"/>
         <source>Noise method</source>
         <translation>노이즈 방식</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="771"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="788"/>
         <source>The method used to remove luminance noise.
 The values in parentheses are measured on real R6 Mark III ISO 6400 files:
 the detail retained and the 32MP processing time when noise is halved.
@@ -923,12 +937,12 @@ Legacy: detail 78.7% — only to reproduce older results exactly</source>
 기존 방식: 디테일 78.7% — 예전 결과를 그대로 재현할 때만</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="783"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="800"/>
         <source>Noise reduction</source>
         <translation>노이즈 감소</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="785"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="802"/>
         <source>Luminance (brightness) noise. The strength adapts
 automatically to the photo&apos;s real noise, so the same
 value gives a similar result across different ISOs</source>
@@ -937,12 +951,12 @@ value gives a similar result across different ISOs</source>
 값이 비슷한 정도가 됩니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="789"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="806"/>
         <source>Passes</source>
         <translation>패스 수</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="791"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="808"/>
         <source>Runs the noise reduction several times, weaker each pass.
 For the same amount of noise removed, several gentle passes
 hurt detail far less than one strong pass.
@@ -968,48 +982,48 @@ Applies to the non-local-means methods only.</source>
 비국소 평균 계열에만 적용됩니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="805"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="822"/>
         <source>Detail preservation</source>
         <translation>디테일 보존</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="807"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="824"/>
         <source>Restores the original where there is fine texture like
 hair or foliage. Flat sky or skin is left unaffected</source>
         <translation>머리카락·나뭇잎처럼 잔무늬가 있는 곳에 원본을
 되살립니다. 평탄한 하늘·피부에는 영향이 없습니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="809"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="826"/>
         <source>Color noise reduction</source>
         <translation>색상 노이즈 감소</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="811"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="828"/>
         <source>Removes only colour mottling. It does not touch
 luminance, so there is no loss of detail</source>
         <translation>색 얼룩만 지웁니다. 휘도를 건드리지 않으므로
 디테일 손실이 없습니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="813"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="830"/>
         <source>Color noise radius</source>
         <translation>색상 노이즈 반경</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="815"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="832"/>
         <source>How large a colour blob to catch. Blobs grow larger at
 higher ISO. Raising it also bleeds true colour edges</source>
         <translation>얼마나 큰 색 얼룩까지 볼지. 고감도일수록 얼룩이
 커집니다. 올리면 진짜 색 경계도 함께 번집니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="817"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="834"/>
         <source>Shadow color noise</source>
         <translation>어두운 곳 색 노이즈</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="820"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="837"/>
         <source>Extra colour-noise suppression in dark areas only.
 Colour blotches are worst in shadows (they get amplified
 with the exposure), but matching the overall blur to the
@@ -1036,12 +1050,12 @@ nothing while that is 0</source>
 아무 일도 하지 않습니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="830"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="847"/>
         <source>Destripe</source>
         <translation>가로 줄무늬 제거</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="832"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="849"/>
         <source>Removes the horizontal banding that appears when an LED
 wall&apos;s PWM flicker beats against the rolling shutter.
 
@@ -1066,12 +1080,12 @@ horizontal detail is not damaged in principle</source>
 디테일은 원리적으로 손상되지 않습니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="841"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="858"/>
         <source>Face priority</source>
         <translation>얼굴 우선</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="843"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="860"/>
         <source>How much to hold back luminance noise reduction outside
 faces. At high ISO the grain that bothers you is usually
 on skin, and the same strength across the whole frame
@@ -1096,114 +1110,114 @@ Ignored on photos with no face</source>
 얼굴이 없는 사진에서는 무시됩니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="877"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="894"/>
         <source>Skin smoothing</source>
         <translation>부드럽게(피부)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="882"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="899"/>
         <source>Local adjustments (masks)</source>
         <translation>국소 보정 (마스크)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="885"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="902"/>
         <source>＋ Add mask</source>
         <translation>＋ 마스크 추가</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="905"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="922"/>
         <source>Manual</source>
         <translation>직접 지정</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="906"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="923"/>
         <source>Brush (paint by hand)</source>
         <translation>브러시 (직접 칠하기)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="907"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="924"/>
         <source>Drag over the image to paint just the area you want</source>
         <translation>이미지 위에서 드래그해 원하는 영역만 칠합니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="914"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="931"/>
         <source>The face, eye and background presets are detected automatically on this frame</source>
         <translation>얼굴·눈·배경 프리셋은 이 컷에서 자동 인식합니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="928"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="945"/>
         <source>Selecting a radial or linear mask shows handles on the image.
 Drag the centre to move, an edge point to resize, an outer point to rotate.</source>
         <translation>방사형·선형 마스크를 고르면 이미지 위에 조작점이 나타납니다.
 중심을 끌면 이동, 가장자리 점을 끌면 크기, 바깥 점을 끌면 회전입니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="936"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="953"/>
         <source>Show region</source>
         <translation>영역 표시</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="937"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="954"/>
         <source>Shows the area the selected mask covers in red</source>
         <translation>선택한 마스크가 덮는 영역을 빨갛게 표시합니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="953"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="970"/>
         <source>Paint</source>
         <translation>칠하기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="954"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="971"/>
         <source>When on, drag over the image to paint an area</source>
         <translation>켜면 이미지 위에서 드래그해 영역을 칠합니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="957"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="974"/>
         <source>Eraser</source>
         <translation>지우개</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="958"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="975"/>
         <source>Erases what you have painted</source>
         <translation>칠한 영역을 다시 지웁니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="962"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="979"/>
         <source>Clear all</source>
         <translation>전부 지우기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="967"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="984"/>
         <source>Brush size</source>
         <translation>브러시 크기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="968"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="985"/>
         <source>Brush diameter relative to the image&apos;s short edge</source>
         <translation>이미지 짧은 변 대비 붓 지름</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="988"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1005"/>
         <source>Apply to</source>
         <translation>적용 대상</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="990"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1007"/>
         <source>Main subject</source>
         <translation>주 피사체</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="991"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1008"/>
         <source>All faces</source>
         <translation>모든 얼굴</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="992"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1009"/>
         <source>By number</source>
         <translation>번호 지정</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="994"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1011"/>
         <source>Main subject — the face chosen by focus scoring (the red box on screen)
 All faces — applied to every detected face
 By number — largest face first: 1, 2, 3…</source>
@@ -1212,64 +1226,64 @@ By number — largest face first: 1, 2, 3…</source>
 번호 지정 — 큰 얼굴부터 1, 2, 3…</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1005"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1022"/>
         <source>Numbered from the largest face</source>
         <translation>큰 얼굴부터 매긴 번호</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1017"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1034"/>
         <source>Range</source>
         <translation>범위</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1018"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1035"/>
         <source>The size of the detected region. 100 is the default; 0~200% shrinks or grows it.
 Applies only to face, eye and radial masks.</source>
         <translation>인식 영역의 크기. 100이 기본이고 0~200%로 줄이거나 키웁니다.
 얼굴·눈·방사형 마스크에만 적용됩니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1021"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1038"/>
         <source>Strength</source>
         <translation>세기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1022"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1039"/>
         <source>Overall strength of the mask effect</source>
         <translation>마스크 효과의 전체 세기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1023"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1040"/>
         <source>Feather</source>
         <translation>경계 부드럽게</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1024"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1041"/>
         <source>Invert region</source>
         <translation>영역 반전</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1059"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1076"/>
         <source>Brush</source>
         <translation>브러시</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1224"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1241"/>
         <source>No faces detected</source>
         <translation>검출된 얼굴 없음</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1226"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1243"/>
         <source>{count} faces detected</source>
         <translation>검출된 얼굴 {count}개</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1294"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1311"/>
         <source>Color mixer</source>
         <translation>색상 혼합</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1297"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1314"/>
         <source>Hue</source>
         <translation>색조</translation>
     </message>
@@ -1290,7 +1304,7 @@ Double-click to reset</source>
     <message>
         <location filename="../../arw_selector/gui/color_wheel.py" line="199"/>
         <location filename="../../arw_selector/gui/color_wheel.py" line="205"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1297"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1314"/>
         <source>Luminance</source>
         <translation>광도</translation>
     </message>
@@ -1305,190 +1319,211 @@ Double-click to reset</source>
         <translation>중립</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1318"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1335"/>
         <source>Color grading</source>
         <translation>색 보정</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1324"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1341"/>
         <source>Midtones</source>
         <translation>중간 영역</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1337"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1354"/>
         <source>Blending</source>
         <translation>혼합</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1338"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1355"/>
         <source>Balance</source>
         <translation>균형</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1341"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1358"/>
         <source>Optics</source>
         <translation>광학</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1343"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1360"/>
         <source>Auto lens profile</source>
         <translation>렌즈 프로필 자동 적용</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1345"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1362"/>
         <source>Looks up the camera and lens in the lensfun database and corrects them.
 For lenses not in the DB, use the manual correction below.</source>
         <translation>lensfun 데이터베이스에서 카메라와 렌즈를 찾아 보정합니다.
 DB에 없는 렌즈는 아래 수동 보정을 씁니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1357"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1433"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1374"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1450"/>
         <source>Distortion</source>
         <translation>왜곡</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1358"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1435"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1665"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1375"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1452"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1705"/>
         <source>Vignetting</source>
         <translation>비네팅</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1359"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1376"/>
         <source>Chromatic aberration</source>
         <translation>색수차</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1361"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1378"/>
         <source>Lateral chromatic aberration — the colour fringing from slight per-channel magnification differences</source>
         <translation>배율 색수차 — 채널마다 배율이 미세하게 달라 생기는 색 테두리</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="253"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="267"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="258"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="272"/>
+        <location filename="../../arw_selector/gui/shot_details.py" line="65"/>
         <source>Lens</source>
         <translation>렌즈 지정</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1378"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1395"/>
         <source>Choose one directly when the EXIF lens name is missing or differs from the database name.
 Common with adapters or third-party lenses.</source>
         <translation>EXIF 렌즈명이 없거나 데이터베이스 이름과 다를 때 직접 고릅니다.
 어댑터나 서드파티 렌즈를 쓰면 흔히 발생합니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1388"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1405"/>
         <source>Lens profile folder</source>
         <translation>렌즈 프로필 폴더</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1389"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1406"/>
         <source>Drop lensfun XML here to widen the list of recognised gear</source>
         <translation>여기에 lensfun XML을 넣으면 인식 목록이 넓어집니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1392"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1409"/>
         <source>Reload lens DB</source>
         <translation>렌즈 DB 다시 읽기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1393"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1410"/>
         <source>Press this if you added XML while the app was running</source>
         <translation>앱을 켠 채로 XML을 넣었을 때 누릅니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1405"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1422"/>
         <source>Manage camera color calibration</source>
         <translation>기종 색 보정 관리</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1407"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1424"/>
         <source>View or delete this PC&apos;s calibration values, derived by comparing against the camera&apos;s built-in JPEG</source>
         <translation>카메라 내장 JPEG과 비교해 구한 이 PC의 보정값을 확인·삭제합니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1429"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1446"/>
         <source>Manual correction</source>
         <translation>수동 보정</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1434"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1451"/>
         <source>Negative corrects barrel (convex), positive corrects pincushion (concave)</source>
         <translation>음수는 배럴(볼록), 양수는 핀쿠션(오목) 교정</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1436"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1453"/>
         <source>Positive brightens the corners</source>
         <translation>양수는 주변부를 밝게</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1437"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1454"/>
         <source>Remove purple fringing</source>
         <translation>보라색 언저리 제거</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1439"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1456"/>
         <source>Remove green fringing</source>
         <translation>녹색 언저리 제거</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1445"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1462"/>
         <source>Sample colour</source>
         <translation>색 샘플링</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="246"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1446"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="251"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1463"/>
         <source>Purple</source>
         <translation>보라</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1374"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1391"/>
         <source>Lens override</source>
         <translation>렌즈 지정</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1450"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1467"/>
         <source>Click the {label} fringing in the preview to set its hue</source>
         <translation>{label} 언저리를 미리보기에서 클릭해 색조를 지정합니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1469"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1486"/>
         <source>Recognised: {cameras} bodies · {lenses} lenses</source>
         <translation>인식 가능: 바디 {cameras}종 · 렌즈 {lenses}종</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1491"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1508"/>
         <source>Reloaded — {cameras} bodies · {lenses} lenses</source>
         <translation>다시 읽었습니다 — 바디 {cameras}종 · 렌즈 {lenses}종</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1557"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1559"/>
+        <source>Fits exposure, tone curve and saturation so the develop
+starts close to this shot&apos;s embedded camera JPEG.
+The fit lands on the sliders as ordinary values, so
+everything stays editable. The camera&apos;s local tone mapping
+cannot be copied by global controls, so small differences remain.</source>
+        <translation>노출·톤 곡선·채도를 이 컷의 내장 카메라 JPEG에
+가깝게 맞춥니다.
+결과는 슬라이더의 보통 값으로 올라가므로 전부 이어서
+편집할 수 있습니다. 카메라의 국소 톤매핑은 전역 조정으로
+복사할 수 없어 작은 차이는 남습니다.</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1565"/>
+        <source>JPEG and HEIF are already the camera&apos;s own rendering —
+there is nothing to match against.</source>
+        <translation>JPEG·HEIF는 파일 자체가 이미 카메라의 렌더라
+따로 맞출 대상이 없습니다.</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1597"/>
         <source>{model}: no saved colour calibration</source>
         <translation>{model}: 저장된 색 보정 없음</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1561"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1601"/>
         <source>{model}: no calibration needed</source>
         <translation>{model}: 보정 불필요</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1565"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1605"/>
         <source>{model}: R {r:.3f} · G {g:.3f} · B {b:.3f} ({samples} frames)</source>
         <translation>{model}: R {r:.3f} · G {g:.3f} · B {b:.3f} ({samples}장)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1582"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1599"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1609"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1620"/>
         <location filename="../../arw_selector/gui/develop_panel.py" line="1622"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1639"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1649"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1660"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1662"/>
         <source>Camera color calibration</source>
         <translation>기종 색 보정</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1583"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1623"/>
         <source>There is no saved calibration.
 
 Opening a folder of photos from a camera the library doesn&apos;t know offers to compute one.
@@ -1499,17 +1534,17 @@ Saved in: {path}</source>
 저장 위치: {path}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1593"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1633"/>
         <source>no calibration needed</source>
         <translation>보정 불필요</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1595"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1635"/>
         <source>{camera}  —  {state}  ({samples} frames)</source>
         <translation>{camera}  —  {state}  ({samples}장)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1600"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1640"/>
         <source>Saved in: {path}
 
 Choose an item to delete:</source>
@@ -1518,59 +1553,59 @@ Choose an item to delete:</source>
 지울 항목을 고르십시오:</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1610"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1650"/>
         <source>Deletes the calibration for {camera}.
 Next time you open a folder from this camera, it will offer to recompute.</source>
         <translation>{camera} 의 보정값을 지웁니다.
 다음에 이 기종의 폴더를 열면 다시 계산을 권합니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1620"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1660"/>
         <source>Deleted.</source>
         <translation>지웠습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1622"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1662"/>
         <source>Could not delete.</source>
         <translation>지우지 못했습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1647"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1687"/>
         <source>Reference hue — purple {purple}° · green {green}°</source>
         <translation>기준 색조 — 보라 {purple}° · 녹색 {green}°</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1661"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1701"/>
         <source>Effects</source>
         <translation>효과</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1662"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1702"/>
         <source>Grain</source>
         <translation>그레인</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1663"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1703"/>
         <source>Grain size</source>
         <translation>그레인 크기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1667"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1707"/>
         <source>Vignette midpoint</source>
         <translation>비네팅 중간점</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1671"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1711"/>
         <source>Crop / straighten</source>
         <translation>자르기 / 기울이기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1673"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1713"/>
         <source>✂  Crop directly on the image</source>
         <translation>✂  이미지에서 직접 자르기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1676"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1716"/>
         <source>When on, drag on the preview to set the crop.
 Drag a corner to resize, drag inside to move,
 double-click to reset to the whole frame.</source>
@@ -1579,212 +1614,212 @@ double-click to reset to the whole frame.</source>
 더블클릭하면 전체로 되돌립니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1684"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1724"/>
         <source>Ratio</source>
         <translation>비율</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1692"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1732"/>
         <source>Straighten</source>
         <translation>기울이기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1693"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1733"/>
         <source>Left</source>
         <translation>왼쪽</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1694"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1734"/>
         <source>Right</source>
         <translation>오른쪽</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1695"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1735"/>
         <source>Top</source>
         <translation>위</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1696"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1736"/>
         <source>Bottom</source>
         <translation>아래</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1700"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1740"/>
         <source>Rotate 90° left</source>
         <translation>왼쪽으로 90도</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1701"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1741"/>
         <source>Rotate 90° right</source>
         <translation>오른쪽으로 90도</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1710"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1750"/>
         <source>Flip horizontal</source>
         <translation>좌우 반전</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1713"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1753"/>
         <source>Flip vertical</source>
         <translation>상하 반전</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1719"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1759"/>
         <source>Rotation 0°</source>
         <translation>회전 0°</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1724"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1764"/>
         <source>Capture info strip</source>
         <translation>촬영 정보 띠</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1726"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1766"/>
         <source>Add an info strip below the image</source>
         <translation>이미지 아래에 정보 띠 붙이기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1728"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1768"/>
         <source>EXIF is usually stripped when you post to social media.
 Burned in as visible text, it survives wherever the photo goes.</source>
         <translation>EXIF는 SNS에 올리면 대부분 지워집니다.
 화면에 보이는 글자로 박아 두면 어디로 가든 남습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="279"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1735"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="284"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1775"/>
         <source>Background</source>
         <translation>배경</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1737"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1777"/>
         <source>Black background / white text</source>
         <translation>검은 배경 / 흰 글씨</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1738"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1778"/>
         <source>White background / black text</source>
         <translation>흰 배경 / 검은 글씨</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1750"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1790"/>
         <source>Strip height</source>
         <translation>띠 높이</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1754"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1794"/>
         <source>Text for the right side (artist name, etc.)</source>
         <translation>오른쪽에 넣을 문구 (작가명 등)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1759"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1799"/>
         <source>Watermark</source>
         <translation>워터마크</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1761"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1801"/>
         <source>Add watermark</source>
         <translation>워터마크 넣기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1766"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1806"/>
         <source>Text (e.g. © 2026 Jane Doe)</source>
         <translation>텍스트 (예: © 2026 홍길동)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1771"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1811"/>
         <source>Font</source>
         <translation>글꼴</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1774"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1814"/>
         <source>Default</source>
         <translation>기본</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1785"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1825"/>
         <source>Or a PNG image</source>
         <translation>또는 PNG 이미지</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1788"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1828"/>
         <source>Browse</source>
         <translation>찾기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1794"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1834"/>
         <source>Position</source>
         <translation>위치</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1803"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1843"/>
         <source>Opacity</source>
         <translation>불투명도</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1804"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1844"/>
         <location filename="../../arw_selector/gui/export_dialog.py" line="278"/>
         <location filename="../../arw_selector/gui/main_window.py" line="359"/>
         <source>Size</source>
         <translation>크기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1805"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1845"/>
         <source>Margin</source>
         <translation>여백</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1806"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1846"/>
         <source>Horizontal offset</source>
         <translation>가로 미세조정</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1808"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1848"/>
         <source>Nudges left or right from the nine-grid position</source>
         <translation>9분할 위치에서 좌우로 밀어 줍니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1809"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1849"/>
         <source>Vertical offset</source>
         <translation>세로 미세조정</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1811"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1851"/>
         <source>Rotation</source>
         <translation>회전</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1815"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1855"/>
         <source>Color</source>
         <translation>색상</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1819"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1859"/>
         <source>Text watermark colour</source>
         <translation>텍스트 워터마크 색</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1825"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1865"/>
         <source>Shadow (legibility on light backgrounds)</source>
         <translation>그림자 (밝은 배경에서 가독성)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1835"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1875"/>
         <source>Watermark colour</source>
         <translation>워터마크 색상</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1854"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1894"/>
         <source>EXIF metadata</source>
         <translation>EXIF 메타데이터</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1856"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1896"/>
         <source>Include EXIF on export</source>
         <translation>내보낼 때 EXIF 넣기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1858"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1898"/>
         <source>Off by default. When you send a photo out, you often don&apos;t want
 your gear or the capture time going with it.
 Location data (GPS) is never written under any circumstances.</source>
@@ -1793,134 +1828,146 @@ Location data (GPS) is never written under any circumstances.</source>
 위치 정보(GPS)는 어떤 경우에도 기록하지 않습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1875"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1915"/>
         <source>Artist name</source>
         <translation>작가 이름</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1880"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1920"/>
         <source>Copyright notice</source>
         <translation>저작권 표기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1884"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1924"/>
         <source>GPS location data is never recorded</source>
         <translation>GPS 위치 정보는 기록하지 않습니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1893"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1933"/>
         <source>Watermark image</source>
         <translation>워터마크 이미지</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1893"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1933"/>
         <source>Images (*.png *.jpg *.jpeg)</source>
         <translation>이미지 (*.png *.jpg *.jpeg)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1900"/>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="2099"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1940"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="2139"/>
         <source>Rotation {deg}°</source>
         <translation>회전 {deg}°</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="492"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="506"/>
         <source>Loading…</source>
         <extracomment>창이 닫힌 뒤에도 아직 도는 렌더 스레드를 붙잡아 두는 곳. Qt는 **실행 중인 QThread가 파괴될 때** qFatal로 프로세스를 죽입니다. cancel()은 플래그만 세우는데, 워커가 rawpy 디모자이크(수 초짜리 단일 C 호출) 안에 있으면 그 플래그를 볼 지점이 없습니다. 그래서 &quot;취소하고 잠깐 기다린 뒤 닫기&quot;는 기다림이 모자라는 순간 그대로 크래시가 됩니다 (실측: 렌더 도중 창을 12번 여닫으니 재현). 기다리는 대신 참조를 여기로 옮깁니다. 창은 즉시 닫히고, 스레드는 제 속도로 끝난 뒤 스스로 빠집니다. 파괴되는 시점에는 이미 멈춰 있습니다. 지금 이 프로세스에서 돌고 있는 Full Render 스레드. **동시에 하나만** 돌아야 합니다. 27MP RAW 한 장을 풀 해상도로 디모자이크 하는 데 실측 2.8GB가 듭니다(R6M3). 두 개가 겹치면 5.5GB — 8GB PC에서는 OS와 앱 몫까지 더해 한계를 넘고, 사용자에게는 &quot;크래시&quot;로 보입니다. 겹치는 경로는 평범합니다: 버튼을 껐다 켜면 `_abandon_render`가 돌던 워커를 놓아주지만 **멈추지는 못합니다**(rawpy 디모자이크는 중간에 끊을 지점이 없습니다). 그 상태에서 새 워커를 띄우면 곧바로 두 개가 됩니다. 그래서 시작 전에 여기를 보고, 비어 있을 때만 출발합니다.</extracomment>
         <translation>불러오는 중…</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="514"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="528"/>
         <source>▼ Shadows</source>
         <translation>▼ 어두운 영역</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="517"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="531"/>
         <source>Blinks the shadow pixels with crushed tone in blue</source>
         <translation>계조가 뭉개진 어두운 화소를 파랑으로 점멸 표시합니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="522"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="536"/>
         <source>▲ Highlights</source>
         <translation>▲ 밝은 영역</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="525"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="539"/>
         <source>Blinks the highlight pixels with blown tone in red</source>
         <translation>계조가 날아간 밝은 화소를 빨강으로 점멸 표시합니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="574"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="589"/>
         <source>◀ Previous</source>
         <translation>◀ 이전</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="575"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="590"/>
         <source>Previous shot (←)</source>
         <translation>이전 컷 (←)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="579"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="594"/>
         <source>Next ▶</source>
         <translation>다음 ▶</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="580"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="595"/>
         <source>Next shot (→)</source>
         <translation>다음 컷 (→)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="593"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="608"/>
         <source>Original</source>
         <translation>원본</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="594"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="609"/>
         <source>Shows the image before develop (B)</source>
         <translation>보정 전 이미지를 보여 줍니다 (B)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="600"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="615"/>
         <source>Focus</source>
         <translation>초점</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="602"/>
-        <location filename="../../arw_selector/gui/loupe.py" line="862"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="617"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="896"/>
         <source>The region used for grading — green box (F)</source>
         <translation>판정에 쓴 영역 — 초록 사각형 (F)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="606"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="621"/>
         <source>Faces</source>
         <translation>얼굴</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="609"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="624"/>
         <source>Detected faces — grey boxes, the main subject in red (A).
 Click a face to make it the main subject and re-grade.</source>
         <translation>검출된 얼굴 — 회색 사각형, 주 피사체는 빨간색 (A).
 얼굴을 클릭하면 주 피사체를 그 얼굴로 바꾸고 판정을 다시 냅니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="616"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="631"/>
         <source>Eye contours — to check the eyes are really open (E)</source>
         <translation>눈 윤곽 — 눈이 실제로 떠 있는지 확인용 (E)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="620"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="635"/>
+        <source>AF point</source>
+        <translation>AF 지점</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/loupe.py" line="637"/>
+        <source>Where the camera focused — orange box (P).
+Sony, Canon CR3, Nikon. Not every file records it.</source>
+        <translation>카메라가 초점을 맞춘 곳 — 주황 상자 (P).
+소니·캐논 CR3·니콘. 모든 파일에 기록되지는 않습니다.</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/loupe.py" line="642"/>
         <source>Zoom to focus</source>
         <translation>초점 확대</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="622"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="644"/>
         <source>Fills the screen with the region used for grading (Z).
 You have to zoom in to tell whether focus really landed on the eyes.</source>
         <translation>판정에 쓴 영역을 화면 가득 채웁니다 (Z).
 눈이 실제로 맞았는지는 확대해서 봐야 압니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="631"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="653"/>
         <source>The usual preview develops at half resolution for speed.
 With this on, it re-develops at full resolution to match the
 screen whenever you stop adjusting — for checking sharpening,
@@ -1932,29 +1979,29 @@ it that much more finely.</source>
 확인할 때 씁니다. 확대(줌)하면 그만큼 더 정밀하게 다시 그립니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="643"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="665"/>
         <source>Wheel to zoom · drag to pan · double-click to reset</source>
         <translation>휠로 확대/축소 · 드래그로 이동 · 더블클릭으로 원래대로</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="672"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="694"/>
         <source>Apply develop to all</source>
         <translation>보정을 전체에 적용</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="674"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="696"/>
         <source>Applies the develop set in this window to every shot in the list.
 Crop and straighten are excluded, since framing differs shot to shot.</source>
         <translation>이 창에서 맞춘 보정을 목록의 모든 컷에 적용합니다.
 크롭·기울이기는 컷마다 구도가 달라서 제외됩니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="680"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="702"/>
         <source>Add to queue (Q)</source>
         <translation>대기열 담기 (Q)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="681"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="703"/>
         <source>Add this shot to the queue with its current develop</source>
         <translation>이 컷을 현재 보정과 함께 대기열에 쌓는다</translation>
     </message>
@@ -2060,9 +2107,9 @@ Crop and straighten are excluded, since framing differs shot to shot.</source>
     </message>
     <message>
         <location filename="../../arw_selector/gui/export_dialog.py" line="164"/>
-        <location filename="../../arw_selector/gui/loupe.py" line="685"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="707"/>
         <location filename="../../arw_selector/gui/main_window.py" line="371"/>
-        <location filename="../../arw_selector/gui/main_window.py" line="1211"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1213"/>
         <location filename="../../arw_selector/gui/preset_bar.py" line="86"/>
         <source>Export</source>
         <translation>내보내기</translation>
@@ -2249,118 +2296,128 @@ Turn it on now and everything goes into the _위치없음 folder.</source>
         <translation>예: {example}{suffix}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="686"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="708"/>
         <source>Export this shot right now</source>
         <translation>이 컷을 지금 바로 내보낸다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="690"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="712"/>
         <source>Close</source>
         <translation>닫기</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="808"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="831"/>
         <source>Cannot open this file: {exc}
 (demosaic: {demosaic_exc})</source>
         <translation>이 파일을 열 수 없습니다: {exc}
 (디모자이크: {demosaic_exc})</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="863"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="897"/>
         <source>This shot has no analysis data</source>
         <translation>이 컷은 분석 정보가 없습니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="872"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="944"/>
+        <source>RAW demosaic failed here, so the screen already shows the embedded JPEG — there is nothing to match.</source>
+        <translation>RAW 디모자이크가 실패해 화면이 이미 내장 JPEG입니다 — 따로 맞출 것이 없습니다.</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/loupe.py" line="947"/>
+        <source>Could not read this shot&apos;s embedded JPEG to match against.</source>
+        <translation>이 컷의 내장 JPEG을 읽지 못해 맞출 대상이 없습니다.</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/loupe.py" line="984"/>
         <source>Develop — {name}</source>
         <translation>보정 — {name}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="875"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="987"/>
         <source>Score {score:.1f}</source>
         <translation>점수 {score:.1f}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="878"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="990"/>
         <source>ROI sharpness {value:.1f}</source>
         <translation>ROI 선명도 {value:.1f}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="880"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="992"/>
         <source>Frame {value:.1f}</source>
         <translation>전체 {value:.1f}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="898"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="1010"/>
         <source>RAW demosaic failed — showing the embedded JPEG (colour and tone may not be accurate)</source>
         <translation>RAW 디모자이크 실패 — 내장 JPEG으로 표시 중 (색·계조가 정확하지 않을 수 있습니다)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="1004"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="1116"/>
         <source>purple</source>
         <translation>보라</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="1004"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="1116"/>
         <source>green</source>
         <translation>녹색</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="1008"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="1120"/>
         <source>Click on the {label} fringing</source>
         <translation>{label} 언저리를 클릭하십시오</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="1045"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="1157"/>
         <source>Shadows crushed</source>
         <translation>어두운 영역 뭉개짐</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="1047"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="1159"/>
         <source>Highlights blown</source>
         <translation>하이라이트 날아감</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="1053"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="1165"/>
         <source>No clipped pixels to show</source>
         <translation>표시할 클리핑 화소 없음</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="1056"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="1168"/>
         <source>crushed {crushed:.2f}% · blown {blown:.2f}%</source>
         <translation>뭉개짐 {crushed:.2f}% · 날아감 {blown:.2f}%</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="1153"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="1265"/>
         <source>Waiting…</source>
         <translation>대기 중…</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="1153"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="1265"/>
         <source>Rendering…</source>
         <translation>생성 중…</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="1434"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="1546"/>
         <source>Final preview failed: {message}</source>
         <translation>최종 미리보기 실패: {message}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="1863"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="2033"/>
         <source>Develop applied to {count} photos (crop and straighten kept per shot)</source>
         <translation>{count}장에 보정 적용됨 (크롭·기울이기는 컷별 유지)</translation>
     </message>
     <message>
         <location filename="../../arw_selector/gui/main_window.py" line="377"/>
-        <location filename="../../arw_selector/gui/main_window.py" line="1283"/>
-        <location filename="../../arw_selector/gui/main_window.py" line="1287"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1285"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1289"/>
         <source>Undo</source>
         <translation>되돌리기</translation>
     </message>
     <message>
         <location filename="../../arw_selector/gui/main_window.py" line="382"/>
-        <location filename="../../arw_selector/gui/main_window.py" line="1082"/>
-        <location filename="../../arw_selector/gui/main_window.py" line="1125"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1084"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1127"/>
         <source>Cache</source>
         <translation>캐시</translation>
     </message>
@@ -2371,8 +2428,8 @@ Turn it on now and everything goes into the _위치없음 folder.</source>
     </message>
     <message>
         <location filename="../../arw_selector/gui/main_window.py" line="391"/>
-        <location filename="../../arw_selector/gui/main_window.py" line="612"/>
-        <location filename="../../arw_selector/gui/main_window.py" line="621"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="613"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="622"/>
         <source>Colour calibration</source>
         <translation>색 보정</translation>
     </message>
@@ -2437,17 +2494,17 @@ the library&apos;s defaults.</source>
         <translation>이 폴더에 사진이 없습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="576"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="577"/>
         <source>Analysing {done}/{total} (cached {cached}, failed {failed})</source>
         <translation>분석 중 {done}/{total} (캐시 {cached}, 실패 {failed})</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="613"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="614"/>
         <source>Open and analyse a photo folder first.</source>
         <translation>먼저 사진 폴더를 열고 분석하십시오.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="622"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="623"/>
         <source>No usable samples were found in this folder.
 
 It needs at least {count} photos from the same camera,
@@ -2458,113 +2515,113 @@ each carrying the camera&apos;s embedded preview.</source>
 각 파일에 카메라 내장 미리보기가 들어 있어야 합니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="658"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="659"/>
         <source>The task failed</source>
         <translation>작업이 실패했습니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="659"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="660"/>
         <source>Failed</source>
         <translation>실패</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="685"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="686"/>
         <source>{total} photos · {scenes} scenes · keep {keep} / review {review} / reject {reject}</source>
         <translation>{total}장 · {scenes}개 장면 · keep {keep} / review {review} / reject {reject}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="691"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="692"/>
         <source> · {count} failed to analyse</source>
         <translation> · 분석 실패 {count}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="693"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="694"/>
         <source>Cancelled — results so far: </source>
         <translation>중단됨 — 여기까지의 결과: </translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="760"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="761"/>
         <source>Criteria ◂</source>
         <translation>판정 기준 ◂</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="784"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="785"/>
         <source>Grades cannot be changed during an export</source>
         <translation>내보내는 중에는 등급을 바꿀 수 없습니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="858"/>
-        <location filename="../../arw_selector/gui/main_window.py" line="1219"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="860"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1221"/>
         <source>Export in progress — develop and grading are locked until it finishes.</source>
         <translation>내보내는 중입니다 — 끝날 때까지 보정과 등급을 잠갔습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="883"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="885"/>
         <source>Queued {added} / updated {updated} · {total} in the queue</source>
         <translation>대기열 추가 {added} / 갱신 {updated} · 현재 {total}장</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="890"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="892"/>
         <source>Export to</source>
         <translation>내보낼 위치</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="933"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="935"/>
         <source>{name} — re-graded with the new main subject (score {score:.1f}, {grade})</source>
         <translation>{name} — 주 피사체를 바꿔 다시 판정했습니다 (점수 {score:.1f}, {grade})</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="945"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="947"/>
         <source>keep {keep} / review {review} / reject {reject} · {developed} edited</source>
         <translation>keep {keep} / review {review} / reject {reject} · 보정 {developed}장</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="958"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="960"/>
         <source>Select some photos first</source>
         <translation>먼저 사진을 선택하십시오</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="966"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="968"/>
         <source>Queue ◂</source>
         <translation>대기열 ◂</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="978"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="980"/>
         <source>{count} added to the queue</source>
         <translation>대기열에 {count}장 추가</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="980"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="982"/>
         <source>, {count} updated</source>
         <translation>, {count}장 갱신</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="981"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="983"/>
         <source> · {total} in the queue</source>
         <translation> · 현재 {total}장</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="991"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="993"/>
         <source>Queue {count} {arrow}</source>
         <translation>대기열 {count} {arrow}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="992"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="994"/>
         <source>Queue {arrow}</source>
         <translation>대기열 {arrow}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1045"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1047"/>
         <source>Export the queue to</source>
         <translation>대기열을 내보낼 위치</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1053"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1055"/>
         <source>{count} with a missing source will be skipped.</source>
         <translation>원본이 사라진 {count}장은 건너뜁니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1083"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1085"/>
         <source>{path}
 
 No cache here.</source>
@@ -2573,12 +2630,12 @@ No cache here.</source>
 캐시가 없습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1093"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1095"/>
         <source>Clear cache</source>
         <translation>캐시 삭제</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1094"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1096"/>
         <source>{path}
 
 Analysis results: {entries} ({analysis_mb:.1f}MB)
@@ -2601,42 +2658,42 @@ Clear the cache?</source>
 캐시를 지우시겠습니까?</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1114"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1116"/>
         <source>Cache cleared: {entries} results, {thumbs} thumbnails, {mb:.1f}MB freed</source>
         <translation>캐시 삭제: 분석 {entries}건, 썸네일 {thumbs}개, {mb:.1f}MB 확보</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1131"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1133"/>
         <source>Cache {mb:.0f}MB</source>
         <translation>캐시 {mb:.0f}MB</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1132"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1134"/>
         <source>No cache</source>
         <translation>캐시 없음</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1148"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1150"/>
         <source>Stopping analysis — finishing the photo in progress…</source>
         <translation>분석 중단 요청 — 진행 중인 장을 마치는 중…</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1154"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1156"/>
         <source>Stopping export — finishing the photo in progress…</source>
         <translation>내보내기 중단 요청 — 진행 중인 장을 마치는 중…</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1160"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1162"/>
         <source>Stopping…</source>
         <translation>중단 중…</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1170"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1172"/>
         <source>Export to (choosing the source folder creates it inside)</source>
         <translation>내보낼 위치 (원본 폴더를 고르면 그 안에 만듭니다)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1212"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1214"/>
         <source>An export is already running.
 
 Start again once it finishes or is cancelled.</source>
@@ -2645,42 +2702,42 @@ Start again once it finishes or is cancelled.</source>
 끝나거나 중단한 뒤에 다시 시작하십시오.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1222"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1224"/>
         <source>Preparing to export…</source>
         <translation>내보내기 준비 중…</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1234"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1236"/>
         <source>Exporting {done}/{total}</source>
         <translation>내보내는 중 {done}/{total}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1251"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1253"/>
         <source>Export cancelled</source>
         <translation>내보내기 중단</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1251"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1253"/>
         <source>Export finished</source>
         <translation>내보내기 완료</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1252"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1254"/>
         <source>{count} copied</source>
         <translation>{count}개 복사</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1254"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1256"/>
         <source> · {count} developed</source>
         <translation> · 보정 현상 {count}개</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1256"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1258"/>
         <source> · {count} failed</source>
         <translation> · 실패 {count}개</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1258"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1260"/>
         <source>
 
 Undo can clear up whatever was written before you stopped.</source>
@@ -2689,12 +2746,12 @@ Undo can clear up whatever was written before you stopped.</source>
 중단 시점까지의 작업은 되돌리기로 정리할 수 있습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1283"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1285"/>
         <source>Nothing to undo</source>
         <translation>되돌릴 기록이 없습니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1288"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1290"/>
         <source>{name}
 
 Undo this export?</source>
@@ -2703,12 +2760,12 @@ Undo this export?</source>
 이 내보내기를 되돌릴까요?</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1296"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1298"/>
         <source>Undo finished</source>
         <translation>되돌리기 완료</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1297"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1299"/>
         <source>{count} cleaned up</source>
         <translation>{count}개 정리</translation>
     </message>
@@ -2718,7 +2775,7 @@ Undo this export?</source>
         <translation>선택한 프리셋을 파일로 저장합니다 (백업·공유용)</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="941"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="958"/>
         <location filename="../../arw_selector/gui/preset_bar.py" line="92"/>
         <source>Delete</source>
         <translation>삭제</translation>
@@ -2855,13 +2912,13 @@ Choose No to save it under a different name.</source>
         <translation>크롭</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="651"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="673"/>
         <location filename="../../arw_selector/gui/queue_panel.py" line="50"/>
         <source>Grade</source>
         <translation>등급</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/main_window.py" line="1052"/>
+        <location filename="../../arw_selector/gui/main_window.py" line="1054"/>
         <location filename="../../arw_selector/gui/queue_panel.py" line="71"/>
         <location filename="../../arw_selector/gui/queue_panel.py" line="234"/>
         <location filename="../../arw_selector/gui/queue_panel.py" line="297"/>
@@ -3319,7 +3376,7 @@ through bonuses and penalties.</source>
 작용합니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/loupe.py" line="615"/>
+        <location filename="../../arw_selector/gui/loupe.py" line="630"/>
         <source>Eyes</source>
         <translation>눈 기준</translation>
     </message>
@@ -3719,71 +3776,86 @@ With these settings the keep floor is {floor:.1f}%.</source>
         <translation>다음 실행부터 적용됩니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="117"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="121"/>
+        <source>Open develop with camera-matched start</source>
+        <translation>보정창을 카메라 룩 시작점으로 열기</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="124"/>
+        <source>When the develop window opens a RAW shot that has no edits yet,
+exposure, tone curve and saturation start fitted to the embedded
+camera JPEG instead of the flat neutral render. Shots you have
+already edited are never touched. Off by default.</source>
+        <translation>보정이 전혀 없는 RAW 컷을 보정창에서 열 때, 밋밋한 중립 현상 대신
+내장 카메라 JPEG에 맞춘 노출·톤 곡선·채도로 시작합니다.
+이미 손댄 컷은 절대 건드리지 않습니다. 기본은 꺼짐입니다.</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="132"/>
         <source>Updates</source>
         <translation>업데이트</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="120"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="135"/>
         <source>Check for updates</source>
         <translation>업데이트 확인</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="123"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="138"/>
         <source>Off by default. Checking contacts a server and tells it which
 version is running here. Nothing is sent unless you ask.</source>
         <translation>기본은 꺼짐입니다. 확인하면 외부 서버에 접속해 이 PC에서 실행 중인
 버전을 알리게 됩니다. 직접 누르기 전에는 아무것도 나가지 않습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="129"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="144"/>
         <source>Check now</source>
         <translation>지금 확인</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="147"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="162"/>
         <source>Checking…</source>
         <translation>확인 중…</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="157"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="172"/>
         <source>No update source is configured for this build.</source>
         <translation>이 빌드에는 업데이트 확인 주소가 설정되어 있지 않습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="160"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="175"/>
         <source>Could not reach the update server.</source>
         <translation>업데이트 서버에 연결하지 못했습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="163"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="178"/>
         <source>The update server replied with something unreadable.</source>
         <translation>업데이트 서버의 응답을 읽지 못했습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="166"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="181"/>
         <source>Version {latest} is available (this is {current}).</source>
         <translation>{latest} 버전이 나와 있습니다 (지금은 {current}).</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="172"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="187"/>
         <source>This is the latest version ({current}).</source>
         <translation>최신 버전입니다 ({current}).</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="185"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="200"/>
         <source>RAW focus selection and develop tool.</source>
         <translation>RAW 초점 셀렉트 및 보정 도구.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/preferences_dialog.py" line="196"/>
+        <location filename="../../arw_selector/gui/preferences_dialog.py" line="211"/>
         <source>This project&apos;s own code is MIT licensed. Bundled data and the
 libraries used by the packaged build keep their own terms — PySide6 in particular is LGPL-3.0.</source>
         <translation>이 프로젝트의 코드는 MIT 라이선스입니다. 함께 담긴 데이터와 배포본이
 쓰는 라이브러리는 각자의 조건을 따릅니다 — 특히 PySide6는 LGPL-3.0입니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/develop_panel.py" line="1523"/>
+        <location filename="../../arw_selector/gui/develop_panel.py" line="1543"/>
         <source>Non-RAW source: the camera already applied its profile, colour calibration and lens correction, so those are off.</source>
         <translation>RAW가 아닙니다. 카메라가 프로파일·기종 색 보정·렌즈 보정을 이미 적용해
 구워 넣은 결과라 여기서는 꺼 둡니다.</translation>
@@ -3879,7 +3951,7 @@ Compute now?</source>
         <translation>내장 JPEG과 비교하는 중… ({done}/{total})</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="113"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="122"/>
         <location filename="../../arw_selector/gui/calibration_dialog.py" line="145"/>
         <location filename="../../arw_selector/gui/export_dialog.py" line="165"/>
         <source>Cancel</source>
@@ -3995,53 +4067,53 @@ Failed to write the log.</source>
         <translation>처리되지 않은 오류가 발생했습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="45"/>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="110"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="46"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="119"/>
         <source>Start analysis</source>
         <translation>분석 시작</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="53"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="54"/>
         <source>{count} photos</source>
         <translation>사진 {count}장</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="59"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="60"/>
         <source>Cache: {count} photos can be reused</source>
         <translation>캐시: {count}장 재사용 가능</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="62"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="63"/>
         <source>Cache: none — everything will be analysed fresh</source>
         <translation>캐시: 없음 — 전부 새로 분석합니다</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="67"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="68"/>
         <source>Use cached results</source>
         <translation>캐시 결과 사용</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="72"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="73"/>
         <source>Unchecked: ignore the cache and re-analyse every photo.</source>
         <translation>체크 해제: 캐시를 무시하고 모든 사진을 다시 분석합니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="77"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="78"/>
         <source>No usable cache for these photos and settings.</source>
         <translation>이 사진들과 설정에는 쓸 수 있는 캐시가 없습니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="81"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="82"/>
         <source>Precision</source>
         <translation>정밀 분석</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="84"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="85"/>
         <source>Noise-robust sharpness</source>
         <translation>노이즈에 강한 선명도</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="87"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="88"/>
         <source>Subtracts the noise contribution before scoring sharpness, so
 noisy soft shots stop scoring as sharp (high-ISO bursts).
 Measured on 2,846 photos: keeps unchanged, noisy soft frames
@@ -4051,12 +4123,26 @@ demoted. Turn off only to compare with the old measurement.</source>
 그대로, 노이즈 낀 소프트 컷만 강등. 예전 측정과 비교할 때만 끕니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="93"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="94"/>
+        <source>Single-subject framing (portrait)</source>
+        <translation>1인 구도 우선 (포트레이트)</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="97"/>
+        <source>Pick the main face by centrality first.
+For portrait-style shoots that keep one subject near the middle.
+Leave off for group or stage photos.</source>
+        <translation>주 피사체를 중앙성 위주로 고릅니다.
+주인공을 화면 가운데 두는 포트레이트류 촬영용.
+그룹·무대 사진에서는 끄십시오.</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="102"/>
         <source>Use camera AF point when no face is found</source>
         <translation>얼굴이 없을 때 카메라 AF 지점 사용</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="96"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="105"/>
         <source>Reads the autofocus position the camera recorded (Sony, Canon
 CR3, Nikon) and judges that area instead of guessing the
 sharpest tile — only for photos where no face was detected.
@@ -4066,12 +4152,12 @@ Faces and eyes always take priority.</source>
 사진에서만. 얼굴과 눈이 항상 우선합니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="130"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="139"/>
         <source>Everything is cached — results will appear instantly.</source>
         <translation>전부 캐시에 있습니다 — 결과가 즉시 나옵니다.</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="132"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="141"/>
         <source>{pending} photos to analyse — {duration}</source>
         <translation>분석할 사진 {pending}장 — {duration}</translation>
     </message>
@@ -4080,9 +4166,29 @@ Faces and eyes always take priority.</source>
         <translation type="vanished">분석할 사진 {pending}장 — 약 {duration}</translation>
     </message>
     <message>
-        <location filename="../../arw_selector/gui/analysis_dialog.py" line="135"/>
+        <location filename="../../arw_selector/gui/analysis_dialog.py" line="144"/>
         <source> ({reused} reused from cache)</source>
         <translation> (캐시에서 {reused}장 재사용)</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/shot_details.py" line="52"/>
+        <source>Captured</source>
+        <translation>촬영 시각</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/shot_details.py" line="74"/>
+        <source>{eq:g} mm equiv.</source>
+        <translation>환산 {eq:g}mm</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/shot_details.py" line="88"/>
+        <source>AF area</source>
+        <translation>AF 영역</translation>
+    </message>
+    <message>
+        <location filename="../../arw_selector/gui/shot_details.py" line="95"/>
+        <source>Location</source>
+        <translation>위치</translation>
     </message>
 </context>
 </TS>

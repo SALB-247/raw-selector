@@ -346,6 +346,53 @@ def _patch_contrast(face: np.ndarray, gray_full: np.ndarray,
     return float(patch.std()) if patch.size else 0.0
 
 
+def _pick_central_face(faces: np.ndarray, gray_full: np.ndarray,
+                       scale: float, shape: tuple[int, int]) -> int:
+    """1인 구도 우선 — 검증된 가중 면적¼:중앙1:선명¼로 고릅니다.
+
+    포트레이트·팬사이트처럼 주인공을 정중앙에 두는 장르용 옵션입니다.
+    암묵 정답 47,990컷(점 지정 AF = 사진사의 주인공) 홀드아웃에서 95.4%로
+    검증됐고(선명 항을 빼면 90.0%라 뺄 수 없습니다), 반대로 무대·그룹
+    장르 라벨 110장에서는 현행 픽이 이깁니다(75.5% vs 68.2%) — 그래서
+    기본이 아니라 **분석 시작 옵션**입니다 (RESEARCH_METADATA.md 8절).
+
+    선명도는 연구와 같은 방식: 얼굴 패치를 긴변 160px로 줄여 라플라시안
+    분산 — 크기가 선명도 측정을 오염시키지 않게 하기 위해서입니다.
+    """
+    height, width = shape[:2]
+    diag_half = (width ** 2 + height ** 2) ** 0.5 / 2
+    max_area = max(float(f[2]) * float(f[3]) for f in faces) or 1.0
+
+    sharps = []
+    for f in faces:
+        box = _clip_box(f[0] / scale, f[1] / scale,
+                        f[2] / scale, f[3] / scale, shape)
+        x, y, w, h = box
+        patch = gray_full[y:y + h, x:x + w] if w > 7 and h > 7 else None
+        if patch is None or not patch.size:
+            sharps.append(0.0)
+            continue
+        if max(w, h) > 160:
+            ratio = 160.0 / max(w, h)
+            patch = cv2.resize(patch, (max(8, int(w * ratio)),
+                                       max(8, int(h * ratio))))
+        sharps.append(float(cv2.Laplacian(patch, cv2.CV_64F).var()))
+    max_sharp = max(sharps) or 1.0
+
+    best, best_score = 0, -1.0
+    for index, f in enumerate(faces):
+        x, y, w, h = (float(v) for v in f[:4])
+        area = w * h / max_area
+        cx, cy = x + w / 2, y + h / 2
+        central = 1.0 - min(
+            (((cx - width / 2) ** 2 + (cy - height / 2) ** 2) ** 0.5) / diag_half,
+            1.0)
+        score = 0.25 * area + 1.0 * central + 0.25 * (sharps[index] / max_sharp)
+        if score > best_score:
+            best, best_score = index, score
+    return best
+
+
 def _pick_main_face(
     faces: np.ndarray,
     gray_full: np.ndarray,
@@ -447,6 +494,25 @@ def _clip_box(x: float, y: float, w: float, h: float, shape: tuple[int, int]) ->
     x1 = min(width, int(round(x + w)))
     y1 = min(height, int(round(y + h)))
     return x0, y0, max(0, x1 - x0), max(0, y1 - y0)
+
+
+def _nearest_face(af_box: tuple[int, int, int, int],
+                  faces: tuple[tuple[int, int, int, int], ...]) -> int:
+    """AF 상자 중심에서 가장 가까운 얼굴 번호. 신뢰도 신호(af_face)용.
+
+    존 AF는 몸통을 가리키지만 2인 이상 컷은 얼굴이 가로로 떨어져 있어
+    중심 최근접이면 충분합니다 — 라벨 117장으로 검증했고, "얼굴 열 아래
+    몸통" 규칙을 써도 결과가 같았습니다(research_af_confidence.py).
+    """
+    ax, ay = af_box[0] + af_box[2] / 2.0, af_box[1] + af_box[3] / 2.0
+    best, best_dist = -1, float("inf")
+    for index, (x, y, w, h) in enumerate(faces):
+        dx = ax - (x + w / 2.0)
+        dy = ay - (y + h / 2.0)
+        dist = dx * dx + dy * dy
+        if dist < best_dist:
+            best_dist, best = dist, index
+    return best
 
 
 def _boxes_overlap(
@@ -568,6 +634,8 @@ def analyze_focus(
     tenengrad_k: float = TENENGRAD_K,
     force_main_face: int | None = None,
     af_box: tuple[int, int, int, int] | None = None,
+    use_af_roi: bool = False,
+    center_priority: bool = False,
     noise_compensation: bool = True,
 ) -> FocusResult:
     """프리뷰 이미지 한 장의 초점 상태를 측정합니다.
@@ -625,8 +693,11 @@ def analyze_focus(
         if force_main_face is not None and 0 <= force_main_face < len(faces):
             index = int(force_main_face)
         else:
-            index = _pick_main_face(faces, gray_full, scale, shape,
-                                    laplacian_k, tenengrad_k)
+            if center_priority:
+                index = _pick_central_face(faces, gray_full, scale, shape)
+            else:
+                index = _pick_main_face(faces, gray_full, scale, shape,
+                                        laplacian_k, tenengrad_k)
         face = faces[index]
         main_face = index
         face_boxes = tuple(
@@ -648,12 +719,12 @@ def analyze_focus(
             if min(candidate[2], candidate[3]) >= MIN_ROI_PX:
                 roi, source = candidate, FocusSource.FACE
 
-    if roi is None and af_box is not None:
-        # 카메라가 기록한 AF 위치. 얼굴·눈 ROI가 있으면 여기 오지 않습니다 —
-        # 존 AF의 기록은 눈이 아니라 존(몸통)이라(실측 47장,
-        # RESEARCH_METADATA.md) 얼굴 검출을 이길 수 없습니다. 얼굴이 없는
-        # 컷에서만 "가장 선명한 타일" 추측 대신 카메라의 실제 초점 위치를
-        # 씁니다.
+    if roi is None and af_box is not None and use_af_roi:
+        # 카메라가 기록한 AF 위치를 ROI로 씁니다(정밀 분석 옵션). 얼굴·눈
+        # ROI가 있으면 여기 오지 않습니다 — 존 AF의 기록은 눈이 아니라
+        # 존(몸통)이라(실측 47장, RESEARCH_METADATA.md) 얼굴 검출을 이길 수
+        # 없습니다. 얼굴이 없는 컷에서만 "가장 선명한 타일" 추측 대신
+        # 카메라의 실제 초점 위치를 씁니다.
         candidate = _clip_box(af_box[0], af_box[1], af_box[2], af_box[3], shape)
         if candidate and min(candidate[2], candidate[3]) >= MIN_ROI_PX:
             roi, source = candidate, FocusSource.AF
@@ -665,6 +736,15 @@ def analyze_focus(
 
     if roi is None:
         roi, source = (0, 0, full_w, full_h), FocusSource.FRAME
+
+    # 카메라 AF가 가리킨 얼굴 — 신뢰도 신호(af_face). 점수는 안 건드립니다.
+    # AF 상자 중심에서 가장 가까운 얼굴로 매칭합니다. 존 AF는 몸통을
+    # 가리키지만, 2인 컷은 얼굴이 가로로 떨어져 있어 중심 최근접이면 충분히
+    # 맞습니다(라벨 117장 검증: 같은 사람 54장 정답 87%, 다른 사람 63장 49%,
+    # research_af_confidence.py). af_box가 없거나 얼굴이 없으면 -1.
+    af_face = -1
+    if af_box is not None and face_boxes:
+        af_face = _nearest_face(af_box, face_boxes)
 
     # 노이즈 차감용 프레임 σ². ROI·배경은 원본 해상도에서 재므로 원본
     # 해상도의 σ를 씁니다. 축소본(frame_gray)은 축소가 노이즈를 평균해
@@ -722,6 +802,7 @@ def analyze_focus(
         faces=face_boxes,
         face_scores=face_scores,
         main_face=main_face,
+        af_face=af_face,
         clipped_highlights=clipped_highlights,
         clipped_shadows=clipped_shadows,
         mean_luma=mean_luma,

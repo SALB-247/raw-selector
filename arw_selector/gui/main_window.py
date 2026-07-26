@@ -565,6 +565,7 @@ class MainWindow(QMainWindow):
 
         self.config.analyze.noise_compensation = options.noise_compensation
         self.config.analyze.af_roi_hint = options.af_roi_hint
+        self.config.analyze.center_priority = options.center_priority
         self._pending_use_cache = options.use_cache
         return True
 
@@ -839,7 +840,8 @@ class MainWindow(QMainWindow):
         # open — no way to see the grid. `_loupes` holds the reference, and the
         # windows close with the main window.
         dialog = LoupeDialog(
-            record, records, None, fast=self.dblclick_preview.isChecked()
+            record, records, None, fast=self.dblclick_preview.isChecked(),
+            analyze_config=self.config.analyze,
         )
         dialog.records_changed.connect(self._on_loupe_changed)
         dialog.queue_requested.connect(self._queue_from_loupe)

@@ -46,6 +46,8 @@ TEMPLATES = {
     scoring.REASON_BETTER_IN_GROUP:
         "a shot {deficit:.0f} points better exists in this scene",
     scoring.REASON_NOT_RAW: "{format} source — less latitude than RAW",
+    scoring.REASON_AF_MISMATCH:
+        "main subject uncertain — camera focused on someone else",
 }
 
 

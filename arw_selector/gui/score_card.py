@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from PySide6.QtWidgets import QHBoxLayout
+
 from ..core import scoring
 from ..core.config import ScoreConfig
 from ..core.scoring import ScoreLine, score_breakdown
@@ -33,6 +35,7 @@ from ..core.types import FocusSource, Grade, ImageRecord
 from . import theme
 from .i18n import tr
 from .reason_text import render_all
+from .shot_details import ShotDetails
 
 _GRADE_LABELS = {
     Grade.KEEP: "keep",
@@ -139,7 +142,17 @@ class ScoreCard(QWidget):
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setHorizontalSpacing(14)
         self._grid.setVerticalSpacing(2)
-        outer.addWidget(self._grid_host)
+
+        # The breakdown never fills the card's width — on a 1400px window
+        # about 900px sat empty to the right. The shot facts live there:
+        # same record, zero extra I/O (metadata rides the analysis cache).
+        self.details = ShotDetails()
+        middle = QHBoxLayout()
+        middle.setContentsMargins(0, 0, 0, 0)
+        middle.setSpacing(24)
+        middle.addWidget(self._grid_host, 1)
+        middle.addWidget(self.details, 0, Qt.AlignTop)
+        outer.addLayout(middle)
 
         self.reasons = QLabel()
         self.reasons.setStyleSheet(theme.hint_label())
@@ -159,6 +172,7 @@ class ScoreCard(QWidget):
             return
 
         self._clear()
+        self.details.show_record(record)
 
         grade = _GRADE_LABELS.get(record.grade, "")
         colour = theme.GRADE_COLORS.get(grade, theme.TEXT)

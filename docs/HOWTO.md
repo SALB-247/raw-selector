@@ -30,6 +30,7 @@ it, review and cull in the grid, develop the keepers, and export.
   - [Histogram and clipping warnings](#histogram-and-clipping-warnings)
   - [Grading and actions](#grading-and-actions)
   - [The develop panel](#the-develop-panel)
+    - [Match camera JPEG](#match-camera-jpeg)
     - [Basic](#basic)
     - [Curve](#curve)
     - [Detail](#detail)
@@ -94,9 +95,13 @@ The **Preferences** toolbar button opens the "Preferences" dialog with two
 tabs:
 
 - **General** — the **Interface language** combo (**System default**, English,
-  한국어) takes effect on the next start; a restart notice is shown. The
-  **Check for updates** checkbox (off by default) enables update checks, and
-  **Check now** runs one immediately with a status readout.
+  한국어) takes effect on the next start; a restart notice is shown. Under
+  **Develop**, **Open develop with camera-matched start** (off by default)
+  makes the Develop window open a not-yet-edited RAW fitted to its embedded
+  camera JPEG instead of the flat neutral render — see
+  [Match camera JPEG](#match-camera-jpeg). The **Check for updates** checkbox
+  (off by default) enables update checks, and **Check now** runs one
+  immediately with a status readout.
 - **About** — application name and version, the licence texts, and a
   licensing note.
 
@@ -131,6 +136,10 @@ take.
 - **Precision** group:
   - **Noise-robust sharpness** — a sharpness measurement that resists sensor
     noise.
+  - **Single-subject framing (portrait)** — picks the main face by centrality
+    first, for portrait-style shoots that keep one subject near the middle.
+    Leave it off for group or stage photos, where the default pick does
+    better.
   - **Use camera AF point when no face is found** — falls back to the
     camera's recorded AF point as the focus region when no face is detected
     (Sony, Canon CR3, Nikon).
@@ -206,7 +215,20 @@ detected, Eyes open, Eyes closed, Eyes not measured, Blown highlights, Crushed
 shadows, Lens cap / stray shutter, Clamped to range, and the **Total** — each
 with an evidence note explaining the entry. The right side is a fact sheet for
 the shot: Captured, Camera, Lens, Focal length (with the 35mm equivalent on
-crop bodies), Exposure, AF area, and Location (display only).
+crop bodies), Exposure (aperture, shutter, ISO), AF area, and Location.
+
+Below the breakdown, a line of reasons summarises the grade in words. One of
+them is worth knowing: **"main subject uncertain — camera focused on someone
+else"** appears when the camera's AF point sits on a different face than the
+one used for grading. It never changes the score; it marks a shot worth a
+second look, and only ever appears when two or more faces were found.
+
+A row the file has no value for is left out entirely rather than shown as a
+dash — files stripped of EXIF by re-saving tools are common, and a column of
+dashes reads as breakage. AF area names appear only for camera modes verified
+against real files, and stay in the camera's own English wording. Location is
+shown to three decimal places and only on screen; exported files never carry
+GPS.
 
 To change *how* photos are graded, open the Criteria panel — see
 [Grading criteria](#grading-criteria--the-criteria-panel).
@@ -285,6 +307,23 @@ to each section; every section header is collapsible, has an eye button
 modified. Every slider row has its own reset button, and double-clicking a
 slider resets it. **Reset all** at the bottom of the panel clears every edit.
 
+#### Match camera JPEG
+
+Under the preset bar, **Match camera JPEG** fits exposure, tone curve and
+saturation to the render the camera itself made — the embedded JPEG inside the
+RAW — so a develop starts near the picture you culled by instead of at the flat
+neutral one. The fit lands on the sliders as ordinary values, so everything
+stays editable and can be reset row by row. It leaves detail, masks and crop
+alone.
+
+The camera's local tone mapping is beyond a global curve, so treat the result
+as a starting point rather than a copy. The button is disabled for JPEG and
+HEIF sources, which have no separate camera render to match against.
+
+Preferences → General → Develop → **Open develop with camera-matched start**
+(off by default) applies the same fit automatically whenever the Develop window
+opens a RAW shot. A photo that already has edits is never touched.
+
 #### Basic
 
 Global tone and colour: **Temperature** (absolute Kelvin, 2000–12000 K),
@@ -311,6 +350,12 @@ versions)**), **Noise reduction**, **Passes** (1–4, NL-means only), **Detail
 preservation**, **Color noise reduction**, **Color noise radius**, **Shadow
 color noise**, **Destripe** (removes LED-lighting banding), and **Face
 priority** (weights noise reduction toward faces).
+
+Several gentle passes cost far less detail than one strong pass for the same
+amount of noise removed, so raising **Noise reduction** above 70 moves
+**Passes** up to 2 for you. The slider visibly moves rather than changing
+anything behind your back, so you can put it back to 1; if you have already
+chosen 3 or 4 passes it is left alone.
 
 #### Local adjustments (masks)
 

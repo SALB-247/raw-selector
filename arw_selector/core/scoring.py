@@ -245,6 +245,7 @@ REASON_FRAME_WHITE = "frame_white"
 REASON_BATCH_BOTTOM = "batch_bottom"
 REASON_BETTER_IN_GROUP = "better_in_group"
 REASON_NOT_RAW = "not_raw"
+REASON_AF_MISMATCH = "af_mismatch"
 
 
 @dataclass(frozen=True)
@@ -465,6 +466,13 @@ def _reasons(
 
     if focus.face_count:
         reasons.append(Reason(REASON_FACE_COUNT, {"count": focus.face_count}))
+    # 카메라 AF가 우리와 다른 사람을 가리켰으면 "주 피사체 불확실" 신호를
+    # 답니다. 점수는 안 바꿉니다 — AF를 따르면 손해입니다(라벨 117장). 대신
+    # 갈렸을 때 우리 정답률이 87%→49%로 떨어지므로, 그때 사용자가 한 번 더
+    # 보게 합니다. af_face와 main_face가 둘 다 유효한 얼굴이고 서로 다를 때만.
+    if (getattr(focus, "af_face", -1) >= 0 and focus.main_face >= 0
+            and focus.af_face != focus.main_face):
+        reasons.append(Reason(REASON_AF_MISMATCH))
     if _face_defocus_penalty(focus, config) > 0:
         reasons.append(Reason(REASON_FACE_DEFOCUS, {
             "deficit": focus.background_sharpness - focus.sharpness}))

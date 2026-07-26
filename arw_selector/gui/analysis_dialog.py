@@ -34,6 +34,7 @@ class AnalysisOptions:
     use_cache: bool
     noise_compensation: bool
     af_roi_hint: bool
+    center_priority: bool
 
 
 class AnalysisStartDialog(QDialog):
@@ -90,6 +91,14 @@ class AnalysisStartDialog(QDialog):
             "demoted. Turn off only to compare with the old measurement."))
         box.addWidget(self.noise_comp)
 
+        self.center_priority = QCheckBox(tr("Single-subject framing (portrait)"))
+        self.center_priority.setChecked(analyze.center_priority)
+        self.center_priority.setToolTip(tr(
+            "Pick the main face by centrality first.\n"
+            "For portrait-style shoots that keep one subject near the middle.\n"
+            "Leave off for group or stage photos."))
+        box.addWidget(self.center_priority)
+
         self.af_hint = QCheckBox(tr("Use camera AF point when no face is found"))
         self.af_hint.setChecked(analyze.af_roi_hint)
         self.af_hint.setToolTip(tr(
@@ -140,6 +149,7 @@ class AnalysisStartDialog(QDialog):
             use_cache=self.use_cache.isChecked() and self.use_cache.isEnabled(),
             noise_compensation=self.noise_comp.isChecked(),
             af_roi_hint=self.af_hint.isChecked(),
+            center_priority=self.center_priority.isChecked(),
         )
 
     @staticmethod

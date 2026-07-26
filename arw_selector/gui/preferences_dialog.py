@@ -114,6 +114,21 @@ class PreferencesDialog(QDialog):
         form.addRow(note)
         outer.addWidget(language_box)
 
+        develop_box = QGroupBox(tr("Develop"))
+        develop_layout = QVBoxLayout(develop_box)
+
+        self.camera_match_check = QCheckBox(
+            tr("Open develop with camera-matched start"))
+        self.camera_match_check.setChecked(state.camera_match_on_open())
+        self.camera_match_check.setToolTip(tr(
+            "When the develop window opens a RAW shot that has no edits yet,\n"
+            "exposure, tone curve and saturation start fitted to the embedded\n"
+            "camera JPEG instead of the flat neutral render. Shots you have\n"
+            "already edited are never touched. Off by default."
+        ))
+        develop_layout.addWidget(self.camera_match_check)
+        outer.addWidget(develop_box)
+
         update_box = QGroupBox(tr("Updates"))
         update_layout = QVBoxLayout(update_box)
 
@@ -207,6 +222,7 @@ class PreferencesDialog(QDialog):
     def accept(self) -> None:
         state.set_language(self.language_combo.currentData() or None)
         state.set_update_check(self.update_check.isChecked())
+        state.set_camera_match_on_open(self.camera_match_check.isChecked())
         super().accept()
 
     def language_changed_from(self, previous: str | None) -> bool:

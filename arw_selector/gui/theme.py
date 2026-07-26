@@ -88,6 +88,14 @@ BUTTON = (
     " border-color: #3a3a40; }"
 )
 
+COMPACT_BUTTON = (
+    # ↺ 리셋처럼 20~30px로 크기를 고정한 버튼용. 전역 BUTTON의
+    # padding 8px 16px이 이런 버튼에서는 내용 폭을 0으로 만들어 글자가
+    # 통째로 잘립니다(오프스크린 grab 픽셀 실측으로 확인). 패딩만 없애고
+    # 배경·테두리 등 나머지 모양은 전역 스타일을 그대로 물려받습니다.
+    "QPushButton { padding: 0px; }"
+)
+
 PRIMARY_BUTTON = (
     # 테두리를 늘 1px 두되 켜져 있을 때는 배경과 같은 색으로 둡니다. 꺼질 때만
     # 색을 주면 버튼 크기가 상태에 따라 2px씩 달라져 툴바가 들썩입니다.
@@ -469,17 +477,22 @@ def reset_button(changed: bool, size: int = 12) -> str:
 
     기본값이면 눌러도 소용없으므로 흐리게, 값이 바뀌었으면 또렷하게
     표시합니다. 슬라이더와 색상휠에서 글자 크기만 다릅니다.
+
+    padding을 명시하는 이유: 안 쓰면 전역 BUTTON의 8px 16px이 그대로
+    걸리고, 20~24px 고정 폭에서는 내용 폭이 0이 되어 ↺가 통째로
+    잘립니다(오프스크린 grab 픽셀 실측으로 확인).
     """
     if changed:
         return (
             "QPushButton { background: #3a3a42; color: #cfe0ff;"
             " border: 1px solid #4d5b73; border-radius: 3px;"
-            f" font-size: {size}px; }}"
+            f" font-size: {size}px; padding: 0px; }}"
             "QPushButton:hover { background: #4a5a75; color: #fff; }"
         )
     return (
         "QPushButton { background: transparent; color: #4a4a52;"
-        f" border: 1px solid {BORDER}; border-radius: 3px; font-size: {size}px; }}"
+        f" border: 1px solid {BORDER}; border-radius: 3px; font-size: {size}px;"
+        " padding: 0px; }"
     )
 
 

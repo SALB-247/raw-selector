@@ -317,12 +317,20 @@ def export_records(
             try:
                 op.destination.parent.mkdir(parents=True, exist_ok=True)
 
+                # 짝 파일(카메라 JPEG·.xmp)은 build_plan이 rendered_name 없이
+                # 만듭니다. 사진이 아니라 **딸린 파일**이므로 현상 엔진을 타면
+                # 안 되고(JPEG이 손실 재압축되고 .xmp는 실패로 기록됩니다),
+                # copy_raw 옵션과도 무관합니다 — 그 옵션은 원본 RAW를 남길지
+                # 정하는 것이지, 사용자가 명시적으로 켠 "짝 파일 포함"을
+                # 무르는 스위치가 아닙니다. 짝 파일은 언제나 그대로 복사/이동.
+                is_companion = op.rendered_name is None
+
                 # 현상을 먼저 합니다. 이동 모드에서 원본을 옮긴 뒤에 읽으려 하면
                 # 소스가 이미 사라져 있습니다.
                 # 원본을 복사하지 않는다면 이 사진의 결과물은 렌더링본뿐입니다.
                 # 보정값이 없다고 건너뛰면 그 사진만 조용히 사라지므로,
                 # 이때는 중립 보정으로라도 반드시 내보냅니다.
-                rendered = apply_develop and (
+                rendered = apply_develop and not is_companion and (
                     op.develop is not None or not options.copy_raw
                 )
                 if rendered:
@@ -338,8 +346,8 @@ def export_records(
                 # 현상본과 같은 형식·같은 이름이라 IMG_0001.jpg 옆에
                 # IMG_0001_1.jpg가 생기고 어느 쪽이 보정본인지 알 수 없게
                 # 됩니다. 원본은 원래 폴더에 그대로 있습니다.
-                skip_original = not options.copy_raw or (
-                    rendered and not is_raw(op.source)
+                skip_original = not is_companion and (
+                    not options.copy_raw or (rendered and not is_raw(op.source))
                 )
                 if skip_original and not move:
                     if progress_cb:

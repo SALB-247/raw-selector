@@ -122,6 +122,24 @@ class RawMetadata:
     shutter_speed: float | None = None  # 초 단위
     aperture: float | None = None
     focal_length: float | None = None
+    focal_length_35mm: float | None = None
+    """환산 초점거리(35mm 기준). 상세정보 패널 표시용.
+
+    소니·니콘은 EXIF FocalLengthIn35mmFilm에 바로 있지만 **캐논은 그 태그를
+    아예 쓰지 않아**(실측 305장 중 캐논 0장) FocalPlane 해상도 태그로 센서
+    크기를 역산해 환산계수를 곱합니다 — exiftool의 ScaleFactor35efl과 같은
+    방식, 실측 오차 ±0.3%(R6M3 1.002, R3 1.000, R5 0.998). RW2는 내장 JPEG
+    ExifIFD 0xA405에 평문입니다.
+    """
+
+    af_area_mode: str | None = None
+    """카메라가 기록한 AF 영역 모드(카메라 용어 그대로, 영문).
+
+    maker_meta.af_area_mode가 채웁니다. 검증된 값만 이름이 붙고 모르는
+    값은 None — 조용히 틀린 이름보다 빈칸이 낫습니다. 렌즈명처럼 고유
+    명사에 가까워 번역하지 않습니다.
+    """
+
     orientation: int = 1  # EXIF Orientation (1~8)
 
     latitude: float | None = None
@@ -179,6 +197,13 @@ def iter_raw_files(folder: Path, recursive: bool = True) -> list[Path]:
     others: list[Path] = []
     for path in folder.glob(pattern):
         if not path.is_file():
+            continue
+        # 숨김 파일은 사진이 아닙니다. 특히 macOS가 exFAT·SMB·NTFS에
+        # 만드는 AppleDouble(`._DSC1234.JPG`)은 확장자가 .JPG라 그냥 두면
+        # 사진으로 잡힙니다 — 4KB짜리 리소스 포크가 장수를 두 배로 부풀리고
+        # 전부 실패로 떨어져 keep 비율이 반토막 납니다(실측 16.0%→8.0%).
+        # 이름이 `._`로 시작해 짝 판정(stem 비교)에도 안 걸립니다.
+        if path.name.startswith("."):
             continue
         relative_parts = path.relative_to(folder).parts[:-1]
         if any(part in skip_dirs for part in relative_parts):
@@ -343,7 +368,13 @@ def load_image_file(path: Path) -> np.ndarray:
         if image is None:
             raise PreviewError(f"HEIF를 열지 못했습니다: {path.name}")
     else:
-        image = imread_unicode(path, cv2.IMREAD_COLOR)
+        # cv2.imdecode는 IMREAD_COLOR만 주면 EXIF 방향을 **자동으로 적용**합니다.
+        # 그대로 두면 아래 apply_orientation이 한 번 더 돌아 세로 컷이 180°
+        # 틀어집니다(실측 Z9 세로 JPEG: 저장 8256×5504 → cv2가 5504×8256으로
+        # 세워 놓은 것을 다시 눕혀 8256×5504). 얼굴이 거꾸로 서니 검출이
+        # 통째로 실패했습니다. 방향 처리는 apply_orientation 한 곳에만 둡니다.
+        image = imread_unicode(
+            path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
         if image is None:
             raise PreviewError(f"이미지를 열지 못했습니다: {path.name}")
 
@@ -382,8 +413,13 @@ def load_preview(path: Path, max_long_edge: int | None = None) -> np.ndarray:
                 thumb = None
 
             if thumb is not None and thumb.format == rawpy.ThumbFormat.JPEG:
+                # IMREAD_IGNORE_ORIENTATION 필수 — 안 주면 imdecode가 내장
+                # 프리뷰의 EXIF 방향을 이미 적용하고, 아래 apply_orientation이
+                # 한 번 더 돌려 세로 컷이 180° 틀어집니다(실측 DSC_0007.NEF
+                # orientation=8: 3712×5568로 잘 선 것을 다시 5568×3712로 눕힘).
                 image = cv2.imdecode(
-                    np.frombuffer(thumb.data, dtype=np.uint8), cv2.IMREAD_COLOR
+                    np.frombuffer(thumb.data, dtype=np.uint8),
+                    cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION,
                 )
                 if image is None:
                     raise PreviewError(f"내장 JPEG 프리뷰 디코딩 실패: {path.name}")
@@ -774,6 +810,48 @@ _LENS_TAGS = (
     "MakerNote LensType",    # Canon, Pentax — 숫자 ID일 때도 있어 뒤로 미룹니다
 )
 
+def _focal_35mm_from_tags(tags, focal: "float | None") -> "float | None":
+    """환산 초점거리. ①표준 태그 → ②FocalPlane 역산(캐논) 순서.
+
+    캐논은 FocalLengthIn35mmFilm을 아예 안 씁니다(실측 305장 중 0장).
+    대신 FocalPlane 해상도와 출력 화소 수로 센서 실측 크기를 역산해
+    대각선 비율(43.27mm 기준)로 환산합니다 — exiftool ScaleFactor35efl과
+    같은 방식이고 실측 오차 ±0.3%입니다. 역산값이 물리적으로 말이 안 되면
+    (센서 폭 2~60mm 밖) 계산을 버립니다.
+    """
+    tag = tags.get("EXIF FocalLengthIn35mmFilm")
+    if tag:
+        value = _int_tag(tag)
+        if value:
+            return float(value)
+    if not focal:
+        return None
+    fp_x = tags.get("EXIF FocalPlaneXResolution")
+    fp_y = tags.get("EXIF FocalPlaneYResolution")
+    width = tags.get("EXIF ExifImageWidth")
+    height = tags.get("EXIF ExifImageLength")
+    if not (fp_x and fp_y and width and height):
+        return None
+    unit_tag = tags.get("EXIF FocalPlaneResolutionUnit")
+    unit_mm = {2: 25.4, 3: 10.0, 4: 1.0}.get(
+        _int_tag(unit_tag) if unit_tag else 2, 25.4)
+    try:
+        res_x = _ratio_to_float(fp_x)
+        res_y = _ratio_to_float(fp_y)
+        pixels_w = _int_tag(width)
+        pixels_h = _int_tag(height)
+        if not (res_x and res_y and pixels_w and pixels_h):
+            return None
+        sensor_w = pixels_w / res_x * unit_mm
+        sensor_h = pixels_h / res_y * unit_mm
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if not (2.0 < sensor_w < 60.0 and 1.5 < sensor_h < 45.0):
+        return None
+    crop = (36.0 ** 2 + 24.0 ** 2) ** 0.5 / (sensor_w ** 2 + sensor_h ** 2) ** 0.5
+    return round(focal * crop)
+
+
 _LENS_PLACEHOLDERS = {"unknown", "n/a", "na", "----", "none", "manual lens"}
 
 
@@ -852,6 +930,9 @@ def read_metadata(path: Path) -> RawMetadata:
     focal = tags.get("EXIF FocalLength")
     iso = tags.get("EXIF ISOSpeedRatings")
     orientation = tags.get("Image Orientation")
+    focal_value = _ratio_to_float(focal) if focal else None
+
+    from .maker_meta import af_area_mode as _af_area_mode
 
     metadata = RawMetadata(
         path=path,
@@ -862,13 +943,17 @@ def read_metadata(path: Path) -> RawMetadata:
         iso=_int_tag(iso) if iso else None,
         shutter_speed=_ratio_to_float(shutter) if shutter else None,
         aperture=_ratio_to_float(aperture) if aperture else None,
-        focal_length=_ratio_to_float(focal) if focal else None,
+        focal_length=focal_value,
+        focal_length_35mm=_focal_35mm_from_tags(tags, focal_value),
+        af_area_mode=_af_area_mode(path),
         orientation=_int_tag(orientation) or 1 if orientation else 1,
         latitude=_gps_degrees(tags, "GPS GPSLatitude", "GPS GPSLatitudeRef"),
         longitude=_gps_degrees(tags, "GPS GPSLongitude", "GPS GPSLongitudeRef"),
     )
 
-    if path.suffix.lower() == ".rw2" and (metadata.iso is None or not metadata.lens_model):
+    if path.suffix.lower() == ".rw2" and (
+            metadata.iso is None or not metadata.lens_model
+            or metadata.focal_length_35mm is None):
         # RW2는 TIFF 매직이 85라 exifread가 파일째 거부합니다. 위에서 온
         # 값들은 내장 프리뷰 EXIF 폴백인데 거기엔 ISO·렌즈가 없습니다.
         # 정작 IFD0 0x0017(ISO)과 내장 JPEG의 MakerNote 0x0051(렌즈)에
@@ -883,6 +968,8 @@ def read_metadata(path: Path) -> RawMetadata:
             patch["iso"] = extras["iso"]
         if not metadata.lens_model and "lens" in extras:
             patch["lens_model"] = extras["lens"]
+        if metadata.focal_length_35mm is None and "focal_35mm" in extras:
+            patch["focal_length_35mm"] = extras["focal_35mm"]
         if patch:
             metadata = _replace(metadata, **patch)
 

@@ -41,6 +41,7 @@ from ..core.raw_io import (
     to_display,
 )
 from ..core import face_mesh
+from ..core.config import AnalyzeConfig
 from ..core.focus import FACE_DISPLAY_MIN_SCORE
 from ..core.types import Grade, ImageRecord
 from .reason_text import render_all
@@ -55,6 +56,10 @@ _FULL_CROP = {
 
 PREVIEW_LONG_EDGE = 1400
 """미리보기 렌더 해상도. 더 키우면 슬라이더 반응이 눈에 띄게 둔해집니다."""
+
+_AF_UNREAD = object()
+"""AF 상자를 아직 안 읽었다는 표식. None(파일에 없음)과 구분해야 매 렌더마다
+파일을 다시 뒤지지 않습니다."""
 
 FINAL_LONG_EDGE = 2200
 """최종 미리보기 표시 해상도. 디모자이크는 원본으로 하되 표시는 이 크기로."""
@@ -339,8 +344,13 @@ class LoupeDialog(QDialog):
         records: list[ImageRecord] | None = None,
         parent=None,
         fast: bool = False,
+        analyze_config: AnalyzeConfig | None = None,
     ):
         super().__init__(parent)
+        # 주 피사체를 바꾸면 판정을 다시 돌립니다 — 그때 배치와 같은 설정을
+        # 써야 점수가 어긋나지 않습니다. 안 넘어오면 기본값(배치도 기본값을
+        # 썼다면 일치)으로 둡니다.
+        self._analyze_config = analyze_config or AnalyzeConfig()
         # fast=True면 내장 JPEG으로 즉시 엽니다(빠른 미리보기용). False면 RAW를
         # 디모자이크해 정확한 색·계조로 엽니다(보정용, 여는 데 조금 더 걸림).
         self._fast = fast
@@ -365,6 +375,10 @@ class LoupeDialog(QDialog):
 
         self._eye_contours: list[np.ndarray] | None = None
         """이 컷의 눈 윤곽(분석 좌표계). 컷을 바꾸거나 주 피사체를 바꾸면 비웁니다."""
+
+        self._af_box: object = _AF_UNREAD
+        """이 컷의 카메라 AF 상자(분석 좌표계). _AF_UNREAD=아직 안 읽음,
+        None=파일에 없음, (x,y,w,h)=있음. 캐시된 레코드엔 없어 표시 때 읽습니다."""
 
         self._demosaic_cache = None
         self._demosaic_path: Path | None = None
@@ -540,6 +554,7 @@ class LoupeDialog(QDialog):
 
         self.panel = DevelopPanel()
         self.panel.settings_changed.connect(self._on_settings_changed)
+        self.panel.camera_match_requested.connect(self._match_camera_look)
         self.panel.crop_mode_changed.connect(self._on_crop_mode)
         self.panel.pick_mode_changed.connect(self._on_pick_mode)
         self.panel.mask_overlay_changed.connect(self._render)
@@ -616,6 +631,13 @@ class LoupeDialog(QDialog):
         self.show_eyes.setToolTip(tr("Eye contours — to check the eyes are really open (E)"))
         self.show_eyes.toggled.connect(self._render)
         row.addWidget(self.show_eyes)
+
+        self.show_af = QCheckBox(tr("AF point"))
+        self.show_af.setToolTip(tr(
+            "Where the camera focused — orange box (P).\n"
+            "Sony, Canon CR3, Nikon. Not every file records it."))
+        self.show_af.toggled.connect(self._render)
+        row.addWidget(self.show_af)
 
         self.focus_zoom_button = QPushButton(tr("Zoom to focus"))
         self.focus_zoom_button.setToolTip(tr(
@@ -732,6 +754,7 @@ class LoupeDialog(QDialog):
             ("F", lambda: self.show_roi.setChecked(not self.show_roi.isChecked())),
             ("A", lambda: self.show_faces.setChecked(not self.show_faces.isChecked())),
             ("E", lambda: self.show_eyes.setChecked(not self.show_eyes.isChecked())),
+            ("P", lambda: self.show_af.setChecked(not self.show_af.isChecked())),
             ("Z", self.zoom_to_focus),
             ("Q", self.add_to_queue),
         ):
@@ -812,10 +835,17 @@ class LoupeDialog(QDialog):
         self._maybe_warn_stale_roi()
 
         # 절대 색온도 변환에 쓸 화이트밸런스를 읽고, 슬라이더 기본값을
-        # 이 컷의 as-shot 색온도로 맞춥니다.
+        # 이 컷의 as-shot 색온도로 맞춥니다. **못 읽으면(JPEG·HEIF) 기본값으로
+        # 되돌립니다** — 안 되돌리면 직전 RAW의 as-shot이 남아, 다음 JPEG
+        # 컷에서 슬라이더를 한 칸만 건드려도 그 기준점 대비 큰 색 이동
+        # (실측 R×0.77·B×1.40)이 걸립니다.
+        from .develop_panel import DEFAULT_KELVIN
+
         self._wb = read_white_balance(self.record.path)
         if self._wb is not None:
             self.panel.set_as_shot_kelvin(self._wb.as_shot_kelvin)
+        else:
+            self.panel.set_as_shot_kelvin(DEFAULT_KELVIN)
 
         # 렌즈 프로필이 잡히는지 미리 알려 줍니다. DB에 없는 렌즈가 흔해서
         # (실측: 탐론 A069 미등록) 자동 보정을 켜기 전에 알아야 합니다.
@@ -855,6 +885,10 @@ class LoupeDialog(QDialog):
         self.show_roi.setEnabled(has_focus)
         self.show_faces.setEnabled(has_faces)
         self.show_eyes.setEnabled(has_faces)
+        # AF는 파일이 기록했을 때만 의미가 있지만, 그 여부는 파일을 읽어야
+        # 압니다(_source가 비동기라 여기선 아직 없음). 메타가 있으면 켜 두고,
+        # 없으면 그릴 게 없다는 것만 툴팁이 설명합니다.
+        self.show_af.setEnabled(self.record.metadata is not None)
         self.focus_zoom_button.setEnabled(has_focus)
         self.preview.reset_view()
         self._on_zoom(1.0)
@@ -863,9 +897,91 @@ class LoupeDialog(QDialog):
             else tr("This shot has no analysis data")
         )
         self._eye_contours = None  # 컷이 바뀌면 다시 잽니다
+        self._af_box = _AF_UNREAD  # 컷이 바뀌면 다시 읽습니다
+
+        # 환경설정에서 켰다면 보정이 전혀 없는 컷에 한해 카메라 룩을
+        # 시작점으로 깝니다. _render() 전에 해야 첫 화면부터 맞은 값입니다.
+        self._maybe_auto_camera_match()
 
         self._refresh_header()
         self._render()
+
+    # ------------------------------------------------------------ 카메라 룩 매칭
+
+    def _fit_camera_match(self) -> DevelopSettings | None:
+        """현재 컷의 카메라 룩 매칭 설정을 계산합니다. 못 하면 None.
+
+        내장 JPEG(카메라 렌더)을 정답지로 노출·톤 곡선·채도를 피팅해
+        **슬라이더에 올라가는 보통 값**으로 돌려줍니다(core/develop/
+        camera_look.py). 어떤 실패도 창을 막으면 안 됩니다 — 시작점 편의
+        기능이 열기 자체를 방해하면 본말이 뒤집힙니다.
+        """
+        from ..core.develop import camera_look
+        from ..core.raw_io import is_editable_image
+
+        if (self._source is None or self._degraded
+                or is_editable_image(self.record.path)):
+            return None
+        try:
+            target = load_preview(self.record.path)
+            return camera_look.match_settings(
+                to_display(self._source), target, base=self.panel.settings()
+            )
+        except Exception:  # noqa: BLE001 - 프리뷰가 없거나 깨진 파일도 있습니다
+            log.debug("카메라 룩 매칭 실패: %s", self.record.path.name,
+                      exc_info=True)
+            return None
+
+    def _match_camera_look(self) -> None:
+        """'카메라 JPEG에 맞추기' 버튼 — 피팅 결과를 슬라이더 값으로 올립니다.
+
+        노출·채도·톤 곡선만 바꾸고 디테일·마스크·크롭 등 나머지 편집은
+        그대로 둡니다(camera_look.match_settings의 계약).
+        """
+        matched = self._fit_camera_match()
+        if matched is None:
+            reason = (
+                tr("RAW demosaic failed here, so the screen already shows "
+                   "the embedded JPEG — there is nothing to match.")
+                if self._degraded else
+                tr("Could not read this shot's embedded JPEG to match against.")
+            )
+            self.info.setText(
+                f"<b>{self.record.path.name}</b> · "
+                f"<span style='color:{theme.WARNING}'>{reason}</span>"
+            )
+            return
+        self.panel.set_settings(matched)
+        # 프리셋 이름이 남아 있으면 화면 값이 그 프리셋인 줄 압니다
+        self.panel.preset_bar.mark_modified()
+        self._on_settings_changed()
+
+    def _maybe_auto_camera_match(self) -> None:
+        """환경설정의 '카메라 룩으로 시작'이 켜져 있으면 자동 적용합니다.
+
+        **그 컷에 보정이 하나라도 있으면 절대 건드리지 않습니다.** 자동
+        기능이 사용자의 편집을 덮으면 신뢰가 끝장납니다. 미리보기 전용
+        창(fast)은 패널이 없으므로 제외합니다.
+        """
+        from ..core import state
+
+        if self._fast or not state.camera_match_on_open():
+            return
+        # 내보내기가 도는 동안(set_locked)에는 어떤 경로로도 record.develop을
+        # 바꾸면 안 됩니다 — 컷 이동으로 _load_current가 다시 돌아도 마찬가지.
+        if getattr(self, "_locked", False):
+            return
+        current = self.record.develop
+        if current is not None and not current.is_neutral():
+            return
+        matched = self._fit_camera_match()
+        if matched is None:
+            return
+        self.panel.set_settings(matched)
+        self.panel.preset_bar.mark_modified()
+        # 시작점도 저장돼야 화면=결과가 맞습니다 — 창을 그냥 닫아도 지금
+        # 보이는 값 그대로 내보내기에 쓰입니다.
+        self._dirty = True
 
     def _refresh_header(self) -> None:
         record = self.record
@@ -1589,9 +1705,32 @@ class LoupeDialog(QDialog):
         from ..core.focus import analyze_focus
         from ..core.raw_io import load_preview
 
+        # 배치와 **같은 설정**으로 다시 태워야 합니다. 인자를 안 넘기면
+        # laplacian_k·노이즈 차감이 기본값으로 돌고 af_box가 없어 af_face가
+        # -1로 죽습니다 — 주 피사체만 바꿨는데 점수가 배치와 달라지고 AF
+        # 신뢰도 배지가 사라집니다.
+        config = self._analyze_config
         try:
             preview = load_preview(self.record.path)
-            focus = analyze_focus(preview, force_main_face=index)
+            af_box = None
+            if self.record.metadata is not None:
+                from ..core.maker_meta import af_preview_box
+
+                af_box = af_preview_box(
+                    self.record.path, self.record.metadata.orientation,
+                    preview.shape[1], preview.shape[0],
+                )
+            focus = analyze_focus(
+                preview,
+                detect_long_edge=config.detect_long_edge,
+                laplacian_k=config.laplacian_k,
+                tenengrad_k=config.tenengrad_k,
+                force_main_face=index,
+                af_box=af_box,
+                use_af_roi=config.af_roi_hint,
+                center_priority=config.center_priority,
+                noise_compensation=config.noise_compensation,
+            )
         except Exception:  # noqa: BLE001 - 못 바꿔도 보정 작업은 계속돼야 합니다
             log.warning("%s: 주 피사체 재판정 실패", self.record.path.name,
                         exc_info=True)
@@ -1607,7 +1746,7 @@ class LoupeDialog(QDialog):
     def _any_overlay_on(self) -> bool:
         """표시 항목이 하나라도 켜져 있는가. 전부 꺼져 있으면 복사조차 안 합니다."""
         return (self.show_roi.isChecked() or self.show_faces.isChecked()
-                or self.show_eyes.isChecked())
+                or self.show_eyes.isChecked() or self.show_af.isChecked())
 
     def visible_face_indices(self) -> list[int]:
         """화면에 그릴 얼굴 번호. 주 피사체 전환 대상도 이 목록입니다.
@@ -1707,7 +1846,42 @@ class LoupeDialog(QDialog):
         # 그렸더니 확대했을 때 선이 얼굴을 덮어 정작 초점을 못 봤습니다.
         if self.show_faces.isChecked() and 0 <= focus.main_face < len(focus.faces):
             draw(focus.faces[focus.main_face], (60, 60, 235), thin)
+
+        # 카메라 AF 위치 — 주황. 존 AF는 몸통을 가리키므로(소니) 얼굴 상자와
+        # 어긋나는 게 정상입니다. 그 어긋남 자체가 신뢰도 신호입니다(A1).
+        af_box = self._af_reference_box()
+        if self.show_af.isChecked() and af_box is not None:
+            draw(af_box, (40, 170, 240), max(thin, 2))
         return marked
+
+    def _af_reference_box(self) -> tuple[int, int, int, int] | None:
+        """카메라 AF 상자를 얼굴·ROI와 같은 좌표계(_roi_reference_width 기준)로.
+
+        캐시된 레코드에는 AF 상자가 없어 표시 시점에 파일을 읽습니다(헤더
+        2MB, ~ms). 한 번 읽어 캐시하고, None(파일에 없음)과 미판독을 구분해
+        매 렌더마다 다시 뒤지지 않습니다.
+        """
+        if self._af_box is not _AF_UNREAD:
+            return self._af_box  # type: ignore[return-value]
+
+        reference = self._roi_reference_width
+        source = self._source
+        if not reference or source is None:
+            # 아직 프리뷰가 안 올라왔습니다. 캐시하지 않고(_AF_UNREAD 유지)
+            # 다음 렌더에서 다시 시도합니다 — None으로 굳히면 영영 안 읽습니다.
+            return None
+        # af_preview_box는 프리뷰 크기를 받아 그 좌표로 돌려줍니다. 분석
+        # 좌표계(reference 폭)와 같은 종횡비를 줘야 결과가 얼굴 상자와 맞물립니다.
+        ref_h = int(round(reference * source.shape[0] / source.shape[1]))
+        orientation = self.record.metadata.orientation if self.record.metadata else 1
+        try:
+            from ..core.maker_meta import af_preview_box
+
+            self._af_box = af_preview_box(
+                self.record.path, orientation, int(reference), ref_h)
+        except Exception:  # noqa: BLE001 - 표시용이라 실패해도 조용히 넘어갑니다
+            self._af_box = None
+        return self._af_box  # type: ignore[return-value]
 
     # -------------------------------------------------- 방사형·선형 마스크 조작
 

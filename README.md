@@ -3,14 +3,19 @@
 A desktop tool for **culling RAW photos by focus** and developing the keepers.
 Built for batches of ~4,000 frames, running the same code on Windows and macOS.
 
+### 📖 [Read the manual — docs/HOWTO.md](docs/HOWTO.md)
+
+Every screen, button and shortcut, in workflow order, with screenshots.
+
+![The main window](docs/screenshots/main-window.png)
+
 Shot on a Sony A6700 (ARW), but the same pipeline works for other bodies —
 anything LibRaw 0.22 opens (**CR3 / CR2 / NEF / RAF / ORF / RW2 / DNG**, ~20
 formats). It also judges and develops **JPEG and HEIF** directly, for people who
 don't shoot RAW.
 
 Select, develop (tone/colour/masks/watermark), and export all work from one
-window. See **[docs/HOWTO.md](docs/HOWTO.md)** for the full manual with
-screenshots. See [CHANGELOG.md](CHANGELOG.md) for what changed per release and what to
+window. See [CHANGELOG.md](CHANGELOG.md) for what changed per release and what to
 do when upgrading, and **[SUPPORTED.md](SUPPORTED.md)** for the full list of
 decodable formats, colour-calibrated cameras, and lens-correction profiles.
 
@@ -64,6 +69,10 @@ Open folder → analyse → review the grid → export.
 - **Criteria** opens the judging panel. Changing a value **re-grades instantly,
   without re-analysing** (re-analysis is minutes; re-grading is 0.3s, so you can
   feel out the settings with the sliders live).
+- The **score card** under the grid breaks the score down line by line, and its
+  right side is a fact sheet for the shot — capture time, body, lens, focal
+  length (with the 35mm equivalent on crop bodies), exposure, AF area mode, and
+  location when the file carries one.
 - **1 / 2 / 3** set the selected frame's grade by hand; **0** returns it to auto.
 - **Space** or double-click opens the loupe — check the ROI that was judged,
   develop, change grade, and move between frames all in there.
@@ -112,6 +121,15 @@ subject. So a **signal gate** zeroes anything below std-dev 5 (sensor noise, no
 basis for a focus call), and **tile selection uses the raw gradient** —
 normalisation is for comparing *between* images, not tiles *within* one.
 
+With several faces in the frame, each face is measured for sharpness first, and
+the main subject is picked by area × detection confidence among the ones that
+are actually in focus — otherwise a bystander looming in the foreground beats
+the person the shot was focused on. Portrait-style shoots that keep one person
+near the middle can flip that with **Single-subject framing (portrait)** in the
+Start analysis dialog (off by default): it picks by centrality first, measuring
+95.4% against 77.9% on a 47,990-frame holdout of that genre — and losing to the
+default on stage and group work, which is why it is an option and not a change.
+
 `focus.ALGORITHM_VERSION` is part of the cache key, so changing how sharpness is
 measured invalidates old scores automatically.
 
@@ -125,11 +143,33 @@ seconds — time separates them cleanly where visual similarity does not.
 
 Closed eyes are still in focus, so sharpness never catches them. The main
 subject's 468-point mesh gives an **eye aspect ratio (EAR)**; below
-`eyes_closed_below` (default 0.20) it subtracts `penalty_eyes_closed` (default
-7.5). The **more open** of the two eyes is used (a profile's far eye always reads
+`eyes_closed_below` (default 0.25) it subtracts `penalty_eyes_closed` (default
+20). The **more open** of the two eyes is used (a profile's far eye always reads
 closed). When the eyes can't be measured, nothing is subtracted — *unmeasured* is
-not *closed*. The penalty is small on purpose: the goal is to push a frame out of
-auto-keep into review, not down into reject.
+not *closed*.
+
+The threshold comes from hand-labelled frames rather than taste. On a 152-frame
+set where the reason for each failure (one eye, blur, darkness, mis-aligned
+landmarks) was separated out, 0.25 catches 67.1% of closed eyes at 10.3% false
+penalties (79.4% accuracy) against 57.5% / 8.0% (76.2%) for a stricter 0.22. The
+call stays deliberately asymmetric — missing a closed-eye frame only costs a
+look in review, while penalising an open-eye frame quietly buries a good shot.
+
+### Camera AF
+
+Cameras record where they focused, and the app reads that back from Sony ARW,
+Canon CR3, Nikon NEF, and **camera-produced Canon and Nikon JPEGs** (75% of a
+real archive sample still carried it; the rest had been stripped by editing
+software). Three things use it, none of which change the score on their own:
+
+- **Use camera AF point when no face is found** (Start analysis dialog, off by
+  default) judges the recorded AF area instead of guessing the sharpest tile.
+- When the camera's AF points at a *different* person than the main subject, the
+  reasons list says **main subject uncertain** — a flag to look again, not a
+  score change. Following the AF instead measured worse (87% → 49% on 117
+  labelled frames). On frames with one face or none it never fires at all.
+- `P` in the loupe draws the recorded AF box next to the focus / face / eye
+  overlays.
 
 ### Grade
 
@@ -142,11 +182,12 @@ score < max(reject_below, batch p15)-> reject
 otherwise                           -> review
 ```
 
-The default keep threshold is a **target ratio** (`target_keep_ratio`, default
-10%), back-solved from the batch's score distribution so the keep share stays
-stable when lighting or lens shifts the scores. The most expensive error is a
-**false reject**, so judging leans toward reject, and **the group's best frame is
-never rejected** under any threshold combination.
+The keep threshold is an absolute score by default (`keep_above`, 65). Setting
+**`target_keep_ratio`** instead back-solves the threshold from the batch's own
+score distribution, so the keep share stays stable when lighting or lens shifts
+the scores — worth switching to if you carry thresholds between shoots. The most
+expensive error is a **false reject**, so judging leans toward reject, and **the
+group's best frame is never rejected** under any threshold combination.
 
 ## Develop
 
@@ -155,11 +196,19 @@ move between frames without breaking flow across hundreds of shots.
 
 Supported adjustments: basic tone (temperature, exposure, highlights, shadows,
 whites/blacks, texture, clarity, dehaze, vibrance, saturation), parametric +
-drag-edit curves (RGB/R/G/B), detail (sharpening, noise reduction with a
-**face-priority** weighting, LED-wall destripe), local masks (brush / radial /
-linear / face / eye / background, 11 presets), HSL colour mixer, colour grading,
-effects (grain, vignette), optics (lensfun auto + manual distortion/vignetting/
-defringe), crop & straighten, an info strip, watermark, and selective EXIF.
+drag-edit curves (RGB/R/G/B), detail (sharpening, multi-pass noise reduction
+with a **face-priority** weighting, LED-wall destripe), local masks (brush /
+radial / linear / face / eye / background, 11 presets), HSL colour mixer,
+colour grading, effects (grain, vignette), optics (lensfun auto + manual
+distortion/vignetting/defringe), crop & straighten, an info strip, watermark,
+and selective EXIF.
+
+**Match camera JPEG** fits exposure, tone curve and saturation to the RAW's own
+embedded camera render (~16ms), so a develop starts where the JPEG you culled by
+looked instead of at a flat neutral one — measured on 31 real files, luma MAE
+19.8 → 6.5. The fit lands on the sliders as ordinary values, so everything stays
+editable. Preferences can do it automatically on open, and it never touches a
+frame that already has edits.
 
 The preview and the export run the **same `engine.apply_settings`** — only the
 resolution differs. **Full Render** re-develops at screen resolution when you
