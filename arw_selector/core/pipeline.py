@@ -85,6 +85,12 @@ def analyze_file(
                 path, metadata.orientation, preview.shape[1], preview.shape[0]
             )
 
+        # 축소본을 여기서 한 번 만들어 셋이 나눠 씁니다. 예전에는 셋이
+        # 제각각 6192×4128에서 줄였습니다 — 얼굴 검출용으로 어차피 만드는
+        # 것을 지문과 썸네일이 재사용하면 장당 53ms가 사라집니다(맥 실측).
+        reduced = focus_module.reduce_for_detection(
+            preview, config.detect_long_edge)
+
         result = focus_module.analyze_focus(
             preview,
             detect_long_edge=config.detect_long_edge,
@@ -94,14 +100,15 @@ def analyze_file(
             use_af_roi=config.af_roi_hint,
             center_priority=config.center_priority,
             noise_compensation=config.noise_compensation,
+            reduced=reduced,
         )
         # 프리뷰가 메모리에 올라와 있는 지금 장면 지문과 썸네일을 같이 뜹니다.
         # 나중에 구하려면 4000장을 전부 다시 디코딩해야 합니다.
-        scene_hash = dhash(preview)
+        scene_hash = dhash(reduced)
         if cache_dir is not None:
             # 경로 해시로 이름을 짓습니다. stem을 쓰면 하위 폴더의 동명 파일이
             # 서로의 썸네일을 덮어씁니다.
-            write_thumbnail(preview, thumbnail_path(Path(cache_dir), path))
+            write_thumbnail(reduced, thumbnail_path(Path(cache_dir), path))
 
         return ImageRecord(path=path, metadata=metadata, focus=result, dhash=scene_hash)
     except PreviewError as exc:
@@ -147,21 +154,33 @@ def _worker(payload: tuple[str, AnalyzeConfig, str | None]) -> ImageRecord:
 #:
 #: 350은 가장 싼 경로(NEF 385MB)에도 못 미쳤습니다. 8GB 맥에서 HEIF 폴더를
 #: 열면 워커 4개가 4.3GB를 잡아(실측 4,261MB) 스왑이 걸립니다 — 총 RSS는
-#: 워커 수에 선형입니다(ARW 1/4/8워커 448 / 1,748 / 3,268MB). 그래서
-#: 지원하는 최악의 포맷을 기준으로 잡습니다.
+#: 워커 수에 선형입니다(ARW 1/4/8워커 448 / 1,748 / 3,268MB).
 #:
-#: 대가는 RAW 폴더에서 워커가 줄어드는 것인데, 맥에서는 손해가 작습니다 —
-#: ARW 100장이 1워커 14.2초 / 3워커 8.9초 / 4워커 5.9초 / 8워커 6.8초로
-#: 4를 넘으면 더 빨라지지 않습니다(윈도 32코어의 12워커와 다릅니다).
-#: 그래서 **포맷을 보고 가릅니다** — resolve_workers에 분석할 목록을
-#: 넘기면 RAW 전용 배치는 550, JPEG·HEIF가 섞이면 1300을 씁니다. 목록이
-#: 없으면(ETA 추정 등) 안전하게 최악값을 씁니다.
-WORKER_MEMORY_MB = 1300
-
-#: RAW만 있는 배치의 워커 예산. 실측 최악은 CR3 32.3MP의 525MB이고,
-#: 더 큰 센서(60MP급)를 감안해 여유를 둔 값입니다. 이 앱의 주 용도가
-#: RAW 셀렉트라, 여기서 워커가 깎이면 체감 손해가 가장 큽니다.
-RAW_WORKER_MEMORY_MB = 550
+#: **포맷별로 가르지 않고 하나로 씁니다.** 예전에는 RAW 전용 배치에 550을
+#: 따로 물렸는데, 배치에 JPEG이 한 장만 섞여도 최악값으로 넘어가는 데다
+#: 값 자체가 실측과 크게 어긋나 있었습니다(맥 JPEG 실측 402~546MB,
+#: 윈도 134~196MB에 1,300을 물림). 가르는 값어치보다 어긋나는 손해가
+#: 컸습니다 — 16GB 맥의 JPEG 배치가 워커 2개로 묶였습니다.
+#:
+#: 800은 **실측 최악값이 아니라 의도적으로 낮춘 값**입니다. 실측 최악은
+#: HEIF 25.6MP의 1,109~1,144MB(맥)라, 800으로 나누면 HEIF 배치는 예산보다
+#: 많은 워커를 띄웁니다. 16GB 맥에서 5개 대신 7개입니다.
+#:
+#: 그 대가를 재 봤습니다(HIF 60장씩, 겹치지 않는 구역):
+#:
+#:   워커 2   2.83장/s   2,287MB   스왑 +0
+#:   워커 5   3.18장/s   5,543MB   스왑 +0     ← 최적
+#:   워커 7   2.56장/s   7,224MB   스왑 +0     ← 이 값이 고르는 수
+#:   워커 9   2.46장/s   8,012MB   스왑 +664MB
+#:
+#: HEIF에서 −19.5%입니다. 7워커는 스왑까지 가지 않으므로 저하 원인은
+#: 스왑이 아니라 경합입니다. 대신 RAW·JPEG에서는 손해가 없고(실측 구간이
+#: 평평합니다) 램이 큰 기계에서 워커가 더 나옵니다. **HEIF 한 형식의
+#: 20% 안쪽 손해를 받아들이고 나머지를 넉넉히 주는 쪽을 택했습니다.**
+#:
+#: HEIF 배치가 느리다는 신고가 오면 여기부터 보십시오 — 1100으로 올리면
+#: 그 형식이 최적으로 돌아옵니다.
+WORKER_MEMORY_MB = 800
 
 #: 이 지점을 넘으면 오히려 느려집니다.
 #:
@@ -234,23 +253,6 @@ def _available_memory_mb() -> int | None:
         return None
 
 
-def worker_memory_mb(paths: Iterable[Path] | None = None) -> int:
-    """이 배치의 워커 1개가 잡을 메모리 예산(MB).
-
-    RAW만 있으면 550, JPEG·HEIF가 하나라도 섞이면 1300입니다 — 실측에서
-    JPEG(1,347MB)·HEIF(1,225MB)이 RAW(385~525MB)의 2~3배를 씁니다.
-    목록을 모르면 안전하게 최악값을 씁니다.
-    """
-    if paths is None:
-        return WORKER_MEMORY_MB
-    from .raw_io import is_raw
-
-    for path in paths:
-        if not is_raw(Path(path)):
-            return WORKER_MEMORY_MB
-    return RAW_WORKER_MEMORY_MB
-
-
 def resolve_workers(requested: int | None,
                     paths: Iterable[Path] | None = None) -> int:
     """워커 수를 정합니다.
@@ -260,7 +262,8 @@ def resolve_workers(requested: int | None,
     묶습니다: 코어 수(한 코어는 UI/OS 몫), 쓸 수 있는 램, 그리고 실측상
     이득이 사라지는 지점.
 
-    paths를 주면 포맷에 맞는 메모리 예산을 씁니다(worker_memory_mb).
+    포맷별로 가르지 않습니다 — WORKER_MEMORY_MB 주석 참고. paths는
+    호출부 호환을 위해 남겨 두었고 지금은 쓰지 않습니다.
     """
     if requested and requested > 0:
         return requested
@@ -270,8 +273,12 @@ def resolve_workers(requested: int | None,
 
     available = _available_memory_mb()
     if available:
-        # 절반만 씁니다. 나머지는 UI와 OS 몫입니다.
-        by_memory = int(available * 0.5 // worker_memory_mb(paths))
+        # 가용량을 그대로 나눕니다. 예전에는 0.5를 곱해 절반만 썼는데,
+        # 이 값은 이미 "당장 되돌려받을 수 있는" 몫이라(맥은 free+inactive+
+        # speculative, 윈도는 ullAvailPhys) UI가 쓰는 메모리는 애초에
+        # 빠져 있습니다. 절반을 또 떼면 이중으로 깎입니다 — 16GB 맥에서
+        # 워커가 2개로 묶인 것이 그 결과였습니다.
+        by_memory = int(available // WORKER_MEMORY_MB)
         workers = max(1, min(workers, by_memory))
     return workers
 

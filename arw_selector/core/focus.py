@@ -27,8 +27,15 @@ from .types import FocusResult, FocusSource
 
 log = logging.getLogger(__name__)
 
-ALGORITHM_VERSION = 4
+ALGORITHM_VERSION = 5
 """측정 알고리즘 버전. 캐시 키에 들어갑니다.
+
+5: 장면 지문(dhash)을 원본 프리뷰가 아니라 얼굴 검출용 1024px 축소본에서
+   뜹니다. 초점 판정은 한 픽셀도 바뀌지 않고(실측 60/60 완전 일치) 지문만
+   최대 1비트 달라집니다(60장 중 4장). 장면 묶기 임계가 64비트 중 40이라
+   결과는 같았지만(150장 12그룹 동일), 한 폴더 안에 옛 방식과 새 방식의
+   지문이 섞이면 앵커 비교가 두 방식을 오가므로 캐시를 갈아 끼웁니다.
+
 
 설정값이 그대로여도 알고리즘이 바뀌면 예전 결과는 무횹니다. 이 값을 올리지
 않으면 캐시가 옛날 점수를 그대로 돌려주고, 고친 내용이 반영되지 않은 채
@@ -627,6 +634,26 @@ def _measure_eye_opening(image_bgr: np.ndarray, box) -> float:
 # ---------------------------------------------------------------- 진입점
 
 
+def reduce_for_detection(image_bgr: np.ndarray,
+                         detect_long_edge: int = DETECT_LONG_EDGE) -> np.ndarray:
+    """얼굴 검출용 축소본. 분석 한 장에서 가장 비싼 resize입니다(실측 28.5ms).
+
+    호출부에서도 쓸 수 있게 따로 뺐습니다. 장면 지문과 썸네일이 같은
+    축소본을 재사용하면 원본 6192×4128에서 다시 줄이는 비용이 사라집니다 —
+    맥 실측으로 dhash 10.9→2.7ms, 썸네일 47.0→2.3ms입니다.
+    """
+    full_h, full_w = image_bgr.shape[:2]
+    long_edge = max(full_h, full_w)
+    scale = min(1.0, detect_long_edge / long_edge) if long_edge else 1.0
+    if scale >= 1.0:
+        return image_bgr
+    return cv2.resize(
+        image_bgr,
+        (max(1, round(full_w * scale)), max(1, round(full_h * scale))),
+        interpolation=cv2.INTER_AREA,
+    )
+
+
 def analyze_focus(
     image_bgr: np.ndarray,
     detect_long_edge: int = DETECT_LONG_EDGE,
@@ -637,6 +664,7 @@ def analyze_focus(
     use_af_roi: bool = False,
     center_priority: bool = False,
     noise_compensation: bool = True,
+    reduced: np.ndarray | None = None,
 ) -> FocusResult:
     """프리뷰 이미지 한 장의 초점 상태를 측정합니다.
 
@@ -658,14 +686,8 @@ def analyze_focus(
 
     long_edge = max(full_h, full_w)
     scale = min(1.0, detect_long_edge / long_edge) if long_edge else 1.0
-    if scale < 1.0:
-        small = cv2.resize(
-            image_bgr,
-            (max(1, round(full_w * scale)), max(1, round(full_h * scale))),
-            interpolation=cv2.INTER_AREA,
-        )
-    else:
-        small = image_bgr
+    small = reduced if reduced is not None else reduce_for_detection(
+        image_bgr, detect_long_edge)
 
     gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
     gray_full = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)

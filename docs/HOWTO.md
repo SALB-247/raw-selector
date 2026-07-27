@@ -619,7 +619,8 @@ GUI-only.
 - `--dry-run` — show what would go where without doing it.
 - `--undo` — revert the most recent export in the folder.
 - `--no-cache` — ignore the cache and re-analyse everything.
-- `--workers N` — parallel worker count (default: CPU count minus one).
+- `--workers N` — parallel worker count. The default is chosen from the
+  CPU count and the memory currently free.
 - `--keep-per-group N` — keeps per scene.
 - `--target-keep PCT` — target keep ratio in percent; the threshold is
   derived from the batch's score distribution.
