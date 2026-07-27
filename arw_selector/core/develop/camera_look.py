@@ -107,12 +107,21 @@ def fit_look(render: np.ndarray, target: np.ndarray) -> dict:
     반환: {"exposure": EV, "lut": float32[256], "saturation": 배율}.
     lut는 노출 적용 **후**의 루마에 대한 매핑입니다.
     """
+    from .engine import apply_exposure, srgb_to_linear
+
     render_s, target_s = _pair(render, target)
     luma_r, luma_t = _luma(render_s), _luma(target_s)
 
-    # ① 노출: 중앙값 로그비 (극단 클리핑에 둔감)
-    exposure = float(np.log2((np.median(luma_t) + 1) / (np.median(luma_r) + 1)))
-    luma_r2 = np.clip(luma_r * (2.0 ** exposure), 0, 255)
+    # ① 노출: 중앙값 로그비 (극단 클리핑에 둔감).
+    #
+    # 비를 **선형 공간에서** 잡습니다. 노출은 빛의 양을 바꾸는 연산이라
+    # 엔진도 선형에서 곱합니다(engine.apply_exposure). 표시값끼리 비를
+    # 내면 그 비가 엔진이 하는 일과 달라, 피팅이 찾은 노출이 화면에서
+    # 다르게 그려집니다.
+    lin_r = float(srgb_to_linear(np.median(luma_r) / 255.0))
+    lin_t = float(srgb_to_linear(np.median(luma_t) / 255.0))
+    exposure = float(np.log2((lin_t + 1e-4) / (lin_r + 1e-4)))
+    luma_r2 = np.clip(apply_exposure(luma_r, exposure), 0, 255)
 
     # ② 루마 분위수 커브: 같은 분위수끼리 짝지어 단조 LUT
     quantiles = np.linspace(0.02, 0.98, POINTS)
@@ -137,8 +146,10 @@ def apply_look(bgr: np.ndarray, look: dict) -> np.ndarray:
     가 그리는 것이 최종이고, 여기와의 잔차는 match_settings가 채도 단계에서
     실제 엔진 응답으로 흡수합니다.
     """
+    from .engine import apply_exposure
+
     ycc = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb).astype(np.float32)
-    luma = np.clip(ycc[..., 0] * (2.0 ** look["exposure"]), 0, 255)
+    luma = np.clip(apply_exposure(ycc[..., 0], look["exposure"]), 0, 255)
     ycc[..., 0] = np.interp(luma, np.arange(256), look["lut"])
     ycc[..., 1:] = np.clip(
         (ycc[..., 1:] - 128.0) * look["saturation"] + 128.0, 0, 255)
@@ -166,7 +177,9 @@ def _weights(render_s: np.ndarray, exposure: float) -> np.ndarray:
     실제로 놓인 곳을 세게 봅니다. 바닥값을 깔아 빈 구간도 완전히 버리지는
     않습니다 — 같은 커브가 노출이 조금 다른 옆 컷에도 이식되기 때문입니다.
     """
-    luma = np.clip(_luma(render_s) * (2.0 ** exposure), 0, 255)
+    from .engine import apply_exposure
+
+    luma = np.clip(apply_exposure(_luma(render_s), exposure), 0, 255)
     hist = np.bincount(luma.astype(np.int64).ravel(), minlength=256).astype(np.float64)
     hist = hist / max(hist.sum(), 1.0)
     hist += 1.0 / 1024.0

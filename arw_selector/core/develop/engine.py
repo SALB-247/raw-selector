@@ -158,10 +158,49 @@ EXPOSURE_LIMIT_EV = 20.0
     `0 * inf`가 **NaN**이 되어 표 첫 칸에 남습니다. 검은 화소가 쓰레기값으로
     나가는데 아무 경고도 없습니다.
 
-자르는 위치는 넉넉합니다 — 8비트 LUT는 **±8 EV면 이미 전부 포화**합니다
-(실측: +8과 +200의 결과가 완전히 같고, -8 이하는 전부 0). ±20에서 자르는
-것은 결과를 하나도 바꾸지 않습니다.
+자르는 위치는 넉넉합니다. 노출을 선형 공간에서 걸게 된 뒤로는 "±8이면
+전부 포화"가 더 이상 성립하지 않습니다 — 선형에서는 어두운 값도 함께
+밀려 올라가서, +8 EV에서 레벨 1이 78까지밖에 못 갑니다. 그래도 ±20이면
+사람이 쓸 수 있는 범위를 한참 넘고, float64 중간 계산이 inf가 되지
+않습니다(2^20까지는 여유가 큽니다).
 """
+
+
+def srgb_to_linear(value: np.ndarray) -> np.ndarray:
+    """sRGB 전달함수의 역 (0~1 → 0~1). 표시값을 빛의 양으로 되돌립니다."""
+    value = np.asarray(value, dtype=np.float64)
+    return np.where(value <= 0.04045, value / 12.92,
+                    np.power((np.abs(value) + 0.055) / 1.055, 2.4))
+
+
+def linear_to_srgb(value: np.ndarray) -> np.ndarray:
+    """빛의 양을 표시값으로 (0~1 → 0~1)."""
+    value = np.clip(np.asarray(value, dtype=np.float64), 0.0, None)
+    return np.where(value <= 0.0031308, value * 12.92,
+                    1.055 * np.power(value, 1.0 / 2.4) - 0.055)
+
+
+def apply_exposure(levels: np.ndarray, ev: float) -> np.ndarray:
+    """0~255 표시값에 노출 ev(EV)를 겁니다. **선형 공간에서** 곱합니다.
+
+    0~255는 빛의 양이 아니라 감마가 걸린 표시값입니다. 거기에 2^EV를 바로
+    곱하면 노출 보정이 아니라 훨씬 거친 다른 연산이 됩니다 — +2EV에서
+    레벨 64(25% 회색) 위가 전부 순백이 됐습니다. 물리적으로는 레벨 137부터
+    포화하는 것이 맞고, 그 차이가 **1.10스톱**입니다(실측 P1032946.RW2:
+    세 채널이 모두 포화해 정보가 사라진 화소가 25.7% → 3.3%).
+
+    카메라·SILKYPIX·Lightroom의 노출 보정이 전부 빛의 양을 바꾸는 연산이라,
+    같은 +2.0EV를 줬는데 우리만 하이라이트가 날아간다는 제보의 원인이
+    이것이었습니다.
+
+    피팅(camera_look)과 렌더(_tone_lut)가 **반드시 같은 연산**을 써야 합니다.
+    한쪽만 고치면 카메라 JPEG에 맞춘 노출값이 화면에서 다르게 그려집니다.
+    """
+    if not ev:
+        return np.asarray(levels, dtype=np.float32)
+    ev = float(np.clip(ev, -EXPOSURE_LIMIT_EV, EXPOSURE_LIMIT_EV))
+    linear = srgb_to_linear(np.asarray(levels, dtype=np.float64) / 255.0)
+    return (linear_to_srgb(linear * (2.0 ** ev)) * 255.0).astype(np.float32)
 
 
 def _tone_lut(basic: BasicSettings) -> np.ndarray:
@@ -173,8 +212,7 @@ def _tone_lut(basic: BasicSettings) -> np.ndarray:
     lut = _IDENTITY.copy()
 
     if basic.exposure:
-        exposure = float(np.clip(basic.exposure, -EXPOSURE_LIMIT_EV, EXPOSURE_LIMIT_EV))
-        lut = lut * (2.0 ** exposure)
+        lut = apply_exposure(lut, basic.exposure)
 
     normalized = np.clip(lut / 255.0, 0.0, 1.0)
 

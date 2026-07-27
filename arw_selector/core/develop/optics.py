@@ -606,27 +606,45 @@ def apply_auto_correction(
         modifier = lensfunpy.Modifier(
             lenses[0], camera.crop_factor, width, height
         )
+        # pixel_format을 반드시 맞춰야 합니다. 선언을 빼면 lensfun이
+        # 0~255 기준 연산을 0~1 값에 적용해 결과가 폭주합니다. float32는
+        # 0~1로 받습니다 — 아래 비네팅 보정이 선형 광량을 넘기기 때문에
+        # 이 형식이어야 합니다.
         modifier.initialize(
             metadata.focal_length or 50.0,
             metadata.aperture or 5.6,
             10.0,            # 피사체 거리(m) — EXIF에 없으므로 일반적인 값
-            pixel_format=np.uint8,
+            pixel_format=np.float32,
         )
 
         result = image
         if settings.auto_vignetting:
-            # pixel_format을 반드시 맞춰야 합니다. 선언을 빼면 lensfun이
-            # 0~255 기준 연산을 0~1 값에 적용해 결과가 폭주합니다.
+            # **선형 광량에 걸어야 합니다.** 비네팅은 렌즈가 빛을 깎은
+            # 것이므로 되돌리는 배수도 빛의 양에 곱해야 합니다. 그런데
+            # lensfun은 넘겨받은 값에 그대로 곱합니다 — 실측에서 배수가
+            # 밝기와 무관하게 일정했고(단일 상수로 맞췄을 때 잔차 0.49레벨
+            # = uint8 반올림 한계), 즉 감마를 모릅니다.
             #
-            # 반드시 copy()여야 합니다. lensfun은 배열을 제자리에서 고치는데,
+            # 감마가 걸린 0~255에 곱하면 실효 광량 배수가 g^2.2가 됩니다.
+            # DB 표본 58개에서 구석 과보정이 중앙값 +1.50스톱이었고, 합성
+            # 검증에서는 **보정 후가 보정 전보다 더 어긋났습니다**(평탄도
+            # 오차 20.9 → 31.1). 선형에서 걸면 0.00으로 완전히 복원됩니다.
+            #
+            # 예전에는 uint8로 넘기느라 디모자이크가 준 float 정밀도까지
+            # 함께 버렸습니다. 입력 dtype을 유지해 돌려줍니다.
+            from .engine import linear_to_srgb, srgb_to_linear
+
+            linear = srgb_to_linear(np.clip(result, 0, 255) / 255.0)
+            # 반드시 사본이어야 합니다. lensfun은 배열을 제자리에서 고치는데,
             # ascontiguousarray는 이미 연속이면 원본을 그대로 돌려주므로
             # 호출자가 넘긴 이미지까지 파괴됩니다.
-            corrected = np.ascontiguousarray(result).astype(np.uint8, copy=True)
-            if modifier.apply_color_modification(corrected):
+            buffer = np.ascontiguousarray(linear, dtype=np.float32).copy()
+            if modifier.apply_color_modification(buffer):
+                corrected = linear_to_srgb(buffer) * 255.0
                 # 프로필과 촬영 조건이 어긋나면 여전히 비정상 값이 나올 수
                 # 있습니다. 그대로 쓰면 픽셀이 쓰레기가 되므로 검사하고 버립니다.
-                if np.all(np.isfinite(corrected.astype(np.float32))):
-                    result = corrected
+                if np.all(np.isfinite(corrected)):
+                    result = np.clip(corrected, 0, 255).astype(image.dtype)
                 else:
                     log.warning(
                         "비네팅 프로필이 비정상 값을 냈다 — 건너뛴다 (%s)",
