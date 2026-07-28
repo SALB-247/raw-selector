@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -180,39 +181,126 @@ def linear_to_srgb(value: np.ndarray) -> np.ndarray:
                     1.055 * np.power(value, 1.0 / 2.4) - 0.055)
 
 
-def apply_exposure(levels: np.ndarray, ev: float) -> np.ndarray:
-    """0~255 표시값에 노출 ev(EV)를 겁니다. **선형 공간에서** 곱합니다.
+def _bt709_encode(linear: np.ndarray) -> np.ndarray:
+    """LibRaw의 기본 출력 전달함수. **sRGB가 아닙니다.**
 
-    0~255는 빛의 양이 아니라 감마가 걸린 표시값입니다. 거기에 2^EV를 바로
-    곱하면 노출 보정이 아니라 훨씬 거친 다른 연산이 됩니다 — +2EV에서
-    레벨 64(25% 회색) 위가 전부 순백이 됐습니다. 물리적으로는 레벨 137부터
-    포화하는 것이 맞고, 그 차이가 **1.10스톱**입니다(실측 P1032946.RW2:
-    세 채널이 모두 포화해 정보가 사라진 화소가 25.7% → 3.3%).
+    실측으로 확인했습니다 — postprocess 출력을 gamma=(1,1) 결과와 짝지어
+    곡선을 복원하면 BT.709와 0.02레벨, sRGB와는 최대 15.9레벨입니다.
+    """
+    linear = np.clip(np.asarray(linear, dtype=np.float64), 0.0, None)
+    return np.where(linear < 0.018, linear * 4.5,
+                    1.099 * np.power(linear, 1.0 / 2.222) - 0.099)
 
-    카메라·SILKYPIX·Lightroom의 노출 보정이 전부 빛의 양을 바꾸는 연산이라,
-    같은 +2.0EV를 줬는데 우리만 하이라이트가 날아간다는 제보의 원인이
-    이것이었습니다.
+
+@lru_cache(maxsize=4)
+def _baseline_transfer(profiled: bool) -> tuple[np.ndarray, np.ndarray]:
+    """보정값이 놓인 공간의 전달함수 — (선형, 표시 0~1) 표본. 쓰기 금지입니다.
+
+    **노출이 실제로 보는 공간은 디코더 출력이 아닙니다.** RAW는
+    `postprocess(BT.709) → 기종보정 → 표준 프로파일 곡선`까지 지난 값이
+    apply_settings로 들어옵니다. 그 합성 곡선을 역산해야 노출이 빛의 양을
+    바꾸는 연산이 됩니다.
+
+    물리적 정답(LibRaw exp_shift로 센서 선형에서 +2EV)과의 화소 차이:
+
+        수식            A6700   S5M2X   R6M3(보정 있음)
+        sRGB 가정       11.65    8.78    13.96
+        BT.709 가정     19.18   10.20    20.86
+        **합성 역산**    1.61    0.19     0.98
+
+    BT.709 가정이 오히려 나쁜 것이 핵심입니다 — 디코더 감마만 맞춰 봐야
+    프로파일 곡선이 지배합니다.
+
+    profiled=False는 JPEG·HEIF 원본입니다. 디모자이크도 프로파일도 지나지
+    않은 **진짜 sRGB**라 그쪽은 sRGB로 역산해야 합니다.
+
+    기종 보정(채널 게인)과 프로파일의 채도 게인은 채널을 섞는 연산이라
+    1D 곡선으로 담기지 않습니다. 회색축만 정확하고 색이 진한 곳은 근사인데,
+    위 표의 R6M3(보정이 걸린 바디)에서도 0.98레벨이라 실용상 충분합니다.
+    """
+    linear = np.linspace(0.0, 1.0, 4096)
+    if not profiled:
+        display = linear_to_srgb(linear)
+    else:
+        encoded = _bt709_encode(linear) * 255.0
+        profile = smooth_curve_lut(list(_STANDARD_PROFILE_CURVE))
+        display = np.interp(encoded, _IDENTITY, profile) / 255.0
+    # 역보간에 쓰려면 단조여야 합니다. 프로파일 곡선은 단조로 만들어지지만
+    # 표본화 오차로 미세하게 뒤집힐 수 있습니다.
+    display = np.maximum.accumulate(display)
+    # 캐시가 돌려주는 배열이라 쓰기를 막습니다. 예전에는 튜플이라 불변이었지만
+    # 부를 때마다 4096개씩 배열로 되돌리는 값이 apply_exposure 비용의 43%
+    # (328µs 중 141µs)였고, to_light·from_light가 갈리며 그 값이 배가 됐습니다.
+    for array in (linear, display):
+        array.flags.writeable = False
+    return linear, display
+
+
+def apply_exposure(levels: np.ndarray, ev: float,
+                   profiled: bool = True) -> np.ndarray:
+    """0~255 표시값에 노출 ev(EV)를 겁니다. **빛의 양에** 곱합니다.
+
+    0~255는 빛의 양이 아니라 전달함수와 프로파일 곡선을 지난 표시값입니다.
+    거기에 2^EV를 바로 곱하면 노출 보정이 아니라 훨씬 거친 다른 연산이
+    됩니다 — 예전 구현이 그랬고, +2EV에서 레벨 64(25% 회색) 위가 전부
+    순백이 됐습니다(실측 P1032946.RW2: 세 채널이 모두 포화해 정보가 사라진
+    화소 25.7%).
+
+    되돌리는 곡선은 `_baseline_transfer`가 줍니다 — 그 문서에 어느 수식이
+    물리적 정답에 얼마나 가까운지 표로 적어 두었습니다.
 
     피팅(camera_look)과 렌더(_tone_lut)가 **반드시 같은 연산**을 써야 합니다.
     한쪽만 고치면 카메라 JPEG에 맞춘 노출값이 화면에서 다르게 그려집니다.
     """
+    values = np.asarray(levels, dtype=np.float64)
     if not ev:
-        return np.asarray(levels, dtype=np.float32)
+        return values.astype(np.float32)
     ev = float(np.clip(ev, -EXPOSURE_LIMIT_EV, EXPOSURE_LIMIT_EV))
-    linear = srgb_to_linear(np.asarray(levels, dtype=np.float64) / 255.0)
-    return (linear_to_srgb(linear * (2.0 ** ev)) * 255.0).astype(np.float32)
+    return from_light(to_light(values, profiled) * (2.0 ** ev), profiled)
 
 
-def _tone_lut(basic: BasicSettings) -> np.ndarray:
+def to_light(levels: np.ndarray, profiled: bool = True) -> np.ndarray:
+    """0~255 표시값 → 빛의 양(0~1). `apply_exposure`가 곱하는 그 공간입니다.
+
+    노출을 **추정하는** 쪽도 이 함수를 써야 합니다. 추정과 적용이 다른
+    공간을 쓰면 찾은 노출값이 화면에서 다른 뜻이 됩니다 — camera_look이
+    실제로 그랬고, 슬라이더에 찍히는 값이 0.24~0.81 EV 어긋났습니다.
+    """
+    linear, display = _baseline_transfer(profiled)
+    return np.interp(np.clip(np.asarray(levels, dtype=np.float64), 0.0, 255.0)
+                     / 255.0, display, linear)
+
+
+def from_light(light: np.ndarray, profiled: bool = True) -> np.ndarray:
+    """빛의 양(0~1) → 0~255 표시값. `to_light`의 역입니다.
+
+    **빛에 거는 연산은 모두 이 한 쌍 사이에서 해야 합니다.** 광량으로
+    되돌리는 쪽만 함수로 빼 두면 되돌아오는 수식이 부르는 곳마다 생기고,
+    그 사본 중 하나가 낡는 것이 이 파일이 이미 두 번 겪은 일입니다
+    (camera_look의 노출 추정, optics의 비네팅).
+
+    1을 넘는 빛은 255에 붙습니다 — 화면이 그보다 밝게 그릴 수 없으니
+    물리적으로도 맞습니다.
+    """
+    linear, display = _baseline_transfer(profiled)
+    return (np.interp(np.asarray(light, dtype=np.float64), linear, display)
+            * 255.0).astype(np.float32)
+
+
+def _tone_lut(basic: BasicSettings, profiled: bool = True) -> np.ndarray:
     """노출·대비·하이라이트/섀도우/화이트/블랙을 하나의 LUT로 합칩니다.
 
     픽셀마다 따로 계산하는 대신 256칸 표를 한 번 만들어 적용하면
     6000x4000에서도 비용이 거의 들지 않습니다.
+
+    profiled는 이 값들이 놓인 공간입니다(_baseline_transfer 참고). 노출만
+    이것을 봅니다 — 나머지 항은 단위 없는 슬라이더라 표시값 위에서
+    정의됩니다.
     """
     lut = _IDENTITY.copy()
 
     if basic.exposure:
-        lut = apply_exposure(lut, basic.exposure)
+        lut = apply_exposure(lut, basic.exposure, profiled)
 
     normalized = np.clip(lut / 255.0, 0.0, 1.0)
 
@@ -453,21 +541,43 @@ def _apply_dehaze(image: np.ndarray, amount: int) -> np.ndarray:
 # ---------------------------------------------------------------- HSL
 
 
-def _band_weight(hue: np.ndarray, center: int, width: float = 22.0) -> np.ndarray:
-    """색조 원형 거리에 따른 가중치. 빨강이 0/179를 넘나드는 것을 처리합니다."""
-    distance = np.abs(hue - center)
-    distance = np.minimum(distance, 180.0 - distance)
-    return np.exp(-(distance ** 2) / (2 * width * width))
+#: uint8 HSV(H 0~179)와 float32 HSV(H 0~360)의 눈금 비.
+#:
+#: HSL_BAND_CENTERS와 스포이드가 주는 언저리 색조는 화면(색상 그라디언트)과
+#: 공유하는 값이라 **8비트 눈금 그대로 둡니다.** 계산만 여기서 도수로
+#: 올려 씁니다 — 상수를 바꾸면 화면 색과 설정 파일이 함께 어긋납니다.
+HUE_UINT8_TO_DEGREES = 2.0
+
+
+def _band_weight(hue: np.ndarray, center_degrees: float,
+                 width_degrees: float = 44.0) -> np.ndarray:
+    """색조 원형 거리에 따른 가중치. 빨강이 0/360을 넘나드는 것을 처리합니다.
+
+    눈금은 float32 HSV의 도수(0~360)입니다. 기본 폭 44는 예전 8비트 눈금의
+    22와 같은 넓이입니다.
+    """
+    distance = np.abs(hue - center_degrees)
+    distance = np.minimum(distance, 360.0 - distance)
+    return np.exp(-(distance ** 2) / (2 * width_degrees * width_degrees))
 
 
 def _apply_hsl(image: np.ndarray, hsl: HSLSettings) -> np.ndarray:
-    """8개 색상대별 색조/채도/광도 조정."""
+    """8개 색상대별 색조/채도/광도 조정.
+
+    **float32 HSV로 계산합니다.** 예전에는 uint8로 왕복해서 이 구간만 계조가
+    8비트로 떨어졌습니다(실측: 통과 후 고유 레벨 544만 → 256). 16비트로
+    내보낼 때 "HSL을 만지면 계조가 죽는" 조용한 함정이 됩니다.
+
+    float32의 범위 규약은 uint8과 다릅니다(실측 확인): **H 0~360, S 0~1,
+    V는 입력 범위 그대로**(우리는 0~255). 왕복 오차 1.5e-04. 이 규약을
+    틀리면 채도가 통째로 0이 되어 사진이 흑백이 됩니다 — optics의 언저리
+    제거에서 실제로 겪은 사고입니다.
+    """
     if hsl.is_neutral():
         return image
 
     hsv = cv2.cvtColor(
-        np.clip(image, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV
-    ).astype(np.float32)
+        np.clip(image, 0, 255).astype(np.float32), cv2.COLOR_BGR2HSV)
     hue, saturation, value = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
 
     hue_shift = np.zeros_like(hue)
@@ -477,19 +587,20 @@ def _apply_hsl(image: np.ndarray, hsl: HSLSettings) -> np.ndarray:
     for name, band in hsl.bands.items():
         if band.is_neutral():
             continue
-        weight = _band_weight(hue, HSL_BAND_CENTERS[name])
+        weight = _band_weight(
+            hue, HSL_BAND_CENTERS[name] * HUE_UINT8_TO_DEGREES)
         if band.hue:
-            hue_shift += weight * (band.hue / 100.0 * 15.0)
+            hue_shift += weight * (band.hue / 100.0 * 15.0 * HUE_UINT8_TO_DEGREES)
         if band.saturation:
             saturation_scale += weight * (band.saturation / 100.0)
         if band.luminance:
             value_scale += weight * (band.luminance / 100.0 * 0.5)
 
-    hsv[:, :, 0] = np.mod(hue + hue_shift, 180.0)
-    hsv[:, :, 1] = np.clip(saturation * saturation_scale, 0, 255)
-    hsv[:, :, 2] = np.clip(value * value_scale, 0, 255)
+    hsv[:, :, 0] = np.mod(hue + hue_shift, 360.0)
+    hsv[:, :, 1] = np.clip(saturation * saturation_scale, 0.0, 1.0)
+    hsv[:, :, 2] = np.clip(value * value_scale, 0.0, 255.0)
 
-    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
 
 # ---------------------------------------------------------------- 컬러 그레이딩
@@ -1113,6 +1224,25 @@ def _apply_effects(image: np.ndarray, effects: EffectSettings) -> np.ndarray:
 # ---------------------------------------------------------------- 진입점
 
 
+def quantize(image: np.ndarray, bit_depth: int = 8) -> np.ndarray:
+    """float 0~255 이미지를 출력 비트 심도로 떨굽니다. **마지막 단계에서만.**
+
+    8비트는 예전 동작 그대로 **버림**입니다(반올림으로 바꾸면 지금까지
+    내보낸 모든 파일과 반 레벨씩 어긋납니다). 16비트도 같은 방식으로
+    맞춥니다 — 255.0 × 257 = 65535라 상한이 정확히 떨어집니다.
+    """
+    if bit_depth == 16:
+        if image.dtype == np.uint16:
+            return image
+        return np.clip(image.astype(np.float32) * 257.0,
+                       0.0, 65535.0).astype(np.uint16)
+    if image.dtype == np.uint8:
+        return image
+    if image.dtype == np.uint16:
+        return (image // 257).astype(np.uint8)
+    return np.clip(image, 0.0, 255.0).astype(np.uint8)
+
+
 def apply_settings(
     image_bgr: np.ndarray,
     settings: DevelopSettings,
@@ -1120,8 +1250,14 @@ def apply_settings(
     metadata=None,
     wb: "tuple | None" = None,
     main_face_box: "tuple[float, float, float, float] | None" = None,
+    bit_depth: int = 8,
 ) -> np.ndarray:
     """BGR uint8 이미지에 보정 전체를 적용합니다.
+
+    bit_depth=16이면 uint16(0~65535)로 돌려줍니다. 파이프라인은 원래
+    float32로 흐르므로 마지막 양자화만 달라집니다 — 실측으로 계조가
+    실제 보존되는 것을 확인했습니다(디모자이크 직후 544만 레벨, 각 보정
+    단계 통과 후에도 477만~604만).
 
     source/metadata는 하단 정보 띠를 그릴 때만 씁니다. 없으면 띠는 건너뜁니다.
     wb는 (camera_whitebalance, daylight_whitebalance) 튜플로, 절대 색온도
@@ -1136,23 +1272,26 @@ def apply_settings(
     # 크롭 계산이나 손상 파일에서 한 장이 그렇게 나와도 미리보기 스레드나 배치
     # 내보내기 전체가 멈추면 안 되므로, 반환 계약만 지켜 그대로 돌려줍니다.
     if image_bgr.size == 0:
-        from ..raw_io import to_display
-
-        return to_display(image_bgr)
+        return quantize(image_bgr, bit_depth)
 
     if settings.is_neutral():
-        # 보정이 없어도 반환 계약(8비트 BGR)은 지켜야 합니다. 디모자이크 입력은
+        # 보정이 없어도 반환 계약(정수 BGR)은 지켜야 합니다. 디모자이크 입력은
         # float 0~255라, 그대로 돌려주면 미리보기는 컬러 노이즈가 되고 저장은
         # 인코더에서 깨집니다. 실제로 '최종 미리보기'에서 발생한 버그입니다.
-        from ..raw_io import to_display
+        return quantize(image_bgr, bit_depth)
 
-        return to_display(image_bgr)
+    # 보정값이 놓인 공간. RAW는 디코더 감마와 표준 프로파일을 지난 값이고,
+    # JPEG·HEIF는 카메라가 구운 진짜 sRGB라 디모자이크도 프로파일도 지나지
+    # 않습니다(_baseline_transfer). 빛에 거는 연산은 전부 이 값을 봐야
+    # 합니다 — 노출·국소 노출·수동 비네팅.
+    from ..raw_io import is_editable_image
+
+    profiled = source is None or not is_editable_image(source)
 
     # 광학 보정을 가장 먼저 합니다. 렌즈 왜곡을 편 다음에 자르고 톤을 만져야
     # 순서가 맞다 — 반대로 하면 크롭한 조각에 왜곡 모델을 적용하게 됩니다.
     working = image_bgr
     if not settings.optics.is_neutral():
-        from ..raw_io import is_editable_image
         from .optics import apply_optics
 
         optics = settings.optics
@@ -1165,7 +1304,7 @@ def apply_settings(
         if optics.auto_enabled and source is not None and is_editable_image(source):
             optics = replace(optics, auto_enabled=False)
 
-        working = apply_optics(working, optics, metadata)
+        working = apply_optics(working, optics, metadata, profiled)
 
     result = apply_geometry(working, settings.geometry).astype(np.float32)
 
@@ -1174,7 +1313,7 @@ def apply_settings(
 
     # 톤과 곡선은 둘 다 RGB LUT라, 256칸 표 위에서 미리 합성해 이미지에는
     # 한 번만 적용합니다. float 보간이 화소당 비용이라 패스 수를 줄입니다.
-    tone = _tone_lut(basic)
+    tone = _tone_lut(basic, profiled)
     curve = _curve_lut(settings.curve)
     combined = np.interp(tone, _IDENTITY, curve).astype(np.float32)
     if not np.array_equal(combined, _IDENTITY):
@@ -1211,10 +1350,15 @@ def apply_settings(
         from .masks import apply_masks
 
         result = apply_masks(result, settings.masks,
-                             main_face_box=main_face_box)
+                             main_face_box=main_face_box, profiled=profiled)
 
-    output = np.clip(result, 0.0, 255.0).astype(np.uint8)
-    return apply_overlays(output, settings, source, metadata)
+    # 오버레이까지 float으로 끌고 간 다음 **한 번만** 양자화합니다.
+    # 예전에는 여기서 uint8로 떨궈, 워터마크·정보 띠를 켜지 않아도 16비트
+    # 출력이 8비트 계조가 됐습니다.
+    output = apply_overlays(
+        np.clip(result, 0.0, 255.0).astype(np.float32),
+        settings, source, metadata)
+    return quantize(output, bit_depth)
 
 
 def apply_overlays(
@@ -1271,6 +1415,8 @@ def export_image(
     quality: int = 95,
     long_edge: int | None = None,
     main_face_box: "tuple[float, float, float, float] | None" = None,
+    bit_depth: int = 8,
+    color_space: str = "srgb",
 ) -> Path:
     """RAW를 읽어 보정을 적용하고 저장합니다.
 
@@ -1291,7 +1437,8 @@ def export_image(
     # 보정 화면과 같은 베이스라인(디모자이크)을 써야 화면과 결과가 일치합니다.
     # 내장 JPEG은 카메라 픽처스타일이 구워져 있어 보정값의 의미가 달라집니다.
     try:
-        image = load_demosaiced(source)
+        image = load_demosaiced(
+            source, highlight_recovery=settings.basic.highlight_recovery)
     except Exception as exc:  # noqa: BLE001 - 디모자이크 실패 시 JPEG으로 폴백
         # 조용히 넘어가면 안 됩니다. 결과는 나오지만 카메라 픽처스타일이
         # 구워진 JPEG에서 나온 것이라 색·계조가 RAW 현상과 다릅니다.
@@ -1325,12 +1472,29 @@ def export_image(
         reference = read_white_balance(source)
         wb = reference.engine_wb if reference else None
 
+    # 16비트를 받지 못하는 형식에 uint16을 주면 cv2가 **경고만 남기고
+    # 8비트로 떨굽니다.** 요청한 것과 다른 파일이 조용히 나가지 않도록
+    # 여기서도 확인합니다(화면에서 이미 잠그지만, 대기열에 담아 둔 뒤
+    # 형식만 바꾸는 경로가 있습니다).
+    suffix = destination.suffix.lower()
+    if bit_depth == 16 and suffix not in (".png", ".tif", ".tiff"):
+        log.info("%s는 16비트를 저장하지 못해 8비트로 내보냅니다", suffix)
+        bit_depth = 8
+
     result = apply_settings(image, settings, source, metadata, wb=wb,
-                            main_face_box=main_face_box)
+                            main_face_box=main_face_box, bit_depth=bit_depth)
+
+    # 색공간 변환은 마지막입니다 — 보정은 전부 작업 공간(sRGB로 해석되는
+    # 표시값)에서 이뤄지고, 여기서 목표 공간의 숫자로 옮깁니다. 태그는
+    # 저장 뒤에 붙입니다(인코딩된 바이트를 건드리지 않기 위해).
+    from . import icc
+
+    if color_space != "srgb" and suffix.lstrip(".") not in ("webp",):
+        result = icc.convert_from_srgb(result, color_space)
+
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     params = []
-    suffix = destination.suffix.lower()
     if suffix in (".jpg", ".jpeg"):
         params = [cv2.IMWRITE_JPEG_QUALITY, int(quality)]
     elif suffix == ".png":
@@ -1354,5 +1518,10 @@ def export_image(
         from .metadata import write_metadata
 
         write_metadata(source, destination, settings.metadata)
+
+    # 색 프로파일은 **EXIF 다음**에 넣습니다. EXIF를 쓰는 쪽이 세그먼트를
+    # 다시 배치하면서 먼저 넣은 APP2를 떨굴 수 있기 때문입니다.
+    if suffix in icc.EMBEDDABLE:
+        icc.embed(destination, color_space)
 
     return destination

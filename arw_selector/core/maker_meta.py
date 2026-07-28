@@ -169,6 +169,75 @@ def _with_header(path: Path, reader):
         return None
 
 
+# ---------------------------------------------------------------- 색공간
+
+
+#: Adobe RGB로 찍은 파일은 **ColorSpace가 2가 아니라 65535(Uncalibrated)** 로
+#: 나옵니다. 규격이 그렇게 정해 두었고, 실제 구분은 Interoperability IFD의
+#: InteropIndex('R98'=sRGB, 'R03'=AdobeRGB)로 합니다.
+#:
+#: 실측(2026-07-28) — 소니 JPEG·ARW, 파나소닉 RW2(내장 JPEG), 캐논 CR2,
+#: 카메라 JPEG 전반에서 읽힙니다. 다만 **니콘은 이 태그를 아예 쓰지 않고**
+#: MakerNote 0x001E에 적습니다(Z9 실파일 확인). 캐논 CR3(ISO-BMFF)와 애플
+#: HEIC은 못 읽습니다.
+#:
+#: RAW는 우리가 직접 디모자이크하므로 이 설정과 무관합니다 — 카메라가 굽는
+#: JPEG에만 걸립니다. 그래서 판별이 필요한 대상도 JPEG·HEIF 원본뿐이고,
+#: 그쪽은 전 제조사에서 읽힙니다.
+_INTEROP_SPACES = {"R98": "srgb", "R03": "adobe_rgb"}
+
+#: InteropIndex가 없을 때의 폴백. 실측 보관함 125개 폴더 중 **19개**가 이
+#: 경우로, ColorSpace=1(sRGB)만 있고 Interop IFD가 없었습니다 — 폴백 없이는
+#: 그만큼이 판별 불가로 떨어집니다.
+_COLORSPACE_TAG = {1: "srgb", 2: "adobe_rgb"}
+
+
+def colour_space(path: Path) -> str:
+    """이 파일의 색공간 — 'srgb' 또는 'adobe_rgb'. 모르면 'srgb'.
+
+    **모를 때 sRGB로 답하는 것이 안전합니다.** 실측 보관함 125개 폴더 중
+    Adobe RGB는 6개였습니다. 잘못 Adobe RGB로 보면 멀쩡한 사진의 채도를 깎게
+    되므로, 반대 방향보다 손해가 훨씬 큽니다.
+
+    **폴더가 아니라 파일마다 봅니다.** 한 폴더 2,159장 중 마지막 2장만
+    sRGB인 경우가 실제로 있었습니다 — 촬영 도중 설정을 바꾼 것입니다.
+    파일명의 밑줄 접두사(DCF의 Adobe RGB 표시)는 신호로 쓰지 않습니다.
+    Adobe RGB 6개 폴더 중 밑줄이 붙은 것은 1개뿐이었습니다.
+
+    소니 HEIF는 카메라가 HEIF 촬영에서 sRGB만 고르게 하므로 언제나
+    sRGB입니다 — InteropIndex가 없어도 됩니다.
+    """
+
+    def reader(buf) -> str:
+        base = _jpeg_exif_base(buf)
+        header = _tiff_header(buf, base if base is not None else 0)
+        if header is None:
+            return "srgb"
+        endian, first = header
+        offset = base if base is not None else 0
+        ifd0 = _read_ifd(buf, first, endian, offset)
+        if 0x8769 not in ifd0:
+            return "srgb"
+        exif = _read_ifd(buf, _longs(ifd0[0x8769], endian)[0], endian, offset)
+
+        if 0xA005 in exif:
+            interop = _read_ifd(buf, _longs(exif[0xA005], endian)[0],
+                                endian, offset)
+            entry = interop.get(0x0001)
+            if entry is not None:
+                index = entry[2].split(b"\x00")[0].decode("ascii", "replace")
+                if index in _INTEROP_SPACES:
+                    return _INTEROP_SPACES[index]
+
+        if 0xA001 in exif:
+            values = _shorts(exif[0xA001], endian)
+            if values:
+                return _COLORSPACE_TAG.get(values[0], "srgb")
+        return "srgb"
+
+    return _with_header(path, reader) or "srgb"
+
+
 # ---------------------------------------------------------------- Panasonic
 
 

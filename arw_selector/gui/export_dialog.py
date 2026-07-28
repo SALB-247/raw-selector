@@ -24,7 +24,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..core.export_options import ExportFormat, ExportOptions, ResizeMode
+from ..core.export_options import (
+    ExportColorSpace,
+    ExportFormat,
+    ExportOptions,
+    ResizeMode,
+)
 from . import theme
 from .i18n import tr
 
@@ -249,6 +254,24 @@ class ExportDialog(QDialog):
         self.quality.setSuffix(" %")
         form.addRow(tr("Quality"), self.quality)
 
+        # 비트 심도 — PNG·TIFF만 16을 받습니다. 형식을 바꾸면 곧바로
+        # 따라갑니다(잠긴 채로 16이 남아 있으면 요청한 것과 다른 파일이
+        # 나갑니다).
+        self.bit_depth = QComboBox()
+        self.bit_depth.addItem(tr("8-bit"), 8)
+        self.bit_depth.addItem(tr("16-bit"), 16)
+        self.bit_depth.currentIndexChanged.connect(self._refresh_summary)
+        form.addRow(tr("Bit depth"), self.bit_depth)
+
+        self.color_space = QComboBox()
+        for value in ExportColorSpace:
+            self.color_space.addItem(value.label, value.value)
+        self.color_space.currentIndexChanged.connect(self._refresh_summary)
+        form.addRow(tr("Colour space"), self.color_space)
+
+        self.image_format.currentIndexChanged.connect(self._sync_bit_depth)
+        self.image_format.currentIndexChanged.connect(self._sync_color_space)
+
         resize_row = QHBoxLayout()
         self.resize_mode = QComboBox()
         for value in ResizeMode:
@@ -282,6 +305,8 @@ class ExportDialog(QDialog):
         self._image_widgets = (
             self.image_format,
             self.quality,
+            self.bit_depth,
+            self.color_space,
             self.resize_mode,
             self.long_edge_preset,
             self.resize_long_edge,
@@ -348,6 +373,55 @@ class ExportDialog(QDialog):
             label = self._image_form.labelForField(field)
             if label is not None:
                 label.setEnabled(on)
+        # 심도·색공간은 형식에 한 번 더 걸리므로 위 일괄 활성화 다음에 옵니다.
+        self._sync_bit_depth()
+        self._sync_color_space()
+
+    def _sync_color_space(self) -> None:
+        """ICC를 넣을 수 없는 형식이면 잠그고 sRGB로 되돌립니다.
+
+        변환만 하고 태그를 못 붙이면 뷰어가 sRGB로 읽어 **색이 틀어진
+        파일**이 나갑니다. 그럴 바에는 변환을 안 하는 것이 맞습니다.
+        """
+        fmt = ExportFormat(self.image_format.currentData())
+        self.color_space.setEnabled(
+            fmt.supports_icc and self.apply_develop.isChecked())
+        if not fmt.supports_icc:
+            index = self.color_space.findData(ExportColorSpace.SRGB.value)
+            if index >= 0:
+                self.color_space.setCurrentIndex(index)
+            self.color_space.setToolTip(tr(
+                "{fmt} cannot carry a colour profile here, so it stays sRGB."
+            ).format(fmt=fmt.suffix))
+        else:
+            self.color_space.setToolTip(tr(
+                "Converts the pixels and embeds the matching profile.\n"
+                "sRGB is what screens and social sites expect.\n"
+                "Adobe RGB holds more greens and cyans for print — but\n"
+                "viewers without colour management show it washed out."))
+
+    def _sync_bit_depth(self) -> None:
+        """형식이 16비트를 못 받으면 잠그고 8비트로 되돌립니다.
+
+        잠그기만 하고 값을 두면 잠긴 채로 16이 남아 요청과 다른 파일이
+        나갑니다 — cv2는 경고만 남기고 8비트로 떨굽니다(조용한 실패).
+        잠글 때는 이유를 툴팁으로 말합니다.
+        """
+        fmt = ExportFormat(self.image_format.currentData())
+        allowed = fmt.supports_16bit and self.apply_develop.isChecked()
+        self.bit_depth.setEnabled(allowed)
+        if not fmt.supports_16bit:
+            index = self.bit_depth.findData(8)
+            if index >= 0:
+                self.bit_depth.setCurrentIndex(index)
+            self.bit_depth.setToolTip(tr(
+                "{fmt} files are 8-bit only. PNG and TIFF can hold 16-bit."
+            ).format(fmt=fmt.suffix))
+        else:
+            self.bit_depth.setToolTip(tr(
+                "16-bit keeps the tonal steps the develop pipeline actually\n"
+                "carries — worth it when the file goes on to more editing.\n"
+                "Files are roughly twice the size."))
 
     def _on_resize_mode(self) -> None:
         mode = self.resize_mode.currentData()
@@ -505,6 +579,12 @@ class ExportDialog(QDialog):
         if index >= 0:
             self.image_format.setCurrentIndex(index)
         self.quality.setValue(options.quality)
+        index = self.bit_depth.findData(options.bit_depth)
+        if index >= 0:
+            self.bit_depth.setCurrentIndex(index)
+        index = self.color_space.findData(options.color_space.value)
+        if index >= 0:
+            self.color_space.setCurrentIndex(index)
 
         index = self.resize_mode.findData(options.resize_mode.value)
         if index >= 0:
@@ -527,6 +607,9 @@ class ExportDialog(QDialog):
             copy_raw=self.copy_raw.isChecked(),
             image_format=ExportFormat(self.image_format.currentData()),
             quality=self.quality.value(),
+            bit_depth=int(self.bit_depth.currentData() or 8),
+            color_space=ExportColorSpace(
+                self.color_space.currentData() or ExportColorSpace.SRGB.value),
             resize_mode=ResizeMode(self.resize_mode.currentData()),
             resize_long_edge=self.resize_long_edge.value(),
             resize_percent=self.resize_percent.value(),

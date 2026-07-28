@@ -143,6 +143,10 @@ take.
   - **Use camera AF point when no face is found** — falls back to the
     camera's recorded AF point as the focus region when no face is detected
     (Sony, Canon CR3, Nikon).
+  - **Develop small-preview RAW for analysis** — appears only when the batch
+    holds RAW files whose embedded preview is too small to judge focus on
+    (Panasonic RW2). Those files are demosaiced instead. The line under the
+    estimate shows what each choice costs in time.
 
 **Start analysis** begins the run; **Cancel** closes the dialog.
 
@@ -331,6 +335,10 @@ Global tone and colour: **Temperature** (absolute Kelvin, 2000–12000 K),
 **Shadows**, **Whites**, **Blacks**, **Texture**, **Clarity**, **Dehaze**,
 **Vibrance**, and **Saturation**.
 
+**Highlight recovery (RAW)** rebuilds detail in channels the sensor clipped.
+It is off by default because it darkens the whole frame by 1–1.5 stops to
+make room for what it recovers.
+
 #### Curve
 
 ![Curve section](screenshots/develop-curve.png)
@@ -414,7 +422,9 @@ folder where you can drop your own lensfun XML profiles, and **Reload lens
 DB** re-reads it, with a coverage readout. **Manage camera color calibration**
 opens a dialog to view or delete saved calibrations. Under **Manual
 correction** are **Distortion**, **Vignetting**, **Remove purple fringing**,
-and **Remove green fringing**; the **Sample colour** eyedroppers **💧 Purple**
+and **Remove green fringing**. Manual **Vignetting** is scaled in stops —
+50 is exactly half of 100, and 100 lifts the corners by 2.2 stops, enough to
+stand in for a lens the profile database does not cover; the **Sample colour** eyedroppers **💧 Purple**
 and **💧 Green** let you click the fringing in the preview to set the
 reference hue, which is shown next to them.
 
@@ -507,10 +517,19 @@ asks for a destination folder, then opens the "Export options" dialog.
 - **Developed images** group — **Render developed images** turns on
   rendering; then choose the **Format** (**JPEG (recommended)**, **PNG
   (lossless, large)**, **WebP**, **TIFF (lossless, for print/re-edit)**),
-  **Quality** (%), and **Size** (**Original size**, **By long edge**, or
+  **Quality** (%), **Bit depth** (**8-bit** / **16-bit** — PNG and TIFF
+  only; the other formats lock it to 8), **Colour space** (**sRGB** /
+  **Adobe RGB**), and **Size** (**Original size**, **By long edge**, or
   **Percentage**), with long-edge presets (**Custom**, 1080, 1920 FHD, 2048
   web, 2560 QHD, 3000, 3840 4K/UHD, 4000, 6000 for print) or direct px / %
   entry.
+
+  The colour space converts the pixels and embeds the matching profile, so
+  the file carries its own definition. **sRGB** is the safe default for
+  screens and sharing. **Adobe RGB** covers more green and cyan for print
+  work, but looks desaturated in viewers that ignore colour profiles.
+  Pair it with **16-bit** where the format allows: an 8-bit file in the
+  wider space loses shadow steps.
 - **Filename** group — a **Pattern** field with click-to-insert token buttons
   **{name}**, **{index}**, **{grade}**, **{date}**, **{time}**, **{score}**.
 

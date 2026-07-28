@@ -118,10 +118,14 @@ def _blend(
     overlay_crop = overlay[y0 - y:y1 - y, x0 - x:x1 - x].astype(np.float32)
     alpha_crop = alpha[y0 - y:y1 - y, x0 - x:x1 - x].astype(np.float32)[:, :, None]
 
+    # **받은 dtype을 그대로 돌려줍니다.** 16비트로 내보낼 때는 사진이
+    # float 0~255로 들어오는데, 여기서 uint8로 떨구면 워터마크를 켰다는
+    # 이유만으로 계조가 죽습니다. 오버레이 화소값은 어느 쪽이든 0~255
+    # 눈금이라 합성식은 같습니다.
     region = base[y0:y1, x0:x1].astype(np.float32)
-    base[y0:y1, x0:x1] = np.clip(
-        region * (1.0 - alpha_crop) + overlay_crop * alpha_crop, 0, 255
-    ).astype(np.uint8)
+    blended = np.clip(
+        region * (1.0 - alpha_crop) + overlay_crop * alpha_crop, 0, 255)
+    base[y0:y1, x0:x1] = blended.astype(base.dtype)
     return base
 
 

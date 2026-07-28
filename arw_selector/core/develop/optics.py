@@ -619,7 +619,7 @@ def apply_auto_correction(
 
         result = image
         if settings.auto_vignetting:
-            # **선형 광량에 걸어야 합니다.** 비네팅은 렌즈가 빛을 깎은
+            # **빛의 양에 걸어야 합니다.** 비네팅은 렌즈가 빛을 깎은
             # 것이므로 되돌리는 배수도 빛의 양에 곱해야 합니다. 그런데
             # lensfun은 넘겨받은 값에 그대로 곱합니다 — 실측에서 배수가
             # 밝기와 무관하게 일정했고(단일 상수로 맞췄을 때 잔차 0.49레벨
@@ -628,19 +628,33 @@ def apply_auto_correction(
             # 감마가 걸린 0~255에 곱하면 실효 광량 배수가 g^2.2가 됩니다.
             # DB 표본 58개에서 구석 과보정이 중앙값 +1.50스톱이었고, 합성
             # 검증에서는 **보정 후가 보정 전보다 더 어긋났습니다**(평탄도
-            # 오차 20.9 → 31.1). 선형에서 걸면 0.00으로 완전히 복원됩니다.
+            # 오차 20.9 → 31.1).
+            #
+            # 되돌리는 곡선은 sRGB가 아니라 engine.to_light입니다. 여기
+            # 들어오는 그림은 postprocess(BT.709)·기종보정·프로파일 곡선을
+            # 이미 지났습니다. sRGB로 되돌리면 구석 잔차가 중앙 레벨에 따라
+            # -0.36 ~ +0.21스톱으로 **부호까지 뒤집힙니다** — 하필 비네팅이
+            # 펴려는 그 밝기 기울기 위에서 어긋납니다(평탄도 1.57레벨,
+            # 최대 3.44). to_light으로 되돌리면 0.00입니다.
+            #
+            # 예전 검증이 이것을 놓친 이유: sRGB에서 비네트를 씌우고 sRGB에서
+            # 되돌렸습니다. 같은 곡선으로 걸고 되돌리는 왕복은 그 곡선이
+            # 틀려도 0이 나옵니다. 광량에서 씌워야 판별됩니다.
+            #
+            # 자동 보정은 편집 가능 이미지에서 apply_settings가 꺼 버리므로
+            # 여기 오는 그림은 언제나 profiled입니다 — 분기가 필요 없습니다.
             #
             # 예전에는 uint8로 넘기느라 디모자이크가 준 float 정밀도까지
             # 함께 버렸습니다. 입력 dtype을 유지해 돌려줍니다.
-            from .engine import linear_to_srgb, srgb_to_linear
+            from .engine import from_light, to_light
 
-            linear = srgb_to_linear(np.clip(result, 0, 255) / 255.0)
             # 반드시 사본이어야 합니다. lensfun은 배열을 제자리에서 고치는데,
             # ascontiguousarray는 이미 연속이면 원본을 그대로 돌려주므로
             # 호출자가 넘긴 이미지까지 파괴됩니다.
-            buffer = np.ascontiguousarray(linear, dtype=np.float32).copy()
+            buffer = np.ascontiguousarray(to_light(result),
+                                          dtype=np.float32).copy()
             if modifier.apply_color_modification(buffer):
-                corrected = linear_to_srgb(buffer) * 255.0
+                corrected = from_light(buffer)
                 # 프로필과 촬영 조건이 어긋나면 여전히 비정상 값이 나올 수
                 # 있습니다. 그대로 쓰면 픽셀이 쓰레기가 되므로 검사하고 버립니다.
                 if np.all(np.isfinite(corrected)):
@@ -710,8 +724,31 @@ def apply_manual_distortion(image: np.ndarray, amount: int) -> np.ndarray:
     )
 
 
-def apply_manual_vignetting(image: np.ndarray, amount: int) -> np.ndarray:
-    """수동 비네팅 보정. 양수면 주변부를 밝혀 어두워짐을 상쇄합니다."""
+#: 수동 비네팅 슬라이더 100이 이미지 네 귀퉁이에 거는 양(스톱).
+#:
+#: 수동은 lensfun에 프로필이 없는 렌즈(탐론 A069 등)를 위한 대체재이므로
+#: **자동이 닿는 곳까지는 손으로도 닿아야 합니다.** 실측에서 자동이 E PZ
+#: 16-50mm 구석에 거는 양이 +2.14스톱이라 그보다 조금 위로 잡았습니다.
+MANUAL_VIGNETTE_MAX_STOPS = 2.2
+
+
+def apply_manual_vignetting(image: np.ndarray, amount: int,
+                            profiled: bool = True) -> np.ndarray:
+    """수동 비네팅 보정. 양수면 주변부를 밝혀 어두워짐을 상쇄합니다.
+
+    **빛의 양에 겁니다.** 자동과 같은 물리 현상을 고치는 자리이므로 같은
+    공간에서 걸어야 합니다. 예전에는 0~255에 그대로 곱해서, 같은 슬라이더
+    값이 밝기마다 다른 뜻이었습니다 — 슬라이더 25가 레벨 40에서 +0.43,
+    레벨 190에서 +1.16스톱이었습니다(폭 0.74). 한 장 안에서도 갈려서,
+    어두운 구석을 보고 맞추면 밝은 구석이 터졌습니다. 실사진 슬라이더 50에서
+    날아간 화소가 1.68%(원본 0.08%)였고, 광량으로 걸면 0.13%입니다.
+
+    **슬라이더는 배수가 아니라 스톱에 선형입니다.** 예전 식(1 + k·r²)은
+    앞쪽 절반이 전체 효과의 60%를 해서 미세 조정이 어려웠습니다. 이제 50이
+    정확히 100의 절반이고, 눈금이 "구석을 몇 스톱 올린다"로 읽힙니다.
+
+    감쇠는 r²입니다 — 코사인4승 낙차를 스톱으로 보면 대체로 그 모양입니다.
+    """
     if not amount:
         return image
 
@@ -721,15 +758,19 @@ def apply_manual_vignetting(image: np.ndarray, amount: int) -> np.ndarray:
     radius = np.sqrt(
         ((x - center_x) / center_x) ** 2 + ((y - center_y) / center_y) ** 2
     )
-    gain = 1.0 + (amount / 100.0) * 0.6 * np.clip(radius, 0.0, 1.5) ** 2
+    # 귀퉁이에서 r²=2이므로 2로 나눠 그 지점이 슬라이더 눈금과 맞게 합니다.
+    stops = ((amount / 100.0) * MANUAL_VIGNETTE_MAX_STOPS
+             * np.clip(radius, 0.0, 1.5) ** 2 / 2.0)
+    gain = np.exp2(stops)
+
+    from .engine import from_light, to_light
 
     # 입력 dtype을 유지합니다. 광학 보정은 파이프라인의 맨 앞이라, 여기서
     # uint8로 떨구면 이후의 톤·곡선이 256단계 위에서 계산되어 부드러운 하늘
     # 같은 곳에 띠(밴딩)가 생깁니다 — 디모자이크가 float으로 넘겨 준 14비트
     # 정밀도를 비네팅 슬라이더 하나 때문에 잃게 됩니다.
-    return np.clip(
-        image.astype(np.float32) * gain[:, :, None], 0, 255
-    ).astype(image.dtype)
+    lit = to_light(image, profiled) * gain[:, :, None]
+    return np.clip(from_light(lit, profiled), 0, 255).astype(image.dtype)
 
 
 def sample_hue(image: np.ndarray, x: int, y: int, radius: int = 4) -> int:
@@ -781,15 +822,20 @@ def apply_defringe(
     if not purple and not green:
         return image
 
-    # HSV 왕복은 8비트 기준입니다(H 0~179, S 0~255). 파이프라인 중간값은
-    # float 0~255인데 그대로 넘기면 OpenCV가 float을 0~1 입력으로 보고 S를
-    # 0~1로 돌려줍니다. 그 값을 다시 uint8 HSV로 해석해 되돌리면 채도가
-    # 통째로 0이 되어 사진 전체가 흑백이 됩니다 — 색수차 제거를 켰을 뿐인데
-    # 색이 사라지는 것으로 나타납니다. _apply_hsl과 같은 방식으로 8비트에
-    # 맞춰 계산하고, 결과는 받은 dtype으로 돌려줍니다.
-    source = image if image.dtype == np.uint8 else np.clip(image, 0, 255).astype(np.uint8)
+    # **float32 HSV로 계산합니다.** 예전에는 uint8로 왕복해서 이 구간만
+    # 계조가 8비트로 떨어졌습니다(실측: 통과 후 고유 레벨 228).
+    #
+    # 예전 주석이 "float을 그대로 넘기면 사진이 흑백이 된다"고 경고했는데,
+    # 그것은 **범위 규약**의 문제였습니다. float32 HSV는 H 0~360, S 0~1,
+    # V는 입력 범위 그대로입니다(실측 확인). 8비트 눈금(S 0~255, H 0~179)
+    # 으로 계산한 값을 그 위에 쓰면 채도가 통째로 날아갑니다. 눈금을 맞춰
+    # 쓰면 정확하고, 8비트 눈금 상수(스포이드가 주는 색조)는 여기서 도수로
+    # 환산합니다.
+    from .engine import HUE_UINT8_TO_DEGREES
 
-    hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV).astype(np.float32)
+    source = np.clip(image, 0, 255).astype(np.float32)
+
+    hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV)
     hue, saturation = hsv[:, :, 0], hsv[:, :, 1]
 
     # 경계 마스크 — 언저리는 대비가 큰 곳에만 생깁니다
@@ -800,30 +846,41 @@ def apply_defringe(
     edge_mask = np.clip(edges / max(1.0, edges.max()) * 4.0, 0.0, 1.0)
 
     for amount, center, width in (
-        (purple, purple_hue, 20), (green, green_hue, 18)
+        (purple, purple_hue * HUE_UINT8_TO_DEGREES, 20 * HUE_UINT8_TO_DEGREES),
+        (green, green_hue * HUE_UINT8_TO_DEGREES, 18 * HUE_UINT8_TO_DEGREES),
     ):
         if not amount:
             continue
         distance = np.abs(hue - center)
-        distance = np.minimum(distance, 180.0 - distance)
+        distance = np.minimum(distance, 360.0 - distance)
         band = np.exp(-(distance ** 2) / (2 * width * width))
         saturation *= 1.0 - (amount / 100.0) * band * edge_mask
 
-    hsv[:, :, 1] = np.clip(saturation, 0, 255)
-    result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-    return result if image.dtype == np.uint8 else result.astype(image.dtype)
+    hsv[:, :, 1] = np.clip(saturation, 0.0, 1.0)
+    result = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    if image.dtype == np.float32:
+        return result
+    return np.clip(result, 0, 255).astype(image.dtype)
 
 
 def apply_optics(
-    image: np.ndarray, settings: OpticsSettings, metadata: RawMetadata | None = None
+    image: np.ndarray, settings: OpticsSettings,
+    metadata: RawMetadata | None = None, profiled: bool = True
 ) -> np.ndarray:
-    """광학 보정 전체. 자동 프로필 → 수동 조정 순으로 적용합니다."""
+    """광학 보정 전체. 자동 프로필 → 수동 조정 순으로 적용합니다.
+
+    profiled는 이 그림이 놓인 공간입니다(engine._baseline_transfer 참고).
+    비네팅이 빛에 곱해야 하므로 필요합니다. 자동은 편집 가능 이미지에서
+    apply_settings가 꺼 버리지만 **수동은 잠기지 않으므로** JPEG 원본에도
+    걸립니다 — 거기서는 되돌릴 곡선이 다릅니다.
+    """
     if settings.is_neutral():
         return image
 
     result = apply_auto_correction(image, metadata, settings)
     result = apply_manual_distortion(result, settings.distortion)
-    result = apply_manual_vignetting(result, settings.manual_vignetting)
+    result = apply_manual_vignetting(result, settings.manual_vignetting,
+                                     profiled)
     result = apply_defringe(
         result,
         settings.defringe_purple,

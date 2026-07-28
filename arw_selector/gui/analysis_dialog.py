@@ -35,17 +35,20 @@ class AnalysisOptions:
     noise_compensation: bool
     af_roi_hint: bool
     center_priority: bool
+    demosaic_small_preview: bool = False
 
 
 class AnalysisStartDialog(QDialog):
     """사진 수·캐시 상태를 먼저 보여 주고, 캐시·정밀 옵션을 고르게 합니다."""
 
     def __init__(self, photo_count: int, cached_count: int,
-                 analyze: AnalyzeConfig, parent=None):
+                 analyze: AnalyzeConfig, parent=None,
+                 small_preview_count: int = 0):
         super().__init__(parent)
         self.setWindowTitle(tr("Start analysis"))
         self._photo_count = photo_count
         self._cached_count = cached_count
+        self._small_preview_count = small_preview_count
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -108,6 +111,23 @@ class AnalysisStartDialog(QDialog):
             "Faces and eyes always take priority."))
         box.addWidget(self.af_hint)
 
+        # 작은 프리뷰(파나소닉 RW2)가 섞여 있을 때만 나옵니다. 해당 파일이
+        # 없는 폴더에 선택지를 늘리지 않습니다.
+        self.demosaic_small = QCheckBox(
+            tr("Develop small-preview RAW for analysis ({count} photos)")
+            .format(count=small_preview_count))
+        self.demosaic_small.setChecked(
+            analyze.demosaic_small_preview and small_preview_count > 0)
+        self.demosaic_small.setVisible(small_preview_count > 0)
+        self.demosaic_small.setToolTip(tr(
+            "Some RAW files carry a preview far smaller than the sensor —\n"
+            "Panasonic RW2 embeds 32% of the long edge, where Sony and Canon\n"
+            "embed 98-99%. Sharpness is meant to be measured at full detail,\n"
+            "so those shots are currently judged on a different scale.\n"
+            "This develops them instead. See the times below."))
+        self.demosaic_small.toggled.connect(self._refresh_estimate)
+        box.addWidget(self.demosaic_small)
+
         layout.addWidget(precise)
 
         self.estimate = QLabel("")
@@ -131,17 +151,39 @@ class AnalysisStartDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _refresh_estimate(self) -> None:
-        """옵션에 따라 몇 장을 새로 분석하고 얼마나 걸릴지 갱신합니다."""
+        """옵션에 따라 몇 장을 새로 분석하고 얼마나 걸릴지 갱신합니다.
+
+        작은 프리뷰 옵션이 있는 폴더에서는 **두 경우의 시간을 나란히**
+        보여 줍니다. "5배 느려집니다"는 판단에 쓸 수 없는 말입니다 —
+        1분이 5분이 되는 것과 20초가 100초가 되는 것은 다른 결정입니다.
+        """
         reused = self._cached_count if self.use_cache.isChecked() else 0
         pending = max(0, self._photo_count - reused)
-        seconds = estimate_analysis_seconds(pending)
         if pending == 0:
-            text = tr("Everything is cached — results will appear instantly.")
-        else:
-            text = tr("{pending} photos to analyse — {duration}").format(
-                pending=pending, duration=format_duration(seconds))
-            if reused:
-                text += tr(" ({reused} reused from cache)").format(reused=reused)
+            self.estimate.setText(
+                tr("Everything is cached — results will appear instantly."))
+            return
+
+        # 캐시에서 재사용하는 만큼은 어느 쪽에서 왔는지 모릅니다. 비율이
+        # 같다고 보고 남은 장수에 비례 배분합니다.
+        share = (self._small_preview_count / self._photo_count
+                 if self._photo_count else 0.0)
+        heavy = round(pending * share)
+
+        chosen = self.demosaic_small.isChecked() and self._small_preview_count > 0
+        seconds = estimate_analysis_seconds(
+            pending, demosaic_count=heavy if chosen else 0)
+        text = tr("{pending} photos to analyse — {duration}").format(
+            pending=pending, duration=format_duration(seconds))
+        if reused:
+            text += tr(" ({reused} reused from cache)").format(reused=reused)
+
+        if self._small_preview_count > 0:
+            fast = format_duration(estimate_analysis_seconds(pending))
+            slow = format_duration(
+                estimate_analysis_seconds(pending, demosaic_count=heavy))
+            text += "\n" + tr("Embedded preview: {fast}   ·   Developed: {slow}") \
+                .format(fast=fast, slow=slow)
         self.estimate.setText(text)
 
     def options(self) -> AnalysisOptions:
@@ -150,13 +192,16 @@ class AnalysisStartDialog(QDialog):
             noise_compensation=self.noise_comp.isChecked(),
             af_roi_hint=self.af_hint.isChecked(),
             center_priority=self.center_priority.isChecked(),
+            demosaic_small_preview=(self.demosaic_small.isChecked()
+                                    and self._small_preview_count > 0),
         )
 
     @staticmethod
     def ask(photo_count: int, cached_count: int, analyze: AnalyzeConfig,
-            parent=None) -> AnalysisOptions | None:
+            parent=None, small_preview_count: int = 0) -> AnalysisOptions | None:
         """다이얼로그를 띄우고, 취소면 None."""
-        dialog = AnalysisStartDialog(photo_count, cached_count, analyze, parent)
+        dialog = AnalysisStartDialog(photo_count, cached_count, analyze, parent,
+                                     small_preview_count)
         dialog.setModal(True)
         accepted = dialog.exec() == QDialog.Accepted
         options = dialog.options() if accepted else None

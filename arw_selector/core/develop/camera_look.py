@@ -107,19 +107,32 @@ def fit_look(render: np.ndarray, target: np.ndarray) -> dict:
     반환: {"exposure": EV, "lut": float32[256], "saturation": 배율}.
     lut는 노출 적용 **후**의 루마에 대한 매핑입니다.
     """
-    from .engine import apply_exposure, srgb_to_linear
+    from .engine import apply_exposure, to_light
 
     render_s, target_s = _pair(render, target)
     luma_r, luma_t = _luma(render_s), _luma(target_s)
 
     # ① 노출: 중앙값 로그비 (극단 클리핑에 둔감).
     #
-    # 비를 **선형 공간에서** 잡습니다. 노출은 빛의 양을 바꾸는 연산이라
-    # 엔진도 선형에서 곱합니다(engine.apply_exposure). 표시값끼리 비를
-    # 내면 그 비가 엔진이 하는 일과 달라, 피팅이 찾은 노출이 화면에서
-    # 다르게 그려집니다.
-    lin_r = float(srgb_to_linear(np.median(luma_r) / 255.0))
-    lin_t = float(srgb_to_linear(np.median(luma_t) / 255.0))
+    # 비를 **엔진이 곱하는 그 공간에서** 잡습니다. 우리가 찾는 것은
+    # "engine.apply_exposure가 render의 표시값을 target의 표시값으로
+    # 옮기려면 광량에 얼마를 곱해야 하는가"이므로, 두 값 모두 엔진의
+    # 전달함수(to_light)로 되돌려야 합니다. 예전에는 sRGB로 되돌렸는데,
+    # render는 postprocess·기종보정·프로파일 곡선을 지난 값이라 sRGB가
+    # 아닙니다 — 슬라이더에 찍히는 값이 0.24~0.81 EV 어긋났습니다(실측).
+    #
+    # target을 그 출신(카메라 JPEG = 진짜 sRGB)대로 sRGB로 되돌리는 것은
+    # **틀립니다.** 같은 그림을 자기 자신에 맞추면 노출이 0이어야 하는데
+    # 두 공간이 갈려 0.59가 나옵니다. 목표는 그저 도달할 표시값입니다.
+    #
+    # 노출이 커지면 노출 단계에서 255에 붙는 화소가 0.76%에서 2.25%로
+    # 늘어나 하이라이트를 잃는 것처럼 보입니다. 그런데 **최종 계조를 세어
+    # 보면 반대**입니다 — 목표에서 밝은 10% 구간에 남는 고유 레벨이
+    # 121.6에서 125.4로 늘어납니다. 255에 붙는 그 화소들은 어차피 흰색에
+    # 가깝던 쪽이고, 노출을 제대로 올리면 나머지가 커브의 촘촘한 구간에
+    # 얹히기 때문입니다. 중간 단계의 클립 비율로 판단하면 안 됩니다.
+    lin_r = float(to_light(np.median(luma_r)))
+    lin_t = float(to_light(np.median(luma_t)))
     exposure = float(np.log2((lin_t + 1e-4) / (lin_r + 1e-4)))
     luma_r2 = np.clip(apply_exposure(luma_r, exposure), 0, 255)
 

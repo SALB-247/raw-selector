@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "raw-selector"
-version = "0.15.5"
+version = "0.15.6"
 description = "RAW focus-based select / develop automation tool"
 requires-python = ">=3.11"
 dependencies = [

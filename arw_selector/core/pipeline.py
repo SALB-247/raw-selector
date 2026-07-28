@@ -70,7 +70,8 @@ def analyze_file(
         log.debug("메타데이터 실패 %s: %s", path.name, exc)
 
     try:
-        preview = load_preview(path)
+        preview = load_preview(
+            path, demosaic_small=config.demosaic_small_preview)
 
         # 카메라 AF 위치. 프리뷰는 EXIF 방향이 이미 적용된 상태라, maker_meta가
         # 방향까지 반영해 프리뷰 좌표로 돌려줍니다. **항상** 읽습니다 —
@@ -291,21 +292,34 @@ SECONDS_PER_PHOTO_PER_WORKER = 0.45
 바디나 디스크에 따라 달라지므로 어림값으로만 씁니다.
 """
 
+SECONDS_PER_PHOTO_PER_WORKER_DEMOSAIC = 0.96
+"""디모자이크로 분석할 때의 같은 값(초).
+
+실측(DC-S5M2X RW2, 워커 12, 스폰 차분 제거): 내장 프리뷰 15.9ms/장 대
+half 디모자이크 79.9ms/장 → 워커당 0.96초. 표본이 4장이라 어림값입니다.
+"""
+
 PROCESS_POOL_STARTUP_SECONDS = 2.0
 """프로세스 풀이 뜨는 데 걸리는 시간. spawn 방식이라 무시할 수 없습니다."""
 
 
-def estimate_analysis_seconds(count: int, workers: int | None = None) -> float:
+def estimate_analysis_seconds(count: int, workers: int | None = None,
+                              demosaic_count: int = 0) -> float:
     """사진 count장을 분석하는 데 걸릴 시간(초) 어림값.
 
     "캐시를 지우면 다시 만듭니다"라고만 하면 사용자는 그게 10초인지 10분인지
     모릅니다. 정확할 필요는 없고, 판단할 수 있을 정도면 됩니다.
+
+    demosaic_count는 그중 디모자이크로 분석할 장수입니다(작은 프리뷰 RAW).
     """
     if count <= 0:
         return 0.0
     workers = workers or resolve_workers(None)
+    heavy = max(0, min(demosaic_count, count))
+    light = count - heavy
     return (PROCESS_POOL_STARTUP_SECONDS
-            + count * SECONDS_PER_PHOTO_PER_WORKER / max(1, workers))
+            + (light * SECONDS_PER_PHOTO_PER_WORKER
+               + heavy * SECONDS_PER_PHOTO_PER_WORKER_DEMOSAIC) / max(1, workers))
 
 
 # 소요 시간을 사람이 읽는 문구로 바꾸는 일은 gui.i18n에 있습니다. 여기서

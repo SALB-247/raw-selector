@@ -548,7 +548,7 @@ class MainWindow(QMainWindow):
         조회, payload 역직렬화 없음) 창을 띄우기 전에 바로 셉니다.
         """
         from ..core.cache import AnalysisCache, default_cache_path
-        from ..core.raw_io import iter_raw_files
+        from ..core.raw_io import has_small_preview, iter_raw_files
         from .analysis_dialog import AnalysisStartDialog
 
         if self._explicit_paths:
@@ -570,13 +570,15 @@ class MainWindow(QMainWindow):
             cached = 0
 
         options = AnalysisStartDialog.ask(
-            len(paths), cached, self.config.analyze, self)
+            len(paths), cached, self.config.analyze, self,
+            small_preview_count=sum(1 for p in paths if has_small_preview(p)))
         if options is None:
             return False
 
         self.config.analyze.noise_compensation = options.noise_compensation
         self.config.analyze.af_roi_hint = options.af_roi_hint
         self.config.analyze.center_priority = options.center_priority
+        self.config.analyze.demosaic_small_preview = options.demosaic_small_preview
         self._pending_use_cache = options.use_cache
         return True
 

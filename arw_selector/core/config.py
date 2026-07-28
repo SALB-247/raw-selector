@@ -60,6 +60,21 @@ class AnalyzeConfig:
     기본 꺼짐: 켜면 TILE로 판정되던 컷의 점수가 달라지므로 선택 사항입니다.
     """
 
+    demosaic_small_preview: bool = False
+    """내장 프리뷰가 센서보다 훨씬 작은 RAW를 디모자이크해서 분석합니다.
+
+    파나소닉 RW2가 이 경우입니다 — 실측(DC-S5M2X): 센서 6008×4008인데
+    내장 프리뷰는 1920px(긴 변의 32%, 화소로는 10%)뿐입니다. 소니 ARW·캐논
+    CR2/CR3는 98~99%라 해당하지 않습니다.
+
+    선명도를 원본 해상도에서 잰다는 판정의 전제가 이런 파일에서는 깨져
+    있습니다. 켜면 half 디모자이크(긴 변의 50%)로 분석해 전제를 되살립니다.
+    대신 느립니다 — 실측 15.9 → 79.9ms/장(워커 12).
+
+    파일마다 프리뷰/센서 비를 직접 재서 판단하므로(raw_io.load_preview),
+    확장자 목록에 없는 기종이 같은 사정이어도 함께 구제됩니다.
+    """
+
     def cache_key(self) -> str:
         """분석 결과에 영향을 주는 모든 것의 지문.
 
@@ -67,10 +82,17 @@ class AnalyzeConfig:
         측정 방식이 바뀌면 예전 결과는 무효인데, 버전이 빠져 있으면 캐시가
         옛날 점수를 그대로 돌려줘서 고친 내용이 반영되지 않습니다.
         """
-        payload = json.dumps(
-            {**asdict(self), "_algorithm": focus.ALGORITHM_VERSION}, sort_keys=True
-        )
-        return hashlib.sha256(payload.encode()).hexdigest()[:16]
+        payload = dict(asdict(self))
+
+        # **끈 상태는 예전과 결과가 같으므로 지문도 같아야 합니다.** 새 항목을
+        # 그냥 넣으면 이 옵션을 쓰지 않는 사람까지 전 폴더를 다시 분석하게
+        # 됩니다. 켰을 때만 지문에 실어 옵션별로 캐시를 가릅니다.
+        if not payload.get("demosaic_small_preview", False):
+            payload.pop("demosaic_small_preview", None)
+
+        payload["_algorithm"] = focus.ALGORITHM_VERSION
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
 @dataclass

@@ -233,7 +233,9 @@ class FinalRenderWorker(QThread):
             image = self._source
             if image is None:
                 # 라이브 프리뷰(half)와 같은 방식이되 풀 해상도로 디모자이크합니다.
-                image = load_demosaiced(self._path)
+                image = load_demosaiced(
+                    self._path,
+                    highlight_recovery=self._settings.basic.highlight_recovery)
                 if self._cancelled:
                     return
                 # 창이 들고 있다가 다음 확대·이동 때 넘겨줍니다
@@ -383,6 +385,12 @@ class LoupeDialog(QDialog):
         self._demosaic_cache = None
         self._demosaic_path: Path | None = None
         """직전 Full Render의 디모자이크 결과. 확대·이동 때 재사용합니다."""
+
+        self._base_highlight = False
+        """미리보기 베이스를 디모자이크할 때 쓴 하이라이트 복원 값.
+
+        디코드 단계 옵션이라 슬라이더들과 달리 베이스 자체를 다시 만들어야
+        반영됩니다. 패널 값과 어긋난 것을 이 값으로 알아챕니다."""
 
         self._final_region: tuple[float, float, float, float] | None = None
         """마지막 Full Render가 만든 영역. 전체가 아니면 화면 맞춤이 달라집니다."""
@@ -798,7 +806,17 @@ class LoupeDialog(QDialog):
     def _load_current(self) -> None:
         self.panel.set_settings(self.record.develop or DevelopSettings())
         self._dirty = False
+        self._load_base(
+            (self.record.develop or DevelopSettings()).basic.highlight_recovery)
+        self._load_context()
 
+    def _load_base(self, highlight_recovery: bool) -> None:
+        """미리보기 베이스(디모자이크)를 만듭니다.
+
+        하이라이트 복원은 디코드 단계 옵션이라, 토글될 때도 여기로 다시
+        들어옵니다 — 슬라이더처럼 LUT만 다시 그려서는 반영되지 않습니다.
+        """
+        self._base_highlight = highlight_recovery
         try:
             # 보정 화면은 RAW를 실제로 디모자이크한 중립 이미지를 씁니다.
             # 내장 JPEG은 카메라 픽처스타일(대비·채도·톤)이 이미 구워져 있어
@@ -807,7 +825,8 @@ class LoupeDialog(QDialog):
             # 미리보기든 보정이든 오직 RAW 디모자이크만 씁니다 — 내장 JPEG은
             # 색·계조가 카메라 렌더라 여기서는 절대 쓰지 않습니다. 반응 속도를
             # 위해 half-size로 합니다(최종 미리보기 버튼은 풀 해상도).
-            full = load_demosaiced(self.record.path, half_size=True)
+            full = load_demosaiced(self.record.path, half_size=True,
+                                   highlight_recovery=highlight_recovery)
             self._source = resize_long_edge(full, PREVIEW_LONG_EDGE)
             self._roi_scale = self._resolve_roi_scale(full.shape[1] * 2)
             self._degraded = False
@@ -832,6 +851,13 @@ class LoupeDialog(QDialog):
                     .format(exc=exc, demosaic_exc=demosaic_exc)
                 )
 
+    def _load_context(self) -> None:
+        """컷이 바뀔 때의 나머지 — WB 기준점, 렌즈 조회, 오버레이 상태.
+
+        _load_base와 달리 **컷마다 한 번**입니다. 하이라이트 복원 토글로
+        베이스만 다시 만들 때는 여기를 다시 돌지 않습니다 — 렌즈 후보
+        콤보를 다시 채우면 사용자가 고른 값이 날아갑니다.
+        """
         self._maybe_warn_stale_roi()
 
         # 절대 색온도 변환에 쓸 화이트밸런스를 읽고, 슬라이더 기본값을
@@ -1028,6 +1054,18 @@ class LoupeDialog(QDialog):
 
     def _on_settings_changed(self) -> None:
         self._dirty = True
+
+        # 하이라이트 복원은 디코드 단계 옵션이라 LUT 재적용으로는 반영되지
+        # 않습니다 — 베이스(half 디모자이크)를 다시 만듭니다. 컷을 열 때와
+        # 같은 blocking 호출(0.5~2초)이고, 토글은 슬라이더처럼 연타되는
+        # 조작이 아니라서 그대로 둡니다. Full Render 캐시도 옛 값으로 만든
+        # 것이므로 함께 버립니다.
+        flag = self.panel.settings().basic.highlight_recovery
+        if flag != self._base_highlight and self._source is not None \
+                and not self._degraded:
+            self._drop_demosaic()
+            self._load_base(flag)
+
         # 렌더가 200ms쯤 걸립니다. 알려주지 않으면 멈춘 줄 압니다.
         self.preview.set_busy(True)
         self._render_timer.start()

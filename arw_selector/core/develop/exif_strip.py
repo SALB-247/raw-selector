@@ -219,7 +219,10 @@ def apply_exif_strip(
         line_color = (60, 60, 64) if settings.dark_background else (200, 200, 203)
         cv2.line(strip, (0, 0), (width, 0), line_color, 1)
 
-        return np.vstack([image, strip])
+        # 띠는 8비트로 그리지만(글자·배경이라 계조가 필요 없습니다) 사진의
+        # dtype에 맞춰 붙입니다. 16비트로 내보낼 때 그대로 vstack하면 띠
+        # 값(0~255)이 0~65535 눈금에서 거의 검게 나옵니다.
+        return np.vstack([image, strip.astype(image.dtype)])
     except Exception as exc:  # noqa: BLE001 - 띠 실패로 내보내기를 막지 않습니다
         log.warning("EXIF 띠 생성 실패: %s", exc)
         return image

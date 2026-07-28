@@ -580,8 +580,14 @@ def _smooth(image: np.ndarray, amount: int) -> np.ndarray:
     return image * (1.0 - strength) + filtered * strength
 
 
-def apply_local(image: np.ndarray, adjust: LocalAdjustments) -> np.ndarray:
-    """float BGR 이미지(마스크 bbox 잘린 조각)에 국소 조정을 적용합니다."""
+def apply_local(image: np.ndarray, adjust: LocalAdjustments,
+                profiled: bool = True) -> np.ndarray:
+    """float BGR 이미지(마스크 bbox 잘린 조각)에 국소 조정을 적용합니다.
+
+    profiled는 이 조각이 놓인 공간입니다 — 전역 노출과 **같은 곡선**으로
+    되돌려야 국소 노출 +1EV와 전역 +1EV가 같은 양의 빛을 뜻합니다
+    (engine._baseline_transfer 참고).
+    """
     result = image.astype(np.float32, copy=True)
 
     tone = BasicSettings(
@@ -590,7 +596,7 @@ def apply_local(image: np.ndarray, adjust: LocalAdjustments) -> np.ndarray:
         whites=adjust.whites, blacks=adjust.blacks,
     )
     if tone != BasicSettings():
-        result = _apply_lut(result, _tone_lut(tone))
+        result = _apply_lut(result, _tone_lut(tone, profiled))
 
     if adjust.temperature or adjust.tint:
         result = _local_white_balance(result, adjust.temperature, adjust.tint)
@@ -618,13 +624,15 @@ def apply_local(image: np.ndarray, adjust: LocalAdjustments) -> np.ndarray:
 
 
 def apply_masks(image: np.ndarray, masks, detect_bgr: np.ndarray | None = None,
-                main_face_box: tuple[float, float, float, float] | None = None) -> np.ndarray:
+                main_face_box: tuple[float, float, float, float] | None = None,
+                profiled: bool = True) -> np.ndarray:
     """전역 보정이 끝난 float 이미지에 마스크들을 순서대로 합성합니다.
 
     detect_bgr(얼굴 검출용 uint8)를 안 주면 image에서 만듭니다. 얼굴 검출은
     얼굴 계열 마스크가 하나라도 있을 때만 한 번 수행해 재사용합니다.
 
     main_face_box는 분석이 고른 주 피사체의 정규화 좌표입니다(apply_settings 참고).
+    profiled는 국소 노출이 되돌릴 곡선을 고릅니다(apply_local 참고).
     """
     active = [m for m in masks if not m.is_neutral()]
     if not active:
@@ -654,7 +662,7 @@ def apply_masks(image: np.ndarray, masks, detect_bgr: np.ndarray | None = None,
         x0, x1 = int(xs.min()), int(xs.max()) + 1
 
         sub = result[y0:y1, x0:x1]
-        local = apply_local(sub, mask.adjust)
+        local = apply_local(sub, mask.adjust, profiled)
         a = alpha[y0:y1, x0:x1][:, :, None]
         result[y0:y1, x0:x1] = sub * (1.0 - a) + local * a
 

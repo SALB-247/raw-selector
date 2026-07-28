@@ -37,6 +37,48 @@ class ExportFormat(str, Enum):
         return {"jpeg": ".jpg", "png": ".png",
                 "webp": ".webp", "tiff": ".tif"}[self.value]
 
+    @property
+    def supports_icc(self) -> bool:
+        """색 프로파일을 **화소를 건드리지 않고** 넣을 수 있는 형식인가.
+
+        WebP만 빠집니다 — ICC를 넣으려면 RIFF를 확장 형식(VP8X)으로 바꿔야
+        하는데, 그 손이 이 형식의 쓰임에 비해 큽니다. 다시 저장하는 방법도
+        있지만 재압축이라 화질이 떨어집니다(실측: JPEG을 PIL로 다시 저장하면
+        14,880 → 6,895바이트, 화소 최대 14레벨 차이).
+        """
+        return self in (ExportFormat.JPEG, ExportFormat.PNG, ExportFormat.TIFF)
+
+    @property
+    def supports_16bit(self) -> bool:
+        """16비트로 저장할 수 있는 형식인가.
+
+        **JPEG·WebP에 uint16을 주면 조용히 8비트로 떨어집니다** — cv2가
+        경고만 남기고 진행합니다(실측: "Unsupported depth ... fallbacked
+        to CV_8U"). 화면에서 미리 잠가야 "16비트로 저장했는데 8비트가
+        나온다"가 되지 않습니다.
+        """
+        return self in (ExportFormat.PNG, ExportFormat.TIFF)
+
+
+class ExportColorSpace(str, Enum):
+    """내보낼 파일의 색공간.
+
+    **태그만 붙이는 것이 아니라 화소도 변환합니다** — 하나만 하면 뷰어가
+    다른 공간의 숫자로 읽어 색이 틀어집니다(core/develop/icc.py).
+
+    sRGB는 화면·SNS 전달의 기본값입니다. Adobe RGB는 초록·시안 쪽이 넓어
+    인쇄 워크플로에서 쓰입니다 — 대신 색 관리를 하지 않는 뷰어에 올리면
+    채도가 빠져 보이므로, 그쪽으로 보낼 파일이 아니면 sRGB가 안전합니다.
+    """
+
+    SRGB = "srgb"
+    ADOBE_RGB = "adobe_rgb"
+
+    @property
+    def label(self) -> str:
+        return {"srgb": "sRGB",
+                "adobe_rgb": "Adobe RGB"}[self.value]
+
 
 class ResizeMode(str, Enum):
     NONE = "none"
@@ -72,6 +114,24 @@ class ExportOptions:
 
     image_format: ExportFormat = ExportFormat.JPEG
     quality: int = 95
+
+    bit_depth: int = 8
+    """저장 비트 심도. PNG·TIFF만 16을 받습니다(supports_16bit 참고).
+
+    파이프라인은 원래 float32로 흐르므로 16을 골라도 계산이 달라지지 않고,
+    마지막 양자화만 바뀝니다. 실측으로 계조가 실제 보존되는 것을 확인했습니다
+    — 디모자이크 직후 채널당 고유 레벨 544만, 각 보정 단계 통과 후에도
+    477만~604만(8비트 상한은 256).
+    """
+
+    color_space: ExportColorSpace = ExportColorSpace.SRGB
+    """내보낼 파일의 색공간. 화소 변환 + ICC 임베드가 함께 갑니다.
+
+    WebP는 ICC를 넣을 수 없어(supports_icc) sRGB로 되돌립니다 — 변환만
+    하고 태그를 못 붙이면 뷰어가 sRGB로 읽어 **색이 틀어진 파일**이
+    나갑니다. 그럴 바에는 변환을 안 하는 것이 맞습니다.
+    """
+
     resize_mode: ResizeMode = ResizeMode.NONE
     resize_long_edge: int = 2048
     resize_percent: int = 50
@@ -107,6 +167,21 @@ class ExportOptions:
             except ValueError:
                 self.resize_mode = ResizeMode.NONE
 
+        if not isinstance(self.color_space, ExportColorSpace):
+            try:
+                self.color_space = ExportColorSpace(self.color_space)
+            except ValueError:
+                self.color_space = ExportColorSpace.SRGB
+
+        # 형식이 못 받는 심도·색공간은 여기서 되돌립니다. 대기열에 담아 둔 뒤
+        # 형식만 JPEG으로 바꾸는 경로가 있어, 화면 잠금만으로는 새지 않는다고
+        # 보장할 수 없습니다.
+        self.bit_depth = 16 if self.bit_depth == 16 else 8
+        if self.bit_depth == 16 and not self.image_format.supports_16bit:
+            self.bit_depth = 8
+        if not self.image_format.supports_icc:
+            self.color_space = ExportColorSpace.SRGB
+
         # 등급 목록은 문자열 하나로 들어오거나 모르는 값이 섞일 수 있습니다.
         # 전부 걸러내 비면 '전체'로 되돌립니다 — 아무것도 안 나가는 것보다 낫습니다.
         selected = self.grades
@@ -131,6 +206,7 @@ class ExportOptions:
         data = asdict(self)
         data["image_format"] = self.image_format.value
         data["resize_mode"] = self.resize_mode.value
+        data["color_space"] = self.color_space.value
         return data
 
     @classmethod

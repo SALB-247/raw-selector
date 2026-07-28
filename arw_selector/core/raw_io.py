@@ -93,6 +93,21 @@ RAW_FILE_FILTER = (
 SIDECAR_EXTENSIONS = {".jpg", ".jpeg", ".xmp", ".arw.xmp"}
 """RAW와 짝지어 함께 옮겨야 하는 파일들."""
 
+SMALL_PREVIEW_EXTENSIONS = {".rw2"}
+"""내장 프리뷰가 센서보다 훨씬 작다고 **알려진** 형식.
+
+분석 시작 창이 옵션을 보일지, 시간을 얼마로 잡을지 정할 때만 씁니다 —
+파일을 열지 않고 세어야 하기 때문입니다. 실제 판단은 파일마다
+프리뷰/센서 비를 직접 재서 합니다(load_preview). 그래서 이 목록에 없는
+기종이 같은 사정이어도 옵션을 켜면 함께 구제되고, 목록에 있어도 프리뷰가
+충분히 크면 그냥 넘어갑니다.
+"""
+
+
+def has_small_preview(path: Path) -> bool:
+    """이 파일이 '작은 프리뷰' 형식으로 알려져 있는가 (확장자만 봅니다)."""
+    return path.suffix.lower() in SMALL_PREVIEW_EXTENSIONS
+
 
 def is_raw(path: Path) -> bool:
     return path.suffix.lower() in RAW_EXTENSIONS
@@ -330,6 +345,47 @@ def _decode_heif(path: Path) -> np.ndarray | None:
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 
+def _decode_heif_16(path: Path) -> np.ndarray | None:
+    """HEIF를 원래 비트 깊이로 디코드해 float32 BGR(0~255)로 돌려줍니다.
+
+    소니 HIF는 10비트인데 위의 8비트 경로(convert("RGB"))는 그것을 256단계로
+    누릅니다. 분석·썸네일에는 충분하지만 **보정의 출발점**으로는 관용도를
+    잃습니다 — 노출을 올리면 8비트 계조가 그대로 벌어져 띠가 집니다.
+    실측(DSC02290.HIF): 이 경로는 채널당 고유 레벨이 256 → 1,024로 늘어납니다.
+
+    회전은 8비트 경로와 같습니다 — 컨테이너 변환(irot/imir)은 libheif가
+    디코드 때 적용하고, EXIF 방향은 호출부(load_demosaiced)가 8비트 경로와
+    같은 함수로 한 번 더 봅니다.
+
+    10비트를 못 받는 상황(구형 pillow-heif, 8비트 HEIC)이면 None — 호출부가
+    8비트 경로로 물러섭니다.
+    """
+    try:
+        import pillow_heif  # noqa: PLC0415
+    except ImportError:
+        return None
+
+    try:
+        heif = pillow_heif.open_heif(str(path), convert_hdr_to_8bit=False)
+        image = heif[0] if hasattr(heif, "__getitem__") else heif
+        mode = str(getattr(image, "mode", ""))
+        if ";16" not in mode:          # 8비트 원본(아이폰 HEIC 등) — 이득 없음
+            return None
+        array = np.asarray(image)
+    except Exception as exc:  # noqa: BLE001 - 실패는 8비트 폴백으로
+        log.debug("HEIF 16비트 디코드 실패 %s: %s", path.name, exc)
+        return None
+
+    if array.ndim != 3 or array.dtype != np.uint16:
+        return None
+    if array.shape[2] == 4:            # 알파는 보정 대상이 아닙니다
+        array = array[:, :, :3]
+    if array.shape[2] != 3:
+        return None
+    # RGB 16비트(0~65535) → float BGR 0~255. 소수점에 10비트 계조가 남습니다.
+    return (array[:, :, ::-1].astype(np.float32) / 257.0)
+
+
 def _tags_from_heif(path: Path) -> dict:
     """HEIF 컨테이너 안의 EXIF 블록을 exifread로 읽습니다.
 
@@ -389,7 +445,17 @@ def load_image_file(path: Path) -> np.ndarray:
 # ---------------------------------------------------------------- 프리뷰 추출
 
 
-def load_preview(path: Path, max_long_edge: int | None = None) -> np.ndarray:
+#: 내장 프리뷰가 센서 긴 변의 이 비율보다 작으면 "작은 프리뷰"로 봅니다.
+#:
+#: 실측 — ARW(A6700) 99% · CR3 99% · CR2 99% · **RW2(DC-S5M2X) 32%**.
+#: 정상 기종과 파나소닉 사이가 크게 벌어져 있어 0.6은 어느 쪽에도 가깝지
+#: 않은 안전한 자리입니다. half 디모자이크 결과(50%)는 이 선 아래지만,
+#: 판정은 프리뷰에 대해서만 하므로 무한 재귀는 없습니다.
+SMALL_PREVIEW_RATIO = 0.6
+
+
+def load_preview(path: Path, max_long_edge: int | None = None,
+                 demosaic_small: bool = False) -> np.ndarray:
     """프리뷰를 방향 보정된 BGR 이미지로 반환합니다.
 
     RAW라면:
@@ -398,6 +464,11 @@ def load_preview(path: Path, max_long_edge: int | None = None) -> np.ndarray:
       3) 최후의 수단으로 half-size 디모자이크 — 느리므로 경고를 남깁니다
 
     RAW가 아니면(JPEG·HEIF) 파일 자체가 프리뷰입니다.
+
+    demosaic_small을 켜면 **내장 프리뷰가 센서보다 훨씬 작을 때**(파나소닉
+    RW2) 그것을 버리고 half 디모자이크로 만듭니다. 선명도를 원본 해상도에서
+    잰다는 판정의 전제를 되살리는 대신 느립니다
+    (AnalyzeConfig.demosaic_small_preview 참고).
     """
     if is_editable_image(path):
         image = load_image_file(path)
@@ -436,10 +507,30 @@ def load_preview(path: Path, max_long_edge: int | None = None) -> np.ndarray:
                     output_bps=8,
                 )
                 image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+            # 이 프리뷰가 센서에 비해 너무 작은가. **raw가 열려 있는 동안**
+            # 재야 센서 크기를 알 수 있습니다.
+            too_small = False
+            if demosaic_small:
+                sensor_long = max(raw.sizes.width, raw.sizes.height)
+                preview_long = max(image.shape[:2])
+                too_small = (sensor_long > 0
+                             and preview_long < sensor_long * SMALL_PREVIEW_RATIO)
     except PreviewError:
         raise
     except Exception as exc:  # noqa: BLE001 - 손상 파일을 배치 전체 실패로 만들지 않습니다
         raise PreviewError(f"{path.name}: {exc}") from exc
+
+    if too_small:
+        # 파일을 다시 엽니다. 디모자이크 비용이 지배적이라(실측 15.9 →
+        # 79.9ms/장) 여는 비용은 묻힙니다. 보정창과 같은 베이스라인을 쓰므로
+        # 톤이 카메라 JPEG 프리뷰처럼 정상 범위에 들어옵니다 — 평평한 중립
+        # 현상으로 재면 같은 선명도 계수를 다른 대비 위에서 쓰게 됩니다.
+        try:
+            image = to_display(load_demosaiced(path, half_size=True))
+        except Exception as exc:  # noqa: BLE001 - 실패하면 원래 프리뷰를 씁니다
+            log.warning("작은 프리뷰 디모자이크 실패, 내장 프리뷰 사용 %s: %s",
+                        path.name, exc)
 
     if max_long_edge:
         image = resize_long_edge(image, max_long_edge)
@@ -551,6 +642,7 @@ def load_demosaiced(
     half_size: bool = False,
     apply_profile: bool = True,
     calibration=None,
+    highlight_recovery: bool = False,
 ) -> np.ndarray:
     """RAW를 실제로 디모자이크해 방향 보정된 BGR 이미지로 반환합니다.
 
@@ -569,13 +661,50 @@ def load_demosaiced(
     찾아 적용하고, False를 주면 보정 없이 순수 현상만 합니다(보정값을
     측정할 때 자기 자신을 되먹이지 않으려면 필요합니다).
 
+    highlight_recovery를 켜면 포화한 하이라이트를 남은 채널로 재구성합니다
+    (BasicSettings.highlight_recovery 참고). RAW에만 걸립니다.
+
     **RAW가 아니면(JPEG·HEIF) 디모자이크할 것이 없습니다.** 파일을 그대로
     float BGR로 올려 보정 파이프라인의 출발점으로 씁니다. 색온도·프로파일·
     기종 보정은 센서 데이터가 있어야 성립하므로 적용하지 않습니다 — 이미
-    카메라가 한 번 적용해 구워 넣은 결과이기 때문입니다.
+    카메라가 한 번 적용해 구워 넣은 결과이기 때문입니다. HEIF만은 원래
+    비트 깊이(10비트)로 받습니다 — 8비트로 누르면 보정 관용도를 잃습니다.
     """
     if is_editable_image(path):
-        image = load_image_file(path).astype(np.float32)
+        image = None
+        if path.suffix.lower() in HEIF_EXTENSIONS:  # noqa: SIM102
+            # 보정 출발점만 원래 비트 깊이로 받습니다. 분석·썸네일 경로
+            # (load_preview → load_image_file)는 8비트 그대로입니다 —
+            # 판정과 캐시를 건드리지 않기 위해서입니다.
+            image = _decode_heif_16(path)
+            if image is not None:
+                try:
+                    image = apply_orientation(
+                        image, _jpeg_orientation(path.read_bytes()))
+                except OSError:
+                    pass
+        if image is None:
+            image = load_image_file(path).astype(np.float32)
+
+        # **Adobe RGB 원본은 작업 공간(sRGB)으로 옮겨 놓습니다.**
+        #
+        # 그냥 두면 두 가지가 어긋납니다. 화면(Qt)은 어떤 값이든 sRGB로
+        # 그리므로 미리보기가 채도 빠진 색으로 보이고, 노출은 sRGB 곡선으로
+        # 되돌리는데 실제 인코딩은 순수 감마 2.2라 빛의 양이 어긋납니다.
+        #
+        # 파이프라인에 공간을 하나 더 들고 다니는 대신 들어올 때 한 번
+        # 바꿉니다 — 미리보기·노출·내보내기가 전부 한 공간에서 맞습니다.
+        # 내보내기에서 다시 Adobe RGB를 고르면 그때 되돌아갑니다.
+        #
+        # 분석 경로(load_preview)는 건드리지 않습니다. 판정은 밝기 위주라
+        # 이득이 작은 반면 캐시를 통째로 갈아야 합니다.
+        from .maker_meta import colour_space
+
+        if colour_space(path) != "srgb":
+            from .develop.icc import to_srgb_from
+
+            image = to_srgb_from(image, colour_space(path))
+
         if half_size:
             image = cv2.resize(image, (0, 0), fx=0.5, fy=0.5,
                                interpolation=cv2.INTER_AREA)
@@ -585,6 +714,15 @@ def load_demosaiced(
         # 14비트 센서를 8비트로 바로 떨구면 계조가 뭉갭니다. 16비트로 받아
         # float 0~255로 정규화해 정밀도를 유지합니다 (파일 비트뎁스 무관).
         params = dict(no_auto_bright=True, output_bps=16, half_size=half_size)
+
+        # 하이라이트 복원(blend) — 포화한 채널을 남은 채널로 재구성합니다.
+        # LibRaw 기본(0)은 화이트 레벨에서 그냥 자릅니다. blend는 WB 게인만큼
+        # 헤드룸을 확보하느라 **전체를 1~1.5스톱 어둡게** 냅니다(실측: 선형
+        # 균일 배율, 파일당 상수 ±0.1%). 노출 슬라이더가 정확한 역연산이라
+        # 되올리는 것은 사용자 몫입니다 — 몰래 되올리면 헤드룸이 도로 잘려
+        # 옵션이 무의미해집니다. BasicSettings.highlight_recovery 참고.
+        if highlight_recovery:
+            params["highlight_mode"] = 2
 
         # LibRaw이 모르는 최신 기종은 블랙 페데스탈을 못 잡아(예: EOS R6
         # Mark III는 [0,38,113,78]로 읽힘) 페데스탈이 안 빠져 전체가 뜨고

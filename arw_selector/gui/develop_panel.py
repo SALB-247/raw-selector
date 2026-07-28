@@ -630,6 +630,20 @@ class DevelopPanel(QWidget):
         self._add_row(section, "basic.saturation", tr("Saturation"), -100, 100,
                       gradient="saturation")
 
+        # 디코드 단계 옵션이라 슬라이더가 아니라 체크박스입니다. 톤 슬라이더
+        # 아래에 두는 이유: 하이라이트가 날아갔을 때 사용자가 손대는 곳이
+        # 이 구역(하이라이트·화이트)이고, 그때 눈에 들어와야 합니다.
+        self.highlight_recovery = QCheckBox(tr("Highlight recovery (RAW)"))
+        self.highlight_recovery.setToolTip(tr(
+            "Rebuilds blown highlights from the sensor channels that did not\n"
+            "clip — stage LEDs and spotlights keep structure instead of going white.\n"
+            "The whole image comes out 1-1.5 stops darker (headroom is reserved);\n"
+            "raise Exposure to taste — highlights now roll off instead of clipping.\n"
+            "RAW only. Toggling re-develops the preview (a second or two)."
+        ))
+        self.highlight_recovery.toggled.connect(self._emit)
+        section.add_widget(self.highlight_recovery)
+
     def _build_curve(self) -> None:
         section = self._section("curve", tr("Curve"), "∿")
 
@@ -1470,7 +1484,10 @@ class DevelopPanel(QWidget):
         self._add_row(section, "optics.distortion", tr("Distortion"), -100, 100, gradient="mono",
                       tooltip=tr("Negative corrects barrel (convex), positive corrects pincushion (concave)"))
         self._add_row(section, "optics.vignetting", tr("Vignetting"), -100, 100,
-                      gradient="exposure", tooltip=tr("Positive brightens the corners"))
+                      gradient="exposure",
+                      tooltip=tr("Positive brightens the corners. 100 raises "
+                                 "them 2.2 stops, and 50 is exactly half — "
+                                 "the scale is stops, not display values."))
         self._add_row(section, "optics.defringe_purple", tr("Remove purple fringing"),
                       0, 100, gradient="mono")
         self._add_row(section, "optics.defringe_green", tr("Remove green fringing"),
@@ -1553,6 +1570,11 @@ class DevelopPanel(QWidget):
         self.optics_auto.setEnabled(is_raw)
         if not is_raw:
             self.optics_auto.setChecked(False)
+        # 하이라이트 복원은 센서 데이터가 있어야 성립합니다 — JPEG·HEIF는
+        # 카메라가 이미 잘라서 구운 결과라 되살릴 채널이 없습니다.
+        self.highlight_recovery.setEnabled(is_raw)
+        if not is_raw:
+            self.highlight_recovery.setChecked(False)
         self.calibration_button.setEnabled(is_raw)
         # 카메라 룩 매칭도 센서 기반입니다 — JPEG·HEIF는 파일 자체가 이미
         # 카메라 렌더라 맞출 대상이 따로 없습니다.
@@ -1996,7 +2018,11 @@ class DevelopPanel(QWidget):
             if self._temperature_touched
             else 0
         )
-        basic = BasicSettings(temperature=temperature, **self._slider_values("basic"))
+        basic = BasicSettings(
+            temperature=temperature,
+            highlight_recovery=self.highlight_recovery.isChecked(),
+            **self._slider_values("basic"),
+        )
 
         curve = CurveSettings(
             **self._slider_values("curve"),
@@ -2125,6 +2151,10 @@ class DevelopPanel(QWidget):
         algorithm_index = self.noise_algorithm.findData(settings.detail.noise_algorithm)
         if algorithm_index >= 0:
             self.noise_algorithm.setCurrentIndex(algorithm_index)
+
+        # RAW가 아니면 되살리지 않습니다 — optics_auto와 같은 이유입니다.
+        self.highlight_recovery.setChecked(
+            settings.basic.highlight_recovery and self._is_raw)
 
         optics = settings.optics
         # RAW가 아니면 자동 렌즈 보정은 되살리지 않습니다. 프리셋에 켜진 채로

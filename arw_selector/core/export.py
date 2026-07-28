@@ -392,6 +392,8 @@ def _render_operation(op: "ExportOperation", options: "ExportOptions") -> dict[s
         quality=options.quality,
         long_edge=options.target_long_edge(),
         main_face_box=op.main_face_box,
+        bit_depth=options.bit_depth,
+        color_space=options.color_space.value,
     )
     return {
         "source": str(op.source),
