@@ -31,6 +31,7 @@ from .settings import (
     GeometrySettings,
     HSLSettings,
     NoiseAlgorithm,
+    OpticsSettings,
 )
 
 log = logging.getLogger(__name__)
@@ -287,6 +288,91 @@ def from_light(light: np.ndarray, profiled: bool = True) -> np.ndarray:
             * 255.0).astype(np.float32)
 
 
+#: 하이라이트 어깨가 시작하는 광량. 이 아래는 손대지 않습니다.
+#:
+#: 0.85는 최상단 0.23스톱만 압축합니다. 실측(노출을 카메라 JPEG 밝기에
+#: 맞춘 뒤, 렌더 경로 전체를 통과시켜):
+#:
+#:     컷                  어깨 없음   0.55   0.85
+#:     파나소닉 +2.82EV      3.19%    0.00%  0.00%
+#:     소니 +0.86EV          0.32%    0.09%  0.09%
+#:     캐논 +0.36EV          0.02%    0.00%  0.00%
+#:     밝은 영역 고유 레벨    256/141  247/131  254/138
+#:
+#: **더 세게 걸어도 이득이 없습니다.** 0.55는 클리핑 제거 효과가 같은데
+#: 계조를 더 깎고(247 대 254), 밝은 면 전체가 눈에 띄게 눌립니다. 필요한
+#: 만큼만 거는 값이 0.85입니다.
+HIGHLIGHT_KNEE = 0.85
+
+
+def _shoulder(light: np.ndarray, ev: float) -> np.ndarray:
+    """광량에 어깨를 겁니다. **자르기 전** 값이어야 합니다.
+
+    from_light이 1을 넘는 빛을 255에 붙이므로, 여기 오는 값은 아직 그
+    처리를 지나지 않은 것이어야 합니다. 처음에 apply_exposure의 결과에
+    걸었다가 이 때문에 아무 효과가 없었습니다 — 이미 잘린 뒤라 어깨가
+    볼 것이 남아 있지 않았습니다.
+    """
+    white = float(2.0 ** float(ev))
+    knee = float(HIGHLIGHT_KNEE)
+    # knee가 1이면 "어깨 없음"입니다. 0으로 나누지 않도록 여기서 나갑니다 —
+    # 상수를 만져 끄고 켜며 비교할 때 실제로 걸립니다.
+    if white <= 1.0 or knee >= 1.0:
+        return light           # 내려간 노출은 천장에 닿지 않습니다
+
+    lit = np.array(light, dtype=np.float32, copy=True)
+    over = lit > np.float32(knee)
+    if not np.any(over):
+        return lit
+
+    a = np.float32((white - knee) / (1.0 - knee))
+    t = np.clip((lit[over] - np.float32(knee))
+                / np.float32(white - knee), 0.0, 1.0)
+    lit[over] = np.float32(knee) + np.float32(1.0 - knee) * (
+        a * t / (np.float32(1.0) + (a - np.float32(1.0)) * t))
+    return lit
+
+
+def apply_exposure_with_shoulder(levels: np.ndarray, ev: float,
+                                 profiled: bool = True) -> np.ndarray:
+    """천장에 다가가는 빛을 압축합니다 — 넘치는 대신 촘촘해지게.
+
+    **왜 필요한가.** 우리 중립 렌더는 카메라 JPEG보다 어둡습니다(실측
+    +0.77~+2.82EV). 사용자가 그만큼 노출을 올리면 `apply_exposure`가 광량에
+    곱하고, 1을 넘은 빛은 255에 붙어 **밝은 면이 납작해집니다** — 사용자가
+    말한 "밝은 부분이 뭉개진다"가 이것입니다. 카메라는 같은 밝기에 어깨로
+    도달하므로 안 붙습니다(실측 0.00~0.17%).
+
+    **노출과 분리된 단입니다.** apply_exposure는 "광량에 정확히 2^EV를
+    곱한다"는 성질을 유지해야 합니다 — 슬라이더 값이 물리량이어야 하고,
+    camera_look의 노출 추정이 그 성질에 기대고 있습니다. 어깨는 곱이
+    아니므로 안에 넣으면 그 등식이 깨집니다.
+
+    knee 아래는 한 톨도 건드리지 않습니다. 프로파일 곡선에서 화소가 몰린
+    구간을 눌러 계조를 잃은 적이 있어(그 상수의 주석 참고), 여기서는 화소가
+    실제로 있는 곳을 피하는 것이 설계 조건입니다.
+
+    **순백은 순백으로 남습니다.** ev로 흰 점 W = 2^EV를 정하고 [knee, W]를
+    [knee, 1]로 옮깁니다. 처음에는 1에 점근하는 지수 어깨를 썼는데, 그러면
+    아무것도 1에 닿지 못해 +1EV에서 255가 246으로 내려앉았습니다 — 기존
+    테스트가 그것을 잡았습니다.
+
+    쓰는 곡선은 s(t) = a·t / (1 + (a-1)·t), a = (W-knee)/(1-knee)입니다.
+    s(0)=0, s(1)=1이고 s'(0)=a라 이음매에서 도함수가 정확히 1로 이어집니다 —
+    어깨가 시작되는 자리가 띠로 보이지 않습니다.
+
+    **`apply_exposure`는 그대로 둡니다.** 그쪽은 "광량에 정확히 2^EV를
+    곱한다"는 성질을 유지해야 합니다 — 슬라이더 값이 물리량이어야 하고
+    camera_look의 노출 추정이 거기 기대고 있습니다. 어깨는 곱이 아니므로
+    합치면 그 등식이 깨집니다. 그래서 곱하기와 어깨를 한 번에 하는 함수를
+    따로 두고, 렌더 경로(_tone_lut)만 이쪽을 씁니다.
+    """
+    ev = float(np.clip(ev, -EXPOSURE_LIMIT_EV, EXPOSURE_LIMIT_EV))
+    lit = np.asarray(to_light(levels, profiled), dtype=np.float32) \
+        * np.float32(2.0 ** ev)
+    return from_light(_shoulder(lit, ev), profiled)
+
+
 def _tone_lut(basic: BasicSettings, profiled: bool = True) -> np.ndarray:
     """노출·대비·하이라이트/섀도우/화이트/블랙을 하나의 LUT로 합칩니다.
 
@@ -300,7 +386,9 @@ def _tone_lut(basic: BasicSettings, profiled: bool = True) -> np.ndarray:
     lut = _IDENTITY.copy()
 
     if basic.exposure:
-        lut = apply_exposure(lut, basic.exposure, profiled)
+        # 곱하기와 어깨를 한 번에 합니다. 나눠서 하면 곱한 결과가 이미 255에
+        # 잘린 뒤라 어깨가 볼 것이 남지 않습니다(apply_exposure_with_shoulder).
+        lut = apply_exposure_with_shoulder(lut, basic.exposure, profiled)
 
     normalized = np.clip(lut / 255.0, 0.0, 1.0)
 
@@ -336,7 +424,26 @@ def _tone_lut(basic: BasicSettings, profiled: bool = True) -> np.ndarray:
 
 # 카메라 기본 프로파일(표준). 중립 디모자이크는 평탄해서 Lightroom의
 # "Adobe 색상" 기본보다 밋밋합니다. 부드러운 S커브 + 약한 채도를 얹어
-# 자연스러운 출발점을 만듭니다. 육안으로 맞춘 값입니다.
+# 자연스러운 출발점을 만듭니다.
+#
+# **마지막 구간의 기울기 0.60을 계조 문제로 보고 고치려다 되돌린 자리입니다.**
+# 다시 시도하기 전에 아래를 읽으십시오.
+#
+# 광량 기준으로 재면 최상단 1스톱이 프로파일 전 75.1레벨에서 46.7레벨(62%)로
+# 눌립니다. 그럴듯해 보이지만 **그 구간에 화소가 없습니다.** BT.709 직후
+# 표시값 190~255에 앉는 화소가 실사진 5장에서 0.3%입니다(0~25가 29.4%,
+# 26~95가 44.2%, 96~189가 26.1%).
+#
+# 화소 분포로 가중한 기울기는 1.365입니다 — 이 곡선은 전체적으로 계조를
+# **누르는 것이 아니라 벌립니다**. 기여도로 보면 0~25가 0.613, 26~95가
+# 0.494, 96~189가 0.234, 190~255가 0.002입니다.
+#
+# 실제로 (190,216)을 202로 내려 보니 96~189 기울기가 0.89 → 0.75로 떨어지면서
+# 실사진에서 하이라이트 고유 레벨이 3~20개, 중간톤이 최대 24개 **줄었습니다**.
+# 화소가 몰린 곳을 눌러 비어 있는 곳에 준 셈입니다.
+#
+# 곡선 자체는 필요합니다. 아예 빼면 카메라 JPEG과의 루마 오차가 소니에서
+# 18.24 → 21.16으로 나빠집니다.
 _STANDARD_PROFILE_CURVE = ((0, 0), (26, 54), (96, 132), (190, 216), (255, 255))
 _STANDARD_PROFILE_SATURATION = 12
 
@@ -465,40 +572,67 @@ def _kelvin_to_rgb(kelvin: float) -> np.ndarray:
     return np.clip(np.array([r, g, b], dtype=np.float64), 1e-3, 255.0)
 
 
-def _wb_gain(target_kelvin: float, wb: "tuple | None") -> np.ndarray:
-    """as-shot 프리뷰를 목표 색온도로 옮기는 R/G/B 게인을 구합니다.
+def _wb_gain(target_kelvin: float, wb: "tuple | None",
+             base_kelvin: float = 0) -> np.ndarray:
+    """베이스를 목표 색온도로 옮기는 R/G/B 게인을 구합니다.
 
-    프리뷰 JPEG은 카메라 화이트밸런스(camera_wb)가 이미 적용된 상태입니다.
     목표 색온도의 카메라 배수는 그 카메라의 daylight 보정을 기준으로
-    scale = rgb(5500)/rgb(target) 만큼 옮겨 얻습니다. 프리뷰에 걸 게인은
-    (목표 배수 / as-shot 배수)입니다. RAW 정보(wb)가 없으면 5500K를
+    scale = rgb(5500)/rgb(target) 만큼 옮겨 얻습니다. 걸 게인은
+    (목표 배수 / 베이스 배수)입니다. RAW 정보(wb)가 없으면 5500K를
     기준으로 한 일반 근사를 씁니다 — 테스트나 비 RAW 입력용입니다.
+
+    base_kelvin은 **베이스가 이미 어느 색온도로 디모자이크됐는지**입니다.
+    0이면 as-shot(camera_wb)입니다. 화이트밸런스는 물리적으로 센서 선형값에
+    거는 연산이라, 인코딩된 값에 게인을 곱하는 것은 근사입니다 — 옳은 답이
+    E(g·L)인데 g·E(L)을 내므로 E가 선형일 때만 같습니다. as-shot에서 멀수록
+    벌어집니다(실측: 8 mired에서 0.95레벨, 183 mired에서 9.2레벨·화소의
+    64%가 5레벨 초과).
+
+    그래서 화면은 목표 색온도로 다시 디모자이크한 베이스를 씁니다. 그때
+    base_kelvin이 목표와 같아져 이 게인이 정확히 1이 되고, 근사가 사라집니다.
+    슬라이더를 끄는 동안에는 옛 베이스 위에서 이 게인이 미리보기를 맡습니다.
     """
     if wb is not None:
         camera_wb, daylight_wb = wb
         daylight = np.array(daylight_wb[:3], dtype=np.float64)
-        camera = np.array(camera_wb[:3], dtype=np.float64)
         target_mult = daylight * (_kelvin_to_rgb(NEUTRAL_KELVIN) / _kelvin_to_rgb(target_kelvin))
-        gain = target_mult / np.maximum(camera, 1e-6)
+        if base_kelvin and base_kelvin > 0:
+            base_mult = daylight * (_kelvin_to_rgb(NEUTRAL_KELVIN)
+                                    / _kelvin_to_rgb(base_kelvin))
+        else:
+            base_mult = np.array(camera_wb[:3], dtype=np.float64)
+        gain = target_mult / np.maximum(base_mult, 1e-6)
     else:
         gain = _kelvin_to_rgb(NEUTRAL_KELVIN) / _kelvin_to_rgb(target_kelvin)
+        if base_kelvin and base_kelvin > 0:
+            gain = gain * (_kelvin_to_rgb(base_kelvin)
+                           / _kelvin_to_rgb(NEUTRAL_KELVIN))
     return gain / gain[1]  # G=1로 정규화해 밝기를 유지합니다
 
 
 def _apply_white_balance(
-    image: np.ndarray, basic: BasicSettings, wb: "tuple | None" = None
+    image: np.ndarray, basic: BasicSettings, wb: "tuple | None" = None,
+    base_kelvin: float = 0
 ) -> np.ndarray:
     """색온도(절대 Kelvin) + 색조를 채널 게인으로 적용합니다.
 
     temperature가 0 이하이면 "손대지 않음"으로 보고 as-shot을 유지합니다.
-    프리뷰가 이미 현상된 상태라 채널 게인이 현실적인 근삽니다.
+
+    base_kelvin이 목표와 같으면 색온도 게인이 1이라 아무 일도 하지 않습니다 —
+    베이스를 이미 그 색온도로 디모자이크했다는 뜻이고, 그것이 정확한
+    경로입니다(_wb_gain 참고).
+
+    **색조(tint)는 여기 해당하지 않습니다.** 재디모자이크는 켈빈에서 얻은
+    배수만 LibRaw에 넘기므로(raw_io.load_demosaiced의 target_kelvin), 색조는
+    색온도를 맞춘 뒤에도 표시값 위의 G 게인으로 남습니다. 색온도만큼 크게
+    움직이는 값이 아니라 그대로 뒀습니다.
     """
     if basic.temperature <= 0 and not basic.tint:
         return image
 
     result = image.copy()
     if basic.temperature > 0:
-        gain = _wb_gain(basic.temperature, wb)
+        gain = _wb_gain(basic.temperature, wb, base_kelvin)
         result[:, :, 2] *= float(gain[0])  # R
         result[:, :, 1] *= float(gain[1])  # G
         result[:, :, 0] *= float(gain[2])  # B
@@ -1243,6 +1377,47 @@ def quantize(image: np.ndarray, bit_depth: int = 8) -> np.ndarray:
     return np.clip(image, 0.0, 255.0).astype(np.uint8)
 
 
+def apply_optics_stage(
+    image_bgr: np.ndarray,
+    settings: DevelopSettings,
+    source: "Path | None" = None,
+    metadata=None,
+) -> "tuple[np.ndarray, DevelopSettings]":
+    """광학 보정만 겁니다 — **프레임 전체가 있어야 하는 단계**입니다.
+
+    왜곡·비네팅·색수차는 화면 중심과 크기를 기준으로 정의됩니다. 잘라낸
+    조각에 걸면 그 조각을 프레임 전체로 알고 계산해, 실측(A6700 + E PZ
+    16-50mm, 가운데 40% 조각)에서 평균 25.90레벨·화소의 71.9%가 5레벨 넘게
+    어긋났습니다(조각 모서리 +52.7레벨).
+
+    확대했을 때 보이는 영역만 현상하려면 **자르기 전에** 이것을 부르고,
+    돌려받은 settings로 apply_settings를 부르십시오. 돌려주는 settings는
+    광학이 중립이라 두 번 걸릴 일이 없습니다 — 순서를 지키지 않으면 그림이
+    틀리는 자리라 계약으로 막아 둡니다.
+
+    apply_settings도 이 함수를 씁니다. 구현이 둘로 갈리면 한쪽만 낡습니다.
+    """
+    if settings.optics.is_neutral():
+        return image_bgr, settings
+
+    from ..raw_io import is_editable_image
+    from .optics import apply_optics
+
+    optics = settings.optics
+    # JPEG·HEIF는 카메라가 이미 렌즈 보정까지 걸어 구워 낸 결과입니다.
+    # 한 번 더 걸면 이중 보정이라 가장자리가 반대로 휩니다. 화면에서는
+    # 체크박스를 잠가 두지만 그것만으로는 부족합니다 — 잠긴 체크박스도
+    # isChecked()는 True를 돌려주고, 프리셋을 누르면 값이 되살아납니다.
+    # 여기서 막아야 CLI·배치·프리셋 어느 경로로 와도 같습니다.
+    # (수동 보정은 그대로 둡니다. 사용자가 눈으로 보고 넣는 값입니다.)
+    if optics.auto_enabled and source is not None and is_editable_image(source):
+        optics = replace(optics, auto_enabled=False)
+
+    profiled = source is None or not is_editable_image(source)
+    corrected = apply_optics(image_bgr, optics, metadata, profiled)
+    return corrected, replace(settings, optics=OpticsSettings())
+
+
 def apply_settings(
     image_bgr: np.ndarray,
     settings: DevelopSettings,
@@ -1251,6 +1426,7 @@ def apply_settings(
     wb: "tuple | None" = None,
     main_face_box: "tuple[float, float, float, float] | None" = None,
     bit_depth: int = 8,
+    base_kelvin: float = 0,
 ) -> np.ndarray:
     """BGR uint8 이미지에 보정 전체를 적용합니다.
 
@@ -1262,6 +1438,10 @@ def apply_settings(
     source/metadata는 하단 정보 띠를 그릴 때만 씁니다. 없으면 띠는 건너뜁니다.
     wb는 (camera_whitebalance, daylight_whitebalance) 튜플로, 절대 색온도
     변환에 씁니다. 없으면 5500K 기준 일반 근사를 씁니다.
+
+    base_kelvin은 image_bgr이 **이미 어느 색온도로 디모자이크됐는지**입니다
+    (0 = as-shot). 목표와 같으면 화이트밸런스 게인이 1이 되어 건너뜁니다 —
+    센서 선형에서 이미 걸렸다는 뜻이고 그쪽이 물리적으로 옳습니다.
 
     main_face_box는 분석이 고른(또는 사용자가 화면에서 바꾼) 주 피사체 얼굴의
     정규화 좌표입니다. 얼굴 마스크의 '주 피사체' 대상이 이 얼굴을 따라갑니다.
@@ -1286,30 +1466,25 @@ def apply_settings(
     # 합니다 — 노출·국소 노출·수동 비네팅.
     from ..raw_io import is_editable_image
 
-    profiled = source is None or not is_editable_image(source)
+    editable = source is not None and is_editable_image(source)
+    profiled = not editable
+
+    # JPEG·HEIF는 센서 데이터가 없어 load_demosaiced가 target_kelvin을 **조용히
+    # 무시합니다**. 그런데도 base_kelvin을 받아 들이면 게인이 1이 되어
+    # 화이트밸런스가 통째로 사라집니다. 호출부 세 곳에 가드를 흩는 대신
+    # 여기서 한 번 막습니다.
+    if editable:
+        base_kelvin = 0
 
     # 광학 보정을 가장 먼저 합니다. 렌즈 왜곡을 편 다음에 자르고 톤을 만져야
     # 순서가 맞다 — 반대로 하면 크롭한 조각에 왜곡 모델을 적용하게 됩니다.
-    working = image_bgr
-    if not settings.optics.is_neutral():
-        from .optics import apply_optics
-
-        optics = settings.optics
-        # JPEG·HEIF는 카메라가 이미 렌즈 보정까지 걸어 구워 낸 결과입니다.
-        # 한 번 더 걸면 이중 보정이라 가장자리가 반대로 휩니다. 화면에서는
-        # 체크박스를 잠가 두지만 그것만으로는 부족합니다 — 잠긴 체크박스도
-        # isChecked()는 True를 돌려주고, 프리셋을 누르면 값이 되살아납니다.
-        # 여기서 막아야 CLI·배치·프리셋 어느 경로로 와도 같습니다.
-        # (수동 보정은 그대로 둡니다. 사용자가 눈으로 보고 넣는 값입니다.)
-        if optics.auto_enabled and source is not None and is_editable_image(source):
-            optics = replace(optics, auto_enabled=False)
-
-        working = apply_optics(working, optics, metadata, profiled)
+    working, settings = apply_optics_stage(image_bgr, settings, source,
+                                           metadata)
 
     result = apply_geometry(working, settings.geometry).astype(np.float32)
 
     basic = settings.basic
-    result = _apply_white_balance(result, basic, wb)
+    result = _apply_white_balance(result, basic, wb, base_kelvin)
 
     # 톤과 곡선은 둘 다 RGB LUT라, 256칸 표 위에서 미리 합성해 이미지에는
     # 한 번만 적용합니다. float 보간이 화소당 비용이라 패스 수를 줄입니다.
@@ -1390,24 +1565,6 @@ def apply_overlays(
     return output
 
 
-def render_preview(
-    image_bgr: np.ndarray,
-    settings: DevelopSettings,
-    long_edge: int = 1400,
-    source: "Path | None" = None,
-    metadata=None,
-    wb: "tuple | None" = None,
-    main_face_box: "tuple[float, float, float, float] | None" = None,
-) -> np.ndarray:
-    """미리보기용. 최종 내보내기와 같은 연산을 축소본에 적용합니다."""
-    from ..raw_io import resize_long_edge
-
-    return apply_settings(
-        resize_long_edge(image_bgr, long_edge), settings, source, metadata, wb,
-        main_face_box,
-    )
-
-
 def export_image(
     source: Path,
     destination: Path,
@@ -1436,9 +1593,18 @@ def export_image(
 
     # 보정 화면과 같은 베이스라인(디모자이크)을 써야 화면과 결과가 일치합니다.
     # 내장 JPEG은 카메라 픽처스타일이 구워져 있어 보정값의 의미가 달라집니다.
+    #
+    # **화이트밸런스를 여기서 겁니다.** 물리적으로 센서 선형값에 거는 연산이라,
+    # 현상된 값에 채널 게인을 곱하면 근사가 됩니다(실측: as-shot에서 183 mired
+    # 떨어지면 평균 9.2레벨). 내보내기는 속도를 다투지 않으므로 언제나 정확한
+    # 쪽으로 갑니다. 화면은 슬라이더를 끄는 동안만 근사를 쓰고 멈추면 여기와
+    # 같은 곳으로 옵니다(gui/loupe.py의 _settle_white_balance).
+    base_kelvin = int(settings.basic.temperature) \
+        if settings.basic.temperature > 0 else 0
     try:
         image = load_demosaiced(
-            source, highlight_recovery=settings.basic.highlight_recovery)
+            source, target_kelvin=base_kelvin or None,
+            highlight_recovery=settings.basic.highlight_recovery)
     except Exception as exc:  # noqa: BLE001 - 디모자이크 실패 시 JPEG으로 폴백
         # 조용히 넘어가면 안 됩니다. 결과는 나오지만 카메라 픽처스타일이
         # 구워진 JPEG에서 나온 것이라 색·계조가 RAW 현상과 다릅니다.
@@ -1449,6 +1615,9 @@ def export_image(
             source.name, exc,
         )
         image = load_preview(source)
+        # 폴백은 카메라가 구운 JPEG이라 센서 선형 WB가 안 걸렸습니다. 걸린
+        # 척하면 화이트밸런스가 통째로 사라집니다 — 게인으로 돌아갑니다.
+        base_kelvin = 0
     if long_edge:
         image = resize_long_edge(image, long_edge)
 
@@ -1482,15 +1651,23 @@ def export_image(
         bit_depth = 8
 
     result = apply_settings(image, settings, source, metadata, wb=wb,
-                            main_face_box=main_face_box, bit_depth=bit_depth)
+                            main_face_box=main_face_box, bit_depth=bit_depth,
+                            base_kelvin=base_kelvin)
 
     # 색공간 변환은 마지막입니다 — 보정은 전부 작업 공간(sRGB로 해석되는
     # 표시값)에서 이뤄지고, 여기서 목표 공간의 숫자로 옮깁니다. 태그는
     # 저장 뒤에 붙입니다(인코딩된 바이트를 건드리지 않기 위해).
     from . import icc
 
-    if color_space != "srgb" and suffix.lstrip(".") not in ("webp",):
-        result = icc.convert_from_srgb(result, color_space)
+    # WebP는 ICC를 못 실어서 sRGB로만 나갑니다 — 태그 없이 다른 공간의
+    # 숫자를 내보내면 받는 쪽이 sRGB로 읽어 색이 틀어집니다.
+    #
+    # ExportOptions가 이미 같은 판단을 합니다(__post_init__). 그래도 여기서
+    # 한 번 더 막습니다 — 이 함수는 문자열을 그대로 받으므로 CLI·테스트·
+    # 대기열처럼 그 dataclass를 안 거치는 경로가 있습니다. 렌즈 자동 보정에서
+    # 같은 이유로 이중으로 막고 있습니다(위 apply_settings).
+    target = "srgb" if suffix.lstrip(".") in ("webp",) else color_space
+    result = icc.working_to(result, target)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
 

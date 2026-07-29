@@ -60,6 +60,13 @@ LibRaw 0.22.1이 다루는 포맷들입니다. A6700(ARW)이 주 대상이지만
 맥도 포맷할 때 구분하도록 고를 수 있습니다.
 """
 
+#: 작업 공간 이름 → LibRaw이 아는 출력 색공간 (develop/icc.py의 WORKING_SPACE).
+_RAWPY_COLOR_SPACE = {
+    "srgb": rawpy.ColorSpace.sRGB,
+    "adobe_rgb": rawpy.ColorSpace.Adobe,
+    "prophoto": rawpy.ColorSpace.ProPhoto,
+}
+
 JPEG_EXTENSIONS = {".jpg", ".jpeg"}
 """바로 열 수 있는 압축 이미지. cv2로 디코드됩니다 — 실측 확인."""
 
@@ -698,12 +705,12 @@ def load_demosaiced(
         #
         # 분석 경로(load_preview)는 건드리지 않습니다. 판정은 밝기 위주라
         # 이득이 작은 반면 캐시를 통째로 갈아야 합니다.
+        from .develop.icc import WORKING_SPACE, to_working
         from .maker_meta import colour_space
 
-        if colour_space(path) != "srgb":
-            from .develop.icc import to_srgb_from
-
-            image = to_srgb_from(image, colour_space(path))
+        origin = colour_space(path)
+        if origin != WORKING_SPACE:
+            image = to_working(image, origin)
 
         if half_size:
             image = cv2.resize(image, (0, 0), fx=0.5, fy=0.5,
@@ -714,6 +721,14 @@ def load_demosaiced(
         # 14비트 센서를 8비트로 바로 떨구면 계조가 뭉갭니다. 16비트로 받아
         # float 0~255로 정규화해 정밀도를 유지합니다 (파일 비트뎁스 무관).
         params = dict(no_auto_bright=True, output_bps=16, half_size=half_size)
+
+        # 작업 공간도 여기서 정해집니다. 카메라→작업공간 변환은 LibRaw 안에서
+        # 일어나므로, 좁게 받으면 우리 코드가 화소를 보기도 전에 잘립니다
+        # (develop/icc.py의 WORKING_SPACE 참고).
+        from .develop.icc import WORKING_SPACE
+
+        if WORKING_SPACE != "srgb":
+            params["output_color"] = _RAWPY_COLOR_SPACE[WORKING_SPACE]
 
         # 하이라이트 복원(blend) — 포화한 채널을 남은 채널로 재구성합니다.
         # LibRaw 기본(0)은 화이트 레벨에서 그냥 자릅니다. blend는 WB 게인만큼
@@ -871,9 +886,25 @@ def _repair_black_level(raw) -> int | None:
 
 
 def to_display(image: np.ndarray) -> np.ndarray:
-    """float 0~255 이미지를 표시용 8비트로 변환합니다 (마지막 단계에서만)."""
+    """작업 공간의 float 0~255를 화면용 8비트 sRGB로 (마지막 단계에서만).
+
+    **화면은 무엇을 주든 sRGB로 그립니다.** 작업 공간이 그보다 넓으므로
+    여기서 옮겨야 합니다 — 안 옮기면 채도가 빠져 보입니다.
+
+    uint8은 이미 화면용입니다(내장 JPEG 프리뷰·썸네일). 분석 경로가 그
+    값을 쓰므로 건드리면 판정과 캐시가 함께 움직입니다.
+
+    **입력은 float 0~255이거나 uint8입니다.** uint16(16비트 내보내기 결과)을
+    주면 255에서 잘려 못 쓰게 됩니다 — 그쪽은 화면용이 아니라 저장용이라
+    icc.working_to로 직접 옮깁니다(engine.export_image).
+    """
     if image.dtype == np.uint8:
         return image
+    from .develop.icc import WORKING_SPACE, working_to
+
+    if WORKING_SPACE != "srgb":
+        image = working_to(np.clip(image, 0.0, 255.0).astype(np.float32),
+                           "srgb")
     return np.clip(image, 0.0, 255.0).astype(np.uint8)
 
 

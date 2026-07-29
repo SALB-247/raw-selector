@@ -107,7 +107,7 @@ def fit_look(render: np.ndarray, target: np.ndarray) -> dict:
     반환: {"exposure": EV, "lut": float32[256], "saturation": 배율}.
     lut는 노출 적용 **후**의 루마에 대한 매핑입니다.
     """
-    from .engine import apply_exposure, to_light
+    from .engine import apply_exposure_with_shoulder, to_light
 
     render_s, target_s = _pair(render, target)
     luma_r, luma_t = _luma(render_s), _luma(target_s)
@@ -134,7 +134,10 @@ def fit_look(render: np.ndarray, target: np.ndarray) -> dict:
     lin_r = float(to_light(np.median(luma_r)))
     lin_t = float(to_light(np.median(luma_t)))
     exposure = float(np.log2((lin_t + 1e-4) / (lin_r + 1e-4)))
-    luma_r2 = np.clip(apply_exposure(luma_r, exposure), 0, 255)
+    # 렌더 경로가 노출 뒤에 하이라이트 어깨를 겁니다(_tone_lut). 여기서
+    # 순수한 곱만 쓰면 아래 분위수 커브가 어깨를 모르는 밝기 위에서 맞춰져,
+    # 이 파일이 내세운 "피팅과 렌더가 같은 연산을 써야 한다"가 다시 깨집니다.
+    luma_r2 = np.clip(apply_exposure_with_shoulder(luma_r, exposure), 0, 255)
 
     # ② 루마 분위수 커브: 같은 분위수끼리 짝지어 단조 LUT
     quantiles = np.linspace(0.02, 0.98, POINTS)

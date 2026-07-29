@@ -382,7 +382,7 @@ def sample_gain(path: Path) -> np.ndarray | None:
     밝기 자체는 카메라의 톤 커브가 섞여 있어 맞출 수 없으므로, 전체 밝기로
     나눠 **균형만** 봅니다.
     """
-    from ..raw_io import load_demosaiced
+    from ..raw_io import load_demosaiced, to_display
 
     camera = embedded_preview(path)
     if camera is None:
@@ -397,7 +397,10 @@ def sample_gain(path: Path) -> np.ndarray | None:
         )
     except Exception:  # noqa: BLE001
         return None
-    ours = np.clip(ours, 0, 255).astype(np.uint8)
+    # 카메라 JPEG은 sRGB입니다. 우리 값은 작업 공간(넓은 색역)이라 그대로
+    # 견주면 공간이 섞입니다 — 무채색은 두 공간에서 같아 게인 자체는 거의
+    # 안 움직이지만, 무채색이 없는 장면의 폴백(전체 평균)은 통째로 어긋납니다.
+    ours = to_display(ours)
 
     size = (320, 213)
     camera_small = cv2.resize(camera, size, interpolation=cv2.INTER_AREA)

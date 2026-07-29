@@ -201,8 +201,14 @@ class FinalRenderWorker(QThread):
                  source: "np.ndarray | None" = None,
                  region: tuple[float, float, float, float] | None = None,
                  main_face_box: tuple[float, float, float, float] | None = None,
-                 metadata=None):
+                 metadata=None, base_kelvin: int = 0):
         super().__init__()
+        self._base_kelvin = base_kelvin
+        """넘겨받은 source가 이미 디모자이크된 색온도(0 = as-shot).
+
+        source 없이 직접 디모자이크할 때도 이 값으로 합니다 — 그래야 화면과
+        Full Render가 같은 베이스 위에서 같은 게인을 씁니다.
+        """
         self._main_face_box = main_face_box
         # 렌즈 자동 보정은 기종·렌즈 이름으로 프로필을 찾습니다. 안 넘기면
         # 조용히 원본이 나와서, 화면에는 걸린 보정이 Full Render에서만
@@ -235,6 +241,7 @@ class FinalRenderWorker(QThread):
                 # 라이브 프리뷰(half)와 같은 방식이되 풀 해상도로 디모자이크합니다.
                 image = load_demosaiced(
                     self._path,
+                    target_kelvin=self._base_kelvin or None,
                     highlight_recovery=self._settings.basic.highlight_recovery)
                 if self._cancelled:
                     return
@@ -244,7 +251,18 @@ class FinalRenderWorker(QThread):
             if self._cancelled:
                 return
 
+            settings = self._settings
             if self.region is not None:
+                # **자르기 전에** 광학 보정을 겁니다. 왜곡·비네팅은 화면 중심과
+                # 크기 기준이라, 조각에 걸면 그 조각을 프레임 전체로 알고
+                # 계산합니다(실측 평균 25.9레벨, 모서리 +52.7). 돌려받은
+                # settings는 광학이 중립이라 아래 apply_settings에서 두 번
+                # 걸리지 않습니다.
+                image, settings = engine.apply_optics_stage(
+                    image, settings, self._path, self._metadata)
+                if self._cancelled:
+                    return
+
                 # 보이는 영역만. 자른 뒤 자르기 설정을 그대로 두면 두 번
                 # 잘리므로, 여기서는 기하 보정을 중립으로 두고 보냅니다.
                 height, width = image.shape[:2]
@@ -263,9 +281,10 @@ class FinalRenderWorker(QThread):
             image = resize_long_edge(image, self._target)
             if self._cancelled:
                 return
-            result = engine.apply_settings(image, self._settings, self._path,
+            result = engine.apply_settings(image, settings, self._path,
                                            self._metadata,
-                                           wb=self._wb, main_face_box=face_box)
+                                           wb=self._wb, main_face_box=face_box,
+                                           base_kelvin=self._base_kelvin)
             if self._cancelled:
                 return
             self.done.emit(result)
@@ -386,6 +405,26 @@ class LoupeDialog(QDialog):
         self._demosaic_path: Path | None = None
         """직전 Full Render의 디모자이크 결과. 확대·이동 때 재사용합니다."""
 
+        self._locked = False
+        """내보내기가 도는 동안 편집을 막습니다 (set_locked).
+
+        set_locked에서만 만들어지고 있었습니다. 지금까지는 쓰기만 하고
+        읽는 곳이 없어 드러나지 않았는데, _settle_white_balance가 읽기
+        시작하면서 한 번도 잠근 적 없는 창에서 AttributeError가 됩니다.
+        """
+
+        self._base_kelvin = 0
+        """미리보기 베이스를 디모자이크할 때 쓴 목표 색온도 (0 = as-shot).
+
+        화이트밸런스는 센서 선형값에 거는 연산이라, 현상된 값에 채널 게인을
+        곱하는 것은 근사입니다 — as-shot에서 멀수록 벌어집니다(실측 183
+        mired에서 평균 9.2레벨, 화소의 64%가 5레벨 초과).
+
+        그래서 슬라이더가 멈추면 그 색온도로 다시 디모자이크합니다. 끄는
+        동안에는 옛 베이스 위의 게인이 미리보기를 맡습니다 — 재디모자이크가
+        40배 느립니다(0.03초 대 1.23초).
+        """
+
         self._base_highlight = False
         """미리보기 베이스를 디모자이크할 때 쓴 하이라이트 복원 값.
 
@@ -451,6 +490,14 @@ class LoupeDialog(QDialog):
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(120)
         self._render_timer.timeout.connect(self._render)
+
+        # 색온도가 멈추면 그 값으로 다시 디모자이크합니다. Full Render보다
+        # 먼저(600ms) 돌아야 합니다 — Full Render가 옛 베이스로 만들어지면
+        # 곧바로 버려집니다.
+        self._settle_timer = QTimer(self)
+        self._settle_timer.setSingleShot(True)
+        self._settle_timer.setInterval(600)
+        self._settle_timer.timeout.connect(self._settle_white_balance)
 
         # Full Render는 조작이 멈춘 뒤에만 돌립니다. 매 조작마다 풀 해상도로
         # 현상하면 슬라이더를 못 움직입니다.
@@ -804,19 +851,35 @@ class LoupeDialog(QDialog):
         self.records_changed.emit()
 
     def _load_current(self) -> None:
+        from ..core.raw_io import is_editable_image
+
         self.panel.set_settings(self.record.develop or DevelopSettings())
         self._dirty = False
-        self._load_base(
-            (self.record.develop or DevelopSettings()).basic.highlight_recovery)
+        basic = (self.record.develop or DevelopSettings()).basic
+        # 저장된 색온도가 있으면 **처음부터 그 색온도로** 디모자이크합니다.
+        # as-shot으로 열었다가 나중에 맞추면 두 번 디모자이크하게 되고, 그
+        # 사이의 화면은 근사라 내보내기와 다릅니다 — 슬라이더를 건드리지
+        # 않으면 영영 그 상태로 남습니다.
+        kelvin = int(basic.temperature) if basic.temperature > 0 else 0
+        if is_editable_image(self.record.path):
+            kelvin = 0      # 센서 데이터가 없어 디모자이크가 무시합니다
+        self._load_base(basic.highlight_recovery, kelvin)
         self._load_context()
 
-    def _load_base(self, highlight_recovery: bool) -> None:
+    def _load_base(self, highlight_recovery: bool, kelvin: int = 0) -> None:
         """미리보기 베이스(디모자이크)를 만듭니다.
 
         하이라이트 복원은 디코드 단계 옵션이라, 토글될 때도 여기로 다시
         들어옵니다 — 슬라이더처럼 LUT만 다시 그려서는 반영되지 않습니다.
+
+        kelvin은 화이트밸런스를 센서 선형에서 걸기 위한 목표 색온도입니다
+        (0 = as-shot). 슬라이더가 멈춘 뒤에만 들어옵니다(_base_kelvin 참고).
         """
         self._base_highlight = highlight_recovery
+        # 성공했을 때만 세웁니다. 아래 폴백은 카메라가 구운 JPEG이라 센서
+        # 선형 WB가 안 걸린 상태인데, 걸렸다고 해 두면 게인이 1이 되어
+        # 화이트밸런스가 통째로 사라집니다.
+        self._base_kelvin = 0
         try:
             # 보정 화면은 RAW를 실제로 디모자이크한 중립 이미지를 씁니다.
             # 내장 JPEG은 카메라 픽처스타일(대비·채도·톤)이 이미 구워져 있어
@@ -826,9 +889,11 @@ class LoupeDialog(QDialog):
             # 색·계조가 카메라 렌더라 여기서는 절대 쓰지 않습니다. 반응 속도를
             # 위해 half-size로 합니다(최종 미리보기 버튼은 풀 해상도).
             full = load_demosaiced(self.record.path, half_size=True,
+                                   target_kelvin=kelvin or None,
                                    highlight_recovery=highlight_recovery)
             self._source = resize_long_edge(full, PREVIEW_LONG_EDGE)
             self._roi_scale = self._resolve_roi_scale(full.shape[1] * 2)
+            self._base_kelvin = kelvin
             self._degraded = False
             self._degraded_reason = ""
         except Exception as demosaic_exc:  # noqa: BLE001
@@ -1064,7 +1129,17 @@ class LoupeDialog(QDialog):
         if flag != self._base_highlight and self._source is not None \
                 and not self._degraded:
             self._drop_demosaic()
-            self._load_base(flag)
+            self._load_base(flag, self._base_kelvin)
+
+        # 색온도도 디코드 단계입니다. 다만 슬라이더라 연타되므로 곧바로
+        # 다시 디모자이크하면(1.2초) 조작이 멈춥니다. 손을 뗄 때까지 기다렸다가
+        # 한 번만 합니다 — 그때까지는 옛 베이스 위의 게인이 미리보기를 맡습니다.
+        #
+        # RAW일 때만 겁니다. JPEG·HEIF는 디모자이크할 것이 없어 타이머가 떠도
+        # _settle_white_balance가 곧바로 되돌아 나옵니다.
+        if (self._source is not None and not self._degraded
+                and self._wb is not None):
+            self._settle_timer.start()
 
         # 렌더가 200ms쯤 걸립니다. 알려주지 않으면 멈춘 줄 압니다.
         self.preview.set_busy(True)
@@ -1075,6 +1150,38 @@ class LoupeDialog(QDialog):
         # 예약해서, 슬라이더를 계속 움직이는 동안 무거운 렌더가 뜨고
         # 지기를 반복하며 조작이 무거워졌습니다.
         self._stop_full_render_for_edit()
+        self._schedule_full_render()
+
+    def _settle_white_balance(self) -> None:
+        """색온도가 멈췄습니다. 그 값으로 센서 선형에서 다시 디모자이크합니다.
+
+        여기까지 오면 화면의 화이트밸런스가 근사에서 정확으로 바뀝니다 —
+        실측 오차 5.8~9.2레벨이 0.00이 됩니다(_wb_gain 참고). 그림이
+        살짝 달라지는데, 그 폭이 곧 근사가 틀렸던 양입니다.
+
+        RAW가 아니면 할 일이 없습니다. 편집 가능 이미지는 디모자이크 자체가
+        없고, 화이트밸런스도 그림 위의 게인이 전부입니다.
+        """
+        from ..core.raw_io import is_editable_image
+
+        if self._source is None or self._degraded or self._locked:
+            return
+        if is_editable_image(self.record.path) or self._wb is None:
+            return
+
+        wanted = int(self.panel.settings().basic.temperature)
+        if wanted <= 0:
+            wanted = 0                      # as-shot으로 되돌립니다
+        if wanted == self._base_kelvin:
+            return
+
+        # 1.2초쯤 멈춥니다(half 재디모자이크). 컷을 열 때·하이라이트 복원을
+        # 토글할 때와 같은 블로킹 호출이고, 손을 뗀 뒤 한 번만 돕니다.
+        # 알려주지 않으면 멈춘 줄 압니다.
+        self.preview.set_busy(True)
+        self._drop_demosaic()
+        self._load_base(self._base_highlight, wanted)
+        self._render()
         self._schedule_full_render()
 
     def set_locked(self, locked: bool, reason: str = "") -> None:
@@ -1240,6 +1347,7 @@ class LoupeDialog(QDialog):
                 self.record.path, self.record.metadata,
                 wb=self._wb.engine_wb if self._wb else None,
                 main_face_box=self.record.main_face_norm,
+                base_kelvin=self._base_kelvin,
             )
 
         # 소스와 중간 연산은 float(정밀도 유지)이므로 표시 직전에만 8비트로.
@@ -1439,6 +1547,10 @@ class LoupeDialog(QDialog):
 
         # 확대 중이면 보이는 데만 만듭니다. 등배에서는 전체가 보이므로
         # 잘라 봐야 이득이 없고, 잘린 결과를 화면에 맞추기만 번거롭습니다.
+        #
+        # 렌즈 보정이 걸려 있어도 자릅니다 — 워커가 **자르기 전에** 광학
+        # 보정을 걸기 때문입니다(engine.apply_optics_stage). 예전에는 자른
+        # 뒤에 걸어서, 확대하면 Full Render에서만 그림이 휘었습니다.
         region = None
         if self.preview.zoom() > 1.01 and settings.geometry.is_neutral():
             region = self.preview.visible_region()
@@ -1453,6 +1565,7 @@ class LoupeDialog(QDialog):
             region=region,
             main_face_box=self.record.main_face_norm,
             metadata=self.record.metadata,
+            base_kelvin=self._base_kelvin,
         )
         worker.source_ready.connect(self._keep_demosaic)
         worker.done.connect(self._on_final_ready)

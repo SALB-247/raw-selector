@@ -50,12 +50,20 @@ def _as_int(value: Any, default: int) -> int:
     if isinstance(value, bool) or value is None:
         return default
     try:
-        return int(value)
+        number = float(value)
     except (TypeError, ValueError):
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return default
+        return default
+    # inf·NaN은 기본값으로. float 쪽(_coerce_scalar)은 이미 이렇게 하는데
+    # 정수 쪽만 빠져 있었습니다 — `int(inf)`는 ValueError가 아니라
+    # **OverflowError**라 아래 except에도 안 걸리고 그대로 올라갔습니다.
+    # 프리셋은 손으로 고칠 수 있는 YAML이고 `contrast: .inf` 한 줄이면
+    # 닿습니다. 예전에는 프리셋 불러오기가 통째로 실패했습니다.
+    if not math.isfinite(number):
+        return default
+    try:
+        return int(number)
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 def _as_key_tuple(value: Any, allowed) -> tuple[str, ...]:
@@ -668,7 +676,6 @@ class OpticsSettings:
             and self.defringe_purple == 0
             and self.defringe_green == 0
         )
-
 
 @dataclass(frozen=True)
 class ExifStripSettings:

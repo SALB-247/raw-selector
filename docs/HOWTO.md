@@ -335,6 +335,11 @@ Global tone and colour: **Temperature** (absolute Kelvin, 2000–12000 K),
 **Shadows**, **Whites**, **Blacks**, **Texture**, **Clarity**, **Dehaze**,
 **Vibrance**, and **Saturation**.
 
+On a RAW file **Temperature** re-develops from the sensor data once you stop
+moving the slider, which is what white balance physically is. While you drag,
+a fast approximation stands in, so the preview settles a moment after you let
+go.
+
 **Highlight recovery (RAW)** rebuilds detail in channels the sensor clipped.
 It is off by default because it darkens the whole frame by 1–1.5 stops to
 make room for what it recovers.

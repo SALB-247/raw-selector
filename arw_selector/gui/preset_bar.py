@@ -146,9 +146,19 @@ class PresetBar(QWidget):
             self.refresh()
             return
 
+        # _apply도 실패할 수 있습니다 — 프리셋은 손으로 고칠 수 있는
+        # YAML이라 값 하나가 이상하면 역직렬화에서 터집니다. try 밖에 두면
+        # 그 예외가 그대로 올라가고, 무엇보다 _loading이 True로 남아
+        # 이후 슬라이더 조작이 조용히 먹지 않습니다.
         self._loading = True
-        self._apply(data)
-        self._loading = False
+        try:
+            self._apply(data)
+        except Exception as exc:  # noqa: BLE001 - 어떤 값이든 창을 막으면 안 됩니다
+            QMessageBox.warning(
+                self, tr("Preset"), tr("Could not load:\n{error}").format(error=exc))
+            return
+        finally:
+            self._loading = False
         self._update_buttons()
         self.applied.emit()
 
