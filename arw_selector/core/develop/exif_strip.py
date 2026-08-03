@@ -190,7 +190,17 @@ def apply_exif_strip(
 
     try:
         height, width = image.shape[:2]
-        strip_height = max(24, int(height * settings.height_percent / 100.0))
+        # **띠 두께는 가로를 기준으로 잡습니다.** 글자는 가로로 흐르는데
+        # 두께(=글자 크기)를 세로에 비례시키면, 세로 사진일수록 띠가 두꺼워져
+        # 글자가 커지고 정작 담기는 정보는 줄어듭니다 — 실측: 933x1400에서
+        # 띠 84px에 글자가 커져 `16mm·f/4.5·1/30s·ISO`가 통째로 잘렸고,
+        # 500x1400에서는 기종명 하나만 남았습니다.
+        #
+        # height_percent의 뜻은 지키되 기준을 "이 가로에서 3:2였다면의 세로"로
+        # 둡니다. 3:2 가로 사진은 지금과 완전히 같고(1400px에서 55px), 세로·
+        # 좁은 크롭만 정상으로 돌아옵니다.
+        reference = width * 2.0 / 3.0
+        strip_height = max(24, int(reference * settings.height_percent / 100.0))
 
         background = (18, 18, 20) if settings.dark_background else (245, 245, 245)
         foreground = (225, 225, 228) if settings.dark_background else (30, 30, 32)

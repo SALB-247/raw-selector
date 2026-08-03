@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from ..core.develop import (
     DevelopSettings,
     ExifStripSettings,
+    GeometrySettings,
     WatermarkSettings,
     engine,
 )
@@ -99,6 +100,75 @@ FULL_RENDER_LOCKOUT_MS = 3000
 껐다 켜기를 연타하면 무거운 렌더가 겹칩니다. 실제로 그걸로 크래시
 리포트가 올라왔습니다. 잠깐 잠가서 연타 자체를 막습니다.
 """
+
+
+def _map_scene_points(points: np.ndarray, geometry,
+                      scene_hw: tuple[int, int]) -> np.ndarray:
+    """장면(기하 전) 정규화 좌표를 표시(기하 후) 정규화 좌표로.
+
+    ROI·얼굴·눈·AF 좌표는 전부 분석 이미지(자르기 전) 기준입니다. 화면은
+    기하가 적용된 결과라, 변환 없이 그리면 크롭·회전이 걸린 컷에서 상자가
+    엉뚱한 자리에 갑니다 — 예전에는 그래서 기하가 걸리면 아예 숨겼습니다.
+
+    engine.apply_geometry와 **같은 순서**(회전 → 반전 → 수평보정 → 크롭)를
+    좌표에 적용합니다. 수평보정은 warpAffine이 쓰는 행렬의 역을 그대로
+    씁니다 — 부호를 손으로 유도하지 않고 cv2에서 꺼내야 이미지와 좌표가
+    갈리지 않습니다. 둘의 일치는 마커 픽셀 테스트로 고정합니다.
+    """
+    import cv2 as _cv2
+
+    out = np.asarray(points, dtype=np.float64).reshape(-1, 2).copy()
+    height, width = float(scene_hw[0]), float(scene_hw[1])
+
+    for _ in range(int(geometry.rotate_quarters) % 4):
+        # cv2.ROTATE_90_CLOCKWISE: (x, y) → (1-y, x), 프레임은 (h, w) 교환
+        out = np.stack([1.0 - out[:, 1], out[:, 0]], axis=1)
+        height, width = width, height
+
+    if geometry.flip_horizontal:
+        out[:, 0] = 1.0 - out[:, 0]
+    if geometry.flip_vertical:
+        out[:, 1] = 1.0 - out[:, 1]
+
+    if geometry.straighten:
+        matrix = _cv2.getRotationMatrix2D(
+            (width / 2, height / 2), float(geometry.straighten), 1.0)
+        # warpAffine(WARP_INVERSE_MAP 없이)은 이 행렬을 **원본 점 → 결과 점**
+        # 방향으로 씁니다. 처음에 역행렬로 짚었다가 마커 픽셀 테스트가
+        # 잡았습니다 — 이 방향은 문서 기억이 아니라 그 테스트가 근거입니다.
+        pixels = out * np.array([width, height])
+        ones = np.ones((len(pixels), 1))
+        moved = np.hstack([pixels, ones]) @ matrix.T
+        out = moved / np.array([width, height])
+
+    if geometry.has_crop():
+        span_x = max(1e-6, geometry.crop_right - geometry.crop_left)
+        span_y = max(1e-6, geometry.crop_bottom - geometry.crop_top)
+        out[:, 0] = (out[:, 0] - geometry.crop_left) / span_x
+        out[:, 1] = (out[:, 1] - geometry.crop_top) / span_y
+
+    return out
+
+
+def _map_scene_box(box_px: tuple, geometry, scene_hw: tuple[int, int],
+                   out_wh: tuple[int, int]) -> tuple | None:
+    """분석 좌표 상자를 표시 픽셀 상자로. 화면 밖이면 None.
+
+    수평보정이 걸리면 상자가 기울어지는데, 표시용이므로 네 코너를 변환해
+    감싸는 축정렬 상자로 근사합니다.
+    """
+    x, y, w, h = box_px
+    corners = np.array([[x, y], [x + w, y], [x, y + h], [x + w, y + h]],
+                       dtype=np.float64)
+    corners /= np.array([scene_hw[1], scene_hw[0]])
+    mapped = _map_scene_points(corners, geometry, scene_hw)
+
+    x0, y0 = mapped.min(axis=0)
+    x1, y1 = mapped.max(axis=0)
+    if x1 <= 0.0 or y1 <= 0.0 or x0 >= 1.0 or y0 >= 1.0:
+        return None                      # 잘려 나간 영역 — 그릴 것이 없습니다
+    out_w, out_h = out_wh
+    return (x0 * out_w, y0 * out_h, (x1 - x0) * out_w, (y1 - y0) * out_h)
 
 
 _WORKER_SIGNALS = ("source_ready", "done", "failed", "finished")
@@ -252,6 +322,7 @@ class FinalRenderWorker(QThread):
                 return
 
             settings = self._settings
+            scene_hw = None
             if self.region is not None:
                 # **자르기 전에** 광학 보정을 겁니다. 왜곡·비네팅은 화면 중심과
                 # 크기 기준이라, 조각에 걸면 그 조각을 프레임 전체로 알고
@@ -271,20 +342,39 @@ class FinalRenderWorker(QThread):
                 y0 = max(0, min(height - 1, int(top * height)))
                 x1 = max(x0 + 1, min(width, int(right * width)))
                 y1 = max(y0 + 1, min(height, int(bottom * height)))
+                frame_hw = (height, width)          # 자르기 전 장면 크기
                 image = _np.ascontiguousarray(image[y0:y1, x0:x1])
                 # 주 피사체 좌표도 잘라낸 조각 기준으로 다시 잡습니다. 안 그러면
                 # 확대할 때만 마스크가 엉뚱한 얼굴로 옮겨 갑니다.
                 face_box = _remap_box(face_box, (left, top, right, bottom))
 
+            piece_long = max(image.shape[:2])
             # 화면에 실제로 보이는 해상도까지만 줄입니다. resize_long_edge는
             # 확대하지 않으므로, target이 원본보다 크면 원본 그대로 갑니다.
             image = resize_long_edge(image, self._target)
             if self._cancelled:
                 return
-            result = engine.apply_settings(image, settings, self._path,
-                                           self._metadata,
-                                           wb=self._wb, main_face_box=face_box,
-                                           base_kelvin=self._base_kelvin)
+            if self.region is not None:
+                # 조각이 장면 전체라면 가졌을 크기. 이걸 안 넘기면 선명도·
+                # 텍스처·클래리티 반지름이 조각 크기로 계산되어, 확대한
+                # 미리보기가 내보내기보다 1/줌배 약하게 걸립니다 — 하필
+                # 선명도를 확인하려고 확대하는 자리에서 어긋납니다.
+                shrink = max(image.shape[:2]) / max(1, piece_long)
+                scene_hw = (max(1, round(frame_hw[0] * shrink)),
+                            max(1, round(frame_hw[1] * shrink)))
+            # **워터마크와 정보 띠는 빼고 보정만 합니다.** 화면에 올리는 쪽
+            # (_on_final_ready → _apply_display_overlays)이 그 둘을 다시
+            # 얹으므로, 여기서 구우면 두 번 들어갑니다 — 실측으로 세로가
+            # 132px 늘고 같은 문구가 두 줄이 됐습니다. 빠른 미리보기 경로
+            # (_render)는 처음부터 이렇게 하고 있었는데 이 워커만 빠져
+            # 있었고, 그래서 Full Render를 켤 때만 증상이 났습니다.
+            result = engine.apply_settings(
+                image,
+                replace(settings, watermark=WatermarkSettings(),
+                        exif_strip=ExifStripSettings()),
+                self._path, self._metadata,
+                wb=self._wb, main_face_box=face_box,
+                base_kelvin=self._base_kelvin, scene_hw=scene_hw)
             if self._cancelled:
                 return
             self.done.emit(result)
@@ -404,6 +494,26 @@ class LoupeDialog(QDialog):
         self._demosaic_cache = None
         self._demosaic_path: Path | None = None
         """직전 Full Render의 디모자이크 결과. 확대·이동 때 재사용합니다."""
+
+        self._rendered_frame = (False, False)
+        """직전 렌더의 표시 프레임 결정 — (크롭 편집 중, 마스크 편집 중).
+
+        마스크·크롭 편집에 들어가면 화면이 기하를 풀고 다른 프레임을
+        보여 줍니다. 그 순간 진행 중이던 Full Render는 **이전 프레임으로**
+        만든 것이라, 도착하면 장면 좌표 조작점 밑을 잘린 그림으로 덮습니다 —
+        이 재설계가 없애려던 어긋남이 그 몇 초 창에서 되살아납니다.
+        값 편집이 낡은 렌더를 즉시 접는 것(_on_settings_changed)과 같은
+        취급이 필요하고, 전환을 알아채려면 직전 결정을 들고 있어야 합니다.
+        """
+
+        self._display_geometry = GeometrySettings()
+        """지금 화면에 실제로 적용된 기하.
+
+        ROI·얼굴 오버레이는 분석(자르기 전) 좌표라 이 기하로 옮겨 그립니다.
+        panel.settings()를 그때그때 읽으면 안 됩니다 — 크롭 모드·마스크
+        편집 중에는 화면이 기하를 일부/전부 풀고 그려지므로(_render), 표시에
+        쓴 값과 어긋납니다.
+        """
 
         self._locked = False
         """내보내기가 도는 동안 편집을 막습니다 (set_locked).
@@ -1321,9 +1431,33 @@ class LoupeDialog(QDialog):
                 )
         self.clip_label.setText(" · ".join(warnings))
 
+    def _mask_editing_active(self) -> bool:
+        """마스크를 보거나 만지는 중인가 — 그동안 화면은 장면 프레임입니다.
+
+        도형 조작점이 떠 있거나, 브러시로 칠하는 중이거나, 빨간 영역 표시가
+        켜져 있으면 참입니다. 마스크 좌표가 전부 장면(자르기 전) 기준이라
+        이때 잘린 프레임을 보여 주면 잡는 좌표부터 어긋납니다(_render 참고).
+        """
+        if getattr(self.preview, "_shape_kind", None) is not None:
+            return True
+        if getattr(self.preview, "_brush_mode", False):
+            return True
+        return self.panel.overlay_mask() is not None
+
     def _render(self) -> None:
         if self._source is None:
             return
+
+        # 표시 프레임 결정이 바뀌었으면(마스크·크롭 편집 진입/이탈) 진행
+        # 중인 Full Render를 접습니다. 그 렌더는 이전 프레임으로 만든
+        # 것이라 도착하는 순간 편집 중인 화면을 덮습니다. 모든 전환
+        # 경로(_sync_mask_shape, 영역 표시 토글, 브러시, 크롭 모드)가
+        # 여기를 지나므로 이 한 곳에서 알아챕니다.
+        frame = (self.preview._crop_mode, self._mask_editing_active())
+        if frame != self._rendered_frame:
+            self._rendered_frame = frame
+            self._stop_full_render_for_edit()
+            self._schedule_full_render()
 
         settings = self.panel.settings()
 
@@ -1336,6 +1470,20 @@ class LoupeDialog(QDialog):
                 settings = replace(
                     settings, geometry=replace(settings.geometry, **_FULL_CROP)
                 )
+
+            # **마스크를 보거나 만지는 동안은 기하를 통째로 풀고 보여 줍니다.**
+            #
+            # 마스크 좌표는 장면(자르기 전) 기준입니다. 화면이 잘린 프레임을
+            # 보여 주면 끌어서 잡는 좌표와 빨간 영역 표시가 전부 그 프레임
+            # 기준이 되어, 엔진이 거는 자리와 어긋납니다 — 크롭한 사진에서
+            # 마스크를 새로 그리면 다른 곳에 걸리던 원인입니다.
+            #
+            # 크롭만 풀면 부족합니다. 회전·수평보정도 좌표계를 바꾸므로 남겨
+            # 두면 그만큼 어긋납니다. 그래서 전부 풉니다 — 회전을 걸어 둔
+            # 사진은 마스크를 만지는 동안 원래 방향으로 보이는데, 크롭 모드가
+            # 편집 중에 전체를 보여 주는 것과 같은 성격의 대가입니다.
+            if self._mask_editing_active():
+                settings = replace(settings, geometry=GeometrySettings())
             # 워터마크와 정보 띠는 빼고 보정만 적용합니다. 정보 띠의 검은 바나
             # 워터마크 글자가 섞이면 히스토그램·클리핑 경고가 사진의 계조를
             # 반영하지 못해, 보정값이 바뀐 것처럼 보입니다. 표기는 아래에서
@@ -1349,6 +1497,12 @@ class LoupeDialog(QDialog):
                 main_face_box=self.record.main_face_norm,
                 base_kelvin=self._base_kelvin,
             )
+
+        # 오버레이 좌표 변환이 쓸, **화면에 실제로 적용된** 기하를 남깁니다.
+        # 전/후 비교는 원본 그대로라 기하가 없습니다.
+        self._display_geometry = (GeometrySettings()
+                                  if self.before_after.isChecked()
+                                  else settings.geometry)
 
         # 소스와 중간 연산은 float(정밀도 유지)이므로 표시 직전에만 8비트로.
         image = to_display(image)
@@ -1545,14 +1699,33 @@ class LoupeDialog(QDialog):
         self._waiting_for_slot = False
         settings = self.panel.settings()
 
+        # 화면(_render)과 **같은 프레임**으로 만듭니다. 크롭 편집 중에는
+        # 크롭을 풀고, 마스크를 보거나 만지는 중에는 기하 전체를 풉니다.
+        # 여기만 기하를 그대로 두면 결과가 도착하는 순간 편집 중인 화면이
+        # 잘린 프레임으로 바뀌어, 러버밴드·조작점이 가정하는 좌표와
+        # 어긋납니다.
+        if self.preview._crop_mode:
+            settings = replace(
+                settings, geometry=replace(settings.geometry, **_FULL_CROP))
+        if self._mask_editing_active():
+            settings = replace(settings, geometry=GeometrySettings())
+
         # 확대 중이면 보이는 데만 만듭니다. 등배에서는 전체가 보이므로
         # 잘라 봐야 이득이 없고, 잘린 결과를 화면에 맞추기만 번거롭습니다.
         #
         # 렌즈 보정이 걸려 있어도 자릅니다 — 워커가 **자르기 전에** 광학
         # 보정을 걸기 때문입니다(engine.apply_optics_stage). 예전에는 자른
         # 뒤에 걸어서, 확대하면 Full Render에서만 그림이 휘었습니다.
+        #
+        # **마스크가 있으면 자르지 않습니다.** 마스크 좌표는 장면 기준인데
+        # 여기서 보이는 영역만 잘라 넘기면 apply_settings가 그 조각을 장면
+        # 전체로 알고 마스크를 겁니다 — 확대한 Full Render에서만 마스크가
+        # 옮겨 갑니다. 얼굴 상자는 조각 기준으로 다시 잡지만(_remap_box)
+        # 방사형·선형·브러시는 좌표를 파라미터로 들고 있어 그렇게 못 합니다.
+        # 전체 프레임 렌더의 비용을 내더라도 맞는 그림이 우선입니다.
         region = None
-        if self.preview.zoom() > 1.01 and settings.geometry.is_neutral():
+        if (self.preview.zoom() > 1.01 and settings.geometry.is_neutral()
+                and not settings.masks):
             region = self.preview.visible_region()
         self._final_region = region
 
@@ -1681,6 +1854,8 @@ class LoupeDialog(QDialog):
         # 보정이 중립이면 apply_settings가 입력(float)을 그대로 돌려주므로
         # _render와 똑같이 표시 직전에 8비트로 변환합니다.
         self.preview.set_busy(False)
+        # 이 결과에 적용된 기하 — 오버레이 좌표 변환이 씁니다(_draw_roi).
+        self._display_geometry = worker._settings.geometry
         image = to_display(image)
         if self._final_region is not None:
             image = self._compose_region(image, self._final_region)
@@ -1952,29 +2127,37 @@ class LoupeDialog(QDialog):
     def _draw_roi(self, image: np.ndarray) -> np.ndarray:
         """켜 둔 표시 항목을 이미지 위에 얹습니다.
 
-        좌표는 전부 원본 프리뷰 기준이라 축소 배율을 곱해야 맞습니다.
-        크롭이나 회전이 걸려 있으면 좌표계가 전부 달라지므로 그리지 않습니다.
+        좌표는 전부 분석 프리뷰(자르기 전) 기준입니다. 화면은 기하가 적용된
+        결과이므로 상자·윤곽을 같은 기하로 옮겨 그립니다(_map_scene_points).
+        예전에는 기하가 걸리면 통째로 숨겼는데, 그러면 크롭 한 번에 초점·
+        얼굴 표시가 전부 사라져 "크롭하면 안 보인다"는 제보가 됐습니다.
+        잘려 나간 상자만 빠지고 나머지는 제자리에 보여야 합니다.
         """
-        if not self.panel.settings().geometry.is_neutral():
-            return image
-
-        # 배율은 저장해 둔 값이 아니라 **지금 그리는 이미지**에서 냅니다.
-        # Full Render 결과는 미리보기보다 크기가 달라서, 저장값을 쓰면
-        # 고화질로 바꾸는 순간 박스가 어긋납니다.
+        geometry = self._display_geometry
         reference = self._roi_reference_width or 1
-        scale = image.shape[1] / reference
         focus = self.record.focus
+
+        # 변환에 필요한 것은 분석 좌표계의 **종횡비**뿐입니다. 디모자이크
+        # 원본(_source)에 기대면 파일을 못 연 상태(분석 결과만 있는 컷)에서
+        # 표시가 통째로 사라집니다 — 예전 코드는 그때도 그렸습니다.
+        ref_h = int(getattr(focus, "source_height", 0) or 0)
+        if not ref_h:
+            shape = (self._source.shape if self._source is not None
+                     else image.shape)
+            ref_h = max(1, round(reference * shape[0] / shape[1]))
+        scene_hw = (ref_h, reference)
+
+        out_wh = (image.shape[1], image.shape[0])
         marked = image.copy()
         thin = max(1, int(image.shape[1] / 1200))  # 기존의 1/3 굵기
 
         def draw(box, colour, width) -> None:
-            x, y, w, h = box
-            cv2.rectangle(
-                marked,
-                (int(x * scale), int(y * scale)),
-                (int((x + w) * scale), int((y + h) * scale)),
-                colour, width,
-            )
+            mapped = _map_scene_box(tuple(box), geometry, scene_hw, out_wh)
+            if mapped is None:
+                return                      # 크롭 밖 — 그릴 자리가 없습니다
+            x, y, w, h = mapped
+            cv2.rectangle(marked, (int(x), int(y)),
+                          (int(x + w), int(y + h)), colour, width)
 
         # 검출된 얼굴을 옅게 그립니다. 주 피사체만 보여 주면 "왜 저 얼굴이
         # 뽑혔는지" 알 수 없고, 다른 얼굴을 놓친 건지도 모릅니다.
@@ -1985,8 +2168,11 @@ class LoupeDialog(QDialog):
 
         if self.show_eyes.isChecked():
             for contour in self._eye_rings():
-                cv2.polylines(marked, [np.round(contour * scale).astype(np.int32)],
-                              True, (240, 200, 60), thin)
+                points = (np.asarray(contour, np.float64)
+                          / np.array([reference, ref_h]))
+                mapped = _map_scene_points(points, geometry, scene_hw)
+                pixels = np.round(mapped * np.array(out_wh)).astype(np.int32)
+                cv2.polylines(marked, [pixels], True, (240, 200, 60), thin)
 
         # 초점 ROI (눈/얼굴/타일) — 실제로 선명도를 잰 자리
         if self.show_roi.isChecked() and focus.roi:
@@ -2048,11 +2234,16 @@ class LoupeDialog(QDialog):
         mask = self.panel.shape_mask()
         if mask is None:
             self.preview.set_shape(None)
+            # 조작점이 사라지면 화면이 장면 프레임에서 크롭 적용 표시로
+            # 돌아가야 합니다(_mask_editing_active). 표시 프레임 전환이라
+            # 재렌더가 필요합니다.
+            self._render_timer.start()
             return
         # 범위(size)는 방사형에만 걸립니다. 선형에 곱하면 있지도 않은
         # 반경을 줄이는 셈이 되어 화면과 결과가 어긋납니다.
         size = _size_factor(mask) if mask.kind in SIZE_KINDS else 1.0
         self.preview.set_shape(mask.kind.value, mask.params, size=size)
+        self._render_timer.start()      # 반대 방향 전환도 같습니다
 
     def _on_shape_dragged(self, params: dict) -> None:
         """이미지 위에서 끈 도형 좌표를 마스크에 담아 둡니다.
@@ -2172,9 +2363,13 @@ class LoupeDialog(QDialog):
             if value is None:
                 record.develop = None
             elif record.develop is not None:
-                # 다른 컷이 이미 잡아 둔 크롭은 지키고 나머지만 덮어씁니다
+                # 다른 컷이 이미 잡아 둔 크롭·마스크는 지키고 나머지만
+                # 덮어씁니다. 크롭만 지키고 마스크를 덮으면, 컷마다 그려 둔
+                # 국소 보정이 일괄 적용 한 번에 전부 사라집니다 — 둘 다
+                # 같은 이유(컷 고유의 값)로 공유 대상이 아닙니다.
                 record.develop = replace(
-                    shared, geometry=record.develop.geometry
+                    shared, geometry=record.develop.geometry,
+                    masks=record.develop.masks,
                 )
             else:
                 record.develop = shared

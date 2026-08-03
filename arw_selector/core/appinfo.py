@@ -98,7 +98,8 @@ def _is_writable(path: Path) -> bool:
 
 #: 쓰기가 막힌 곳에서 실행할 때 사용자 폴더로 복사해 와야 하는 것들.
 #: logs는 실행 중에 생기는 것이라 넣지 않습니다.
-_SEEDED_DIRS = ("select_presets", "develop_presets", "lensfun", "calibration")
+_SEEDED_DIRS = ("select_presets", "develop_presets", "watermark_presets",
+                "lensfun", "calibration")
 
 
 def _seed_from_bundle(target: Path) -> None:

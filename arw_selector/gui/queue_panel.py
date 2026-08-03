@@ -275,18 +275,17 @@ class QueuePanel(QWidget):
                 self, tr("Preset"), tr("Could not load:\n{error}").format(error=exc))
             return
 
-        # 프리셋에는 그 프리셋을 만든 컷의 크롭과 마스크가 같이 저장돼
-        # 있습니다. 다른 컷에 그대로 씌우면 엉뚱한 데가 잘리고 엉뚱한 데가
-        # 보정됩니다. 예전에는 대기열 항목에 보정이 아직 없을 때
-        # (entry.develop is None) 프리셋의 크롭이 딸려 들어와, 갓 넣은
-        # 사진들이 남의 구도로 잘렸습니다.
+        # 지금 프리셋은 도형·마스크·워터마크를 담지 않지만(for_preset),
+        # **예전 버전이 저장한 파일**에는 그 컷의 크롭·마스크가 들어 있을 수
+        # 있습니다 — 실제로 갓 넣은 사진들이 남의 구도로 잘린 적이 있습니다.
+        # 파일을 믿지 말고 여기서 한 번 더 걷어냅니다.
         settings = settings.without_geometry()
         if entry.develop is not None:
-            settings = replace(
-                settings,
-                geometry=entry.develop.geometry,
-                masks=entry.develop.masks,
-            )
+            # 프리셋이 안 담는 것(도형·마스크·워터마크)은 항목의 지금 값을
+            # 지킵니다 — 보정창의 프리셋 불러오기와 같은 계약입니다.
+            # 예전에는 geometry·masks만 지켜서, 프리셋을 갈아타면 항목에
+            # 걸어 둔 워터마크가 조용히 꺼졌습니다.
+            settings = entry.develop.with_preset(settings)
         entry.develop = settings
         entry.preset_name = label
 

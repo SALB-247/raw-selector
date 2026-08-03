@@ -269,6 +269,9 @@ and the grading reasons; if RAW demosaic fails, a warning notes the viewer is
 - **AF point** (`P`) — an orange box where the camera focused (Sony, Canon
   CR3, Nikon).
 - **Zoom to focus** (`Z`) — fills the screen with the grading region.
+
+The overlays follow the crop, rotation and straighten, so they mark the same
+spot of the photo whichever way the frame is set.
 - **Full Render** — re-develops at full resolution whenever you stop
   adjusting; when zoomed in, only the visible region is rendered more finely.
 
@@ -396,6 +399,13 @@ smoothing**, and **Sharpening**. Radial and linear masks show drag handles on
 the image — drag the centre to move, an edge point to resize, an outer point
 to rotate.
 
+Masks stick to the photo, not to the crop: changing the crop, rotating or
+flipping later carries every mask along, and a mask that ends up outside the
+crop simply stops applying. While a mask's handles are up, or the brush or
+the red region overlay is active, the view temporarily shows the whole
+uncropped photo — the same way crop editing does — and returns to the
+cropped view when you put the handles down.
+
 #### Color mixer
 
 ![Color mixer section](screenshots/develop-hsl.png)
@@ -453,6 +463,11 @@ taken** — set the **Strip height** (%), and optionally add free text for the
 right side (artist name, etc.).
 
 #### Watermark
+
+The watermark has its own preset bar at the top of the section — the same
+save / import / export / delete controls as develop presets, kept separate
+so one watermark can be reused across any number of looks (develop presets
+do not store the watermark).
 
 **Add watermark** overlays text or a PNG image on export. Enter the text and
 pick a **Font**, or **Browse** to a PNG file. **Position** places it on a
@@ -622,6 +637,12 @@ The develop panel's preset bar works the same way: a develop-preset combo
 with **Save**, **Import**, **Export**, and **Delete**. Saved develop presets
 also appear in the queue panel's per-row combos, so queued shots can take a
 look with one click.
+
+A develop preset stores the look only. Crop, straighten, rotation, masks and
+the watermark are left out on save, and loading a preset keeps the current
+shot's values for all of them — swapping looks never un-crops a photo,
+moves a local adjustment, or removes a watermark. Watermarks have their own
+presets in the Watermark section.
 
 ## Command-line interface
 

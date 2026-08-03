@@ -29,6 +29,7 @@ from .appinfo import (  # noqa: F401 (재수출)
 
 SELECT_PRESET_DIR = "select_presets"
 DEVELOP_PRESET_DIR = "develop_presets"
+WATERMARK_PRESET_DIR = "watermark_presets"
 
 _SAFE_NAME = re.compile(r"[^\w가-힣 _-]+")
 
@@ -200,6 +201,16 @@ def select_presets(root: Path | None = None) -> PresetStore:
 def develop_presets(root: Path | None = None) -> PresetStore:
     """보정 프리셋."""
     return PresetStore(DEVELOP_PRESET_DIR, root)
+
+
+def watermark_presets(root: Path | None = None) -> PresetStore:
+    """워터마크 프리셋.
+
+    보정과 따로 두는 이유: 같은 워터마크를 여러 색감에 얹거나 같은 색감에
+    다른 워터마크를 얹는 일이 흔합니다. 한 덩어리로 묶으면 조합마다 프리셋을
+    만들어야 합니다(DevelopSettings.for_preset 참고).
+    """
+    return PresetStore(WATERMARK_PRESET_DIR, root)
 
 
 def default_develop_profiles() -> dict[str, dict]:

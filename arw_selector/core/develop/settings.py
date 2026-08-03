@@ -921,6 +921,39 @@ class DevelopSettings:
 
         return replace(self, geometry=GeometrySettings(), masks=())
 
+    def for_preset(self) -> "DevelopSettings":
+        """보정 프리셋에 담지 않을 값을 뺀 사본.
+
+        **도형은 통째로 뺍니다** — 일괄 적용과 같은 이유입니다(위
+        without_geometry). 크롭·수평 보정·회전은 그 컷의 구도와 지평선에
+        맞춘 값이라, 다른 사진에 씌우면 맞춰 주는 것이 아니라 피사체를
+        잘라내고 그만큼 기울입니다. 마스크도 마찬가지입니다.
+
+        **워터마크**는 따로 저장합니다(presets.watermark_presets). 색보정과
+        성격이 다르고, 같은 워터마크를 여러 색감에 얹거나 같은 색감에 다른
+        워터마크를 얹는 일이 흔합니다 — 한 덩어리로 묶으면 조합마다 프리셋을
+        만들어야 합니다.
+        """
+        from dataclasses import replace
+
+        return replace(self.without_geometry(), watermark=WatermarkSettings())
+
+    def with_preset(self, preset: "DevelopSettings") -> "DevelopSettings":
+        """프리셋을 지금 값 위에 얹습니다. 프리셋이 안 담는 것은 지킵니다.
+
+        for_preset이 빼는 것들(도형·마스크·워터마크)은 프리셋을 불러도 지금
+        컷의 값이 남아야 합니다. 통째로 갈아 끼우면 프리셋을 고를 때마다
+        잡아 둔 크롭이 풀리고 워터마크가 사라집니다.
+        """
+        from dataclasses import replace
+
+        return replace(
+            preset,
+            geometry=self.geometry,
+            watermark=self.watermark,
+            masks=self.masks,
+        )
+
     @classmethod
     def from_dict(cls, data: Any) -> "DevelopSettings":
         """모르는 키는 무시합니다. 예전 프리셋도 열려야 합니다.

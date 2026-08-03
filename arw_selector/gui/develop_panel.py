@@ -63,7 +63,7 @@ from ..core.develop import (
     WatermarkSettings,
 )
 from ..core.develop.mask_presets import MASK_PRESETS, build_mask
-from ..core.presets import develop_presets
+from ..core.presets import develop_presets, watermark_presets
 from .color_wheel import ColorGradeZoneWidget
 from .curve_editor import CurveEditor
 from .preset_bar import PresetBar
@@ -375,10 +375,15 @@ class DevelopPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(4)
 
+        # 프리셋은 **컷마다 다른 값**을 담지 않습니다 — 수평 보정·워터마크·
+        # 마스크(DevelopSettings.for_preset). 불러올 때도 그것들은 지금 값을
+        # 지킵니다(with_preset), 안 그러면 프리셋을 고를 때마다 맞춰 둔
+        # 수평이 풀리고 워터마크가 사라집니다.
         self.preset_bar = PresetBar(
             develop_presets(),
-            collect=lambda: self.settings().to_dict(),
-            apply=lambda data: self.set_settings(DevelopSettings.from_dict(data)),
+            collect=lambda: self.settings().for_preset().to_dict(),
+            apply=lambda data: self.set_settings(
+                self.settings().with_preset(DevelopSettings.from_dict(data))),
         )
         self.preset_bar.applied.connect(self.settings_changed.emit)
         preset_wrapper = QWidget()
@@ -1840,6 +1845,16 @@ class DevelopPanel(QWidget):
     def _build_watermark(self) -> None:
         section = self._section("watermark", tr("Watermark"), "◇")
 
+        # 워터마크는 자체 프리셋을 씁니다. 색보정 프리셋과 섞으면 같은
+        # 워터마크를 여러 색감에 얹을 때마다 프리셋을 새로 만들어야 합니다.
+        self.watermark_preset_bar = PresetBar(
+            watermark_presets(),
+            collect=lambda: {"watermark": self.settings().to_dict()["watermark"]},
+            apply=self._apply_watermark_preset,
+        )
+        self.watermark_preset_bar.applied.connect(self.settings_changed.emit)
+        section.add_widget(self.watermark_preset_bar)
+
         self.watermark_enabled = QCheckBox(tr("Add watermark"))
         self.watermark_enabled.toggled.connect(self._emit)
         section.add_widget(self.watermark_enabled)
@@ -1922,6 +1937,19 @@ class DevelopPanel(QWidget):
         self._watermark_color = (chosen.blue(), chosen.green(), chosen.red())
         self._refresh_color_button()
         self._emit()
+
+    def _apply_watermark_preset(self, data) -> None:
+        """워터마크 프리셋을 지금 보정 위에 얹습니다 — 워터마크만 바뀝니다.
+
+        프리셋 파일은 {"watermark": {...}} 한 조각만 담습니다. 통째로
+        DevelopSettings로 읽으면 나머지 항목이 전부 기본값으로 덮입니다.
+        """
+        from dataclasses import replace as _replace
+
+        incoming = DevelopSettings.from_dict(data if isinstance(data, dict)
+                                             else {})
+        self.set_settings(_replace(self.settings(),
+                                   watermark=incoming.watermark))
 
     def _refresh_color_button(self) -> None:
         blue, green, red = self._watermark_color

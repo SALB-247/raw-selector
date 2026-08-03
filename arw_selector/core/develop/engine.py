@@ -644,6 +644,31 @@ def _apply_white_balance(
 # ---------------------------------------------------------------- 국소 대비
 
 
+#: 반지름이 픽셀 단위인 보정들이 맞춰진 기준 해상도(긴 변).
+#:
+#: 사용자가 슬라이더를 맞추는 곳은 보정 창의 미리보기이고 그 크기가
+#: 1400px입니다(gui/loupe.py의 PREVIEW_LONG_EDGE). 반지름을 픽셀로 고정해
+#: 두면 그보다 큰 곳에서는 같은 값이 상대적으로 작게 걸립니다 — Full
+#: Render(뷰포트 크기)와 내보내기(원본 크기)가 화면보다 덜 선명해집니다.
+#:
+#: 실측(A6700, 1400px 대 2800px에서 현상 후 같은 크기로 견줌):
+#:
+#:     보정 없음     0.15레벨   해상도 무관
+#:     클래리티 +50  0.18       무관 (원래 크기 비례)
+#:     텍스처 +50    1.13       탐  (채도 +2.15)
+#:     선명도 +80    1.51       탐  (채도 +3.39)
+#:     그레인 +50    6.27       크게 탐 (화소의 48%)
+#:
+#: 화면에서 본 것이 결과물에 그대로 나오도록 **화면 쪽에 맞춥니다.** 그래서
+#: 기존 편집물의 내보내기 결과는 지금보다 선명해집니다.
+TUNED_LONG_EDGE = 1400
+
+
+def scale_for(image: np.ndarray) -> float:
+    """이 이미지에서 픽셀 단위 반지름에 곱할 배율."""
+    return max(image.shape[:2]) / float(TUNED_LONG_EDGE)
+
+
 def _local_contrast(image: np.ndarray, amount: int, radius: float) -> np.ndarray:
     """언샤프 마스크. 명료도(큰 반경)와 텍스처(작은 반경)에 공용."""
     if not amount:
@@ -1287,7 +1312,8 @@ def apply_destripe(image: np.ndarray, amount: int) -> np.ndarray:
     return image - correction[:, None, None]
 
 
-def _apply_detail(image: np.ndarray, detail: DetailSettings) -> np.ndarray:
+def _apply_detail(image: np.ndarray, detail: DetailSettings,
+                  render_scale: float | None = None) -> np.ndarray:
     """샤프닝과 노이즈 감소.
 
     노이즈 감소를 먼저 합니다. 순서를 바꾸면 샤프닝이 키워 놓은 노이즈를
@@ -1315,7 +1341,12 @@ def _apply_detail(image: np.ndarray, detail: DetailSettings) -> np.ndarray:
     result = apply_noise_reduction(result, detail, faces)
 
     if detail.sharpen_amount:
-        blurred = cv2.GaussianBlur(result, (0, 0), max(0.3, detail.sharpen_radius))
+        # 반지름은 화면(1400px)에서 맞춘 값이라 크기에 비례시킵니다 —
+        # 안 그러면 내보낸 파일이 화면보다 덜 선명합니다(TUNED_LONG_EDGE).
+        # 배율은 호출자가 장면 기준으로 넘길 수 있습니다(확대 영역 렌더).
+        scale = render_scale if render_scale is not None else scale_for(result)
+        radius = max(0.3, detail.sharpen_radius * scale)
+        blurred = cv2.GaussianBlur(result, (0, 0), radius)
         result = result + (result - blurred) * (detail.sharpen_amount / 100.0)
 
     return result
@@ -1324,7 +1355,8 @@ def _apply_detail(image: np.ndarray, detail: DetailSettings) -> np.ndarray:
 # ---------------------------------------------------------------- 효과
 
 
-def _apply_effects(image: np.ndarray, effects: EffectSettings) -> np.ndarray:
+def _apply_effects(image: np.ndarray, effects: EffectSettings,
+                   render_scale: float | None = None) -> np.ndarray:
     """그레인과 비네팅."""
     if effects == EffectSettings():
         return image
@@ -1343,8 +1375,14 @@ def _apply_effects(image: np.ndarray, effects: EffectSettings) -> np.ndarray:
         result = result * (1.0 + (effects.vignette_amount / 100.0) * mask[:, :, None])
 
     if effects.grain_amount:
-        # 그레인 크기는 저해상도 노이즈를 확대해서 만듭니다
-        size = max(1, int(effects.grain_size / 100.0 * 4) + 1)
+        # 그레인 크기는 저해상도 노이즈를 확대해서 만듭니다.
+        #
+        # 알갱이 크기도 화면(1400px)에서 맞춘 값이라 크기에 비례시킵니다.
+        # 고정하면 큰 해상도에서 알갱이가 상대적으로 잘아져 화면과 전혀 다른
+        # 질감이 됩니다 — 실측으로 화소의 48%가 5레벨 넘게 갈렸습니다.
+        base = effects.grain_size / 100.0 * 4 + 1
+        scale = render_scale if render_scale is not None else scale_for(result)
+        size = max(1, int(round(base * scale)))
         rng = np.random.default_rng(12345)  # 재현 가능해야 미리보기가 깜빡이지 않습니다
         small = rng.normal(0, 1, (max(1, height // size), max(1, width // size), 1))
         noise = cv2.resize(
@@ -1427,6 +1465,7 @@ def apply_settings(
     main_face_box: "tuple[float, float, float, float] | None" = None,
     bit_depth: int = 8,
     base_kelvin: float = 0,
+    scene_hw: "tuple[int, int] | None" = None,
 ) -> np.ndarray:
     """BGR uint8 이미지에 보정 전체를 적용합니다.
 
@@ -1442,6 +1481,12 @@ def apply_settings(
     base_kelvin은 image_bgr이 **이미 어느 색온도로 디모자이크됐는지**입니다
     (0 = as-shot). 목표와 같으면 화이트밸런스 게인이 1이 되어 건너뜁니다 —
     센서 선형에서 이미 걸렸다는 뜻이고 그쪽이 물리적으로 옳습니다.
+
+    scene_hw는 image_bgr이 **장면 전체라면 가졌을 크기**입니다. 확대해서
+    보이는 영역만 잘라 렌더할 때 넘깁니다 — 조각 크기로 반지름을 재면
+    선명도·텍스처·클래리티가 확대 미리보기에서만 약하게 걸립니다(조각이
+    장면의 1/줌배라는 정보가 사라지므로). 안 넘기면 이미지 자체가 장면
+    전체라고 봅니다.
 
     main_face_box는 분석이 고른(또는 사용자가 화면에서 바꾼) 주 피사체 얼굴의
     정규화 좌표입니다. 얼굴 마스크의 '주 피사체' 대상이 이 얼굴을 따라갑니다.
@@ -1481,7 +1526,29 @@ def apply_settings(
     working, settings = apply_optics_stage(image_bgr, settings, source,
                                            metadata)
 
-    result = apply_geometry(working, settings.geometry).astype(np.float32)
+    # **자르기·회전은 마스크 뒤로 미룹니다.** 마스크 좌표는 0~1 정규화라 그
+    # 시점 이미지 크기에 곱해집니다. 자른 뒤에 걸면 자른 프레임 기준이 되어,
+    # 크롭을 바꾸는 순간 이미 그려 둔 마스크가 장면 위에서 이동합니다
+    # (실측: 오른쪽 절반을 자르면 (0.25,0.25) 마스크가 원본 (0.625,0.25)로).
+    #
+    # 여기서 마스크를 먼저 걸면 좌표가 자연히 **장면 기준**이 되고, 이어지는
+    # 기하 보정이 마스크를 함께 데려갑니다. 회전·반전까지 좌표 변환을 손으로
+    # 쓰지 않아도 맞습니다 — 틀릴 자리를 없애는 쪽을 택했습니다.
+    #
+    # 얼굴 상자(main_face_box)도 분석 이미지(자르기 전) 기준이라 여기서 맞습니다.
+    #
+    # 대가: 전역 보정이 잘라내기 전 전체에 걸려 크게 자를수록 손해입니다.
+    # 그리고 클래리티·텍스처 반지름이 자르기 전 크기를 봅니다 — 크롭을
+    # 조절해도 질감이 안 바뀌므로 오히려 일관됩니다.
+    result = working.astype(np.float32)
+
+    # 반지름 눈금을 **한 곳에서** 정합니다. 확대 영역 렌더는 장면의 조각을
+    # 받으므로 이미지 크기만 보면 눈금이 1/줌배로 줄어듭니다 — scene_hw가
+    # 그 정보를 보존합니다(문서 참고). 클래리티는 짧은 변, 나머지는 긴 변
+    # 기준인 기존 공식을 그대로 따릅니다.
+    scale_base = tuple(scene_hw) if scene_hw else working.shape[:2]
+    render_scale = max(scale_base) / float(TUNED_LONG_EDGE)
+    clarity_radius = max(3.0, min(scale_base) / 120)
 
     basic = settings.basic
     result = _apply_white_balance(result, basic, wb, base_kelvin)
@@ -1509,15 +1576,16 @@ def apply_settings(
     if basic.dehaze:
         result = _apply_dehaze(result, basic.dehaze)
     if basic.clarity:
-        result = _local_contrast(result, basic.clarity, radius=max(3.0, min(result.shape[:2]) / 120))
+        result = _local_contrast(result, basic.clarity, radius=clarity_radius)
     if basic.texture:
-        result = _local_contrast(result, basic.texture, radius=1.2)
+        # 클래리티는 원래 크기에 비례했지만(위) 텍스처는 1.2px 고정이었습니다.
+        result = _local_contrast(result, basic.texture,
+                                 radius=max(0.5, 1.2 * render_scale))
 
     result = _apply_hsl(result, settings.hsl)
     result = _apply_color_grade(result, settings.color_grade)
     result = _apply_saturation(result, basic)
-    result = _apply_detail(result, settings.detail)
-    result = _apply_effects(result, settings.effects)
+    result = _apply_detail(result, settings.detail, render_scale)
 
     # 국소 보정(마스크)은 전역 보정이 다 끝난 위에 얹습니다. 얼굴/눈/배경은
     # 이 시점 이미지에서 다시 검출하므로 마스크가 화면과 정확히 맞습니다.
@@ -1526,6 +1594,26 @@ def apply_settings(
 
         result = apply_masks(result, settings.masks,
                              main_face_box=main_face_box, profiled=profiled)
+
+    # 이제 자릅니다. 마스크가 장면 좌표로 걸린 뒤라 회전·반전·크롭이 마스크를
+    # 함께 데려갑니다(위 주석 참고).
+    result = apply_geometry(result, settings.geometry).astype(np.float32)
+
+    # 연출 효과(비네트·그레인)는 **자른 뒤**에 겁니다. 마스크가 장면에
+    # 붙는 것과 반대로, 이 둘은 최종 구도에 붙는 연출입니다 — 비네트는
+    # 화면 네 귀퉁이를 어둡게 하는 것이라 크롭 앞에 걸면 중심이 아닌
+    # 크롭에서 편심됩니다(실측: 오른쪽 절반 크롭에서 좌우 밝기가 뒤집힘).
+    # 그레인도 인화지의 알갱이라 최종 크기 기준이 맞습니다. 워터마크·정보
+    # 띠가 자른 뒤에 붙는 것과 같은 이유입니다.
+    #
+    # 이 이동으로 마스크와 효과의 순서가 뒤집혔습니다(예전: 효과 → 마스크).
+    # 마스크의 국소 톤이 비네트 곱 아래로 가는 차이인데, 각자 옳은 좌표계에
+    # 앉는 대가로 받아들입니다.
+    #
+    # 그레인 눈금은 장면 기준(render_scale)입니다. 자른 뒤 크기로 재면
+    # 미리보기·내보내기 사이는 일관해도 확대 영역 렌더가 어긋나고, 물리로도
+    # 필름을 잘라 확대하면 알갱이가 커지는 쪽이 맞습니다.
+    result = _apply_effects(result, settings.effects, render_scale)
 
     # 오버레이까지 float으로 끌고 간 다음 **한 번만** 양자화합니다.
     # 예전에는 여기서 uint8로 떨궈, 워터마크·정보 띠를 켜지 않아도 16비트
