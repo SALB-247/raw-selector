@@ -368,13 +368,17 @@ class FinalRenderWorker(QThread):
             # 132px 늘고 같은 문구가 두 줄이 됐습니다. 빠른 미리보기 경로
             # (_render)는 처음부터 이렇게 하고 있었는데 이 워커만 빠져
             # 있었고, 그래서 Full Render를 켤 때만 증상이 났습니다.
+            # display=True: 보정은 작업 공간에서 걸리지만 이 결과는 화면으로
+            # 갑니다. 엔진이 양자화 전에 sRGB로 옮겨야 뷰포트가 내보내기와
+            # 같은 색이 됩니다 — to_display는 uint8을 그대로 통과시킵니다.
             result = engine.apply_settings(
                 image,
                 replace(settings, watermark=WatermarkSettings(),
                         exif_strip=ExifStripSettings()),
                 self._path, self._metadata,
                 wb=self._wb, main_face_box=face_box,
-                base_kelvin=self._base_kelvin, scene_hw=scene_hw)
+                base_kelvin=self._base_kelvin, scene_hw=scene_hw,
+                display=True)
             if self._cancelled:
                 return
             self.done.emit(result)
@@ -1125,8 +1129,13 @@ class LoupeDialog(QDialog):
             return None
         try:
             target = load_preview(self.record.path)
+            # working=self._source: 피팅·검증을 실제 화면 경로(작업 공간
+            # 적용 → sRGB 변환)로 돌립니다. 표시값 위에서만 피팅하면 커브가
+            # 실제로 걸리는 공간과 어긋나 색이 남습니다(실측 R/G 12%).
             return camera_look.match_settings(
-                to_display(self._source), target, base=self.panel.settings()
+                to_display(self._source), target, base=self.panel.settings(),
+                wb=self._wb.engine_wb if self._wb else None,
+                working=self._source,
             )
         except Exception:  # noqa: BLE001 - 프리뷰가 없거나 깨진 파일도 있습니다
             log.debug("카메라 룩 매칭 실패: %s", self.record.path.name,
@@ -1496,6 +1505,7 @@ class LoupeDialog(QDialog):
                 wb=self._wb.engine_wb if self._wb else None,
                 main_face_box=self.record.main_face_norm,
                 base_kelvin=self._base_kelvin,
+                display=True,
             )
 
         # 오버레이 좌표 변환이 쓸, **화면에 실제로 적용된** 기하를 남깁니다.
@@ -1504,7 +1514,8 @@ class LoupeDialog(QDialog):
                                   if self.before_after.isChecked()
                                   else settings.geometry)
 
-        # 소스와 중간 연산은 float(정밀도 유지)이므로 표시 직전에만 8비트로.
+        # 전/후 비교의 원본은 작업 공간 float이므로 여기서 화면용으로 옮기고,
+        # 보정 렌더는 엔진이 display=True로 이미 옮겨 왔습니다(uint8 통과).
         image = to_display(image)
         self.histogram.set_image(image)
         # 곡선 편집기 배경에도 같은 히스토그램을 깔아 줍니다.
@@ -1851,8 +1862,8 @@ class LoupeDialog(QDialog):
             return
         if worker.generation != self._final_generation:
             return
-        # 보정이 중립이면 apply_settings가 입력(float)을 그대로 돌려주므로
-        # _render와 똑같이 표시 직전에 8비트로 변환합니다.
+        # 워커가 display=True로 렌더하므로 보통은 화면용 uint8이 옵니다.
+        # to_display는 그때 통과이고, 혹시 float이 오면 여기서 옮깁니다.
         self.preview.set_busy(False)
         # 이 결과에 적용된 기하 — 오버레이 좌표 변환이 씁니다(_draw_roi).
         self._display_geometry = worker._settings.geometry

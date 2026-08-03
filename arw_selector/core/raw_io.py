@@ -750,8 +750,27 @@ def load_demosaiced(
         if target_kelvin and target_kelvin > 0:
             from .develop.engine import NEUTRAL_KELVIN, _kelvin_to_rgb
 
+            # **카메라 실측 배수에 앵커합니다.** 모델 절대값(daylight ×
+            # K(5500)/K(target))은 카메라의 as-shot 배수를 통째로 버리는데,
+            # 켈빈 모델에는 틴트(초록-마젠타) 축이 없어 그 성분이 함께
+            # 사라집니다. 실측(DSC06598, 이자카야 LED): 추정 켈빈에서 모델
+            # 배수가 실측과 R 8.2% 어긋나, 슬라이더를 as-shot 표시 위치로
+            # 확정하는 순간 녹황색이 돌았습니다(화소 18.8%가 5레벨 초과).
+            #
+            # 카메라 배수에서 출발해 모델의 **상대 변화**만 겁니다. 목표가
+            # as-shot 추정치면 정확히 카메라 배수가 되어(실측 0.00레벨)
+            # 틴트가 보존됩니다. engine._wb_gain의 미리보기 게인과 같은
+            # 앵커여야 합니다 — 갈리면 슬라이더를 놓는 순간 색이 튑니다.
+            camera = np.array(raw.camera_whitebalance[:3], dtype=np.float64)
             daylight = np.array(raw.daylight_whitebalance[:3], dtype=np.float64)
-            mult = daylight * (_kelvin_to_rgb(NEUTRAL_KELVIN) / _kelvin_to_rgb(target_kelvin))
+            if camera[1] > 0 and daylight[1] > 0:
+                est = _estimate_as_shot_kelvin(tuple(camera), tuple(daylight))
+                mult = camera * (_kelvin_to_rgb(est)
+                                 / _kelvin_to_rgb(target_kelvin))
+            else:
+                # 배수를 못 읽는 파일 — 예전 일반 근사로 물러섭니다
+                mult = daylight * (_kelvin_to_rgb(NEUTRAL_KELVIN)
+                                   / _kelvin_to_rgb(target_kelvin))
             params["user_wb"] = [float(mult[0]), float(mult[1]), float(mult[2]), float(mult[1])]
         else:
             params["use_camera_wb"] = True

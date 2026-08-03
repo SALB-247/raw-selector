@@ -594,14 +594,36 @@ def _wb_gain(target_kelvin: float, wb: "tuple | None",
     """
     if wb is not None:
         camera_wb, daylight_wb = wb
+        camera = np.array(camera_wb[:3], dtype=np.float64)
         daylight = np.array(daylight_wb[:3], dtype=np.float64)
-        target_mult = daylight * (_kelvin_to_rgb(NEUTRAL_KELVIN) / _kelvin_to_rgb(target_kelvin))
-        if base_kelvin and base_kelvin > 0:
-            base_mult = daylight * (_kelvin_to_rgb(NEUTRAL_KELVIN)
-                                    / _kelvin_to_rgb(base_kelvin))
+        if camera[1] > 0 and daylight[1] > 0:
+            # **카메라 실측 배수에 앵커합니다** — raw_io.load_demosaiced의
+            # target_kelvin 경로와 같은 기준이어야 슬라이더를 놓는 순간
+            # (게인 근사 → 재디모자이크) 색이 안 튑니다.
+            #
+            # 배수는 camera × K(추정)/K(값) 꼴이라, 게인(목표/베이스)에서
+            # camera가 약분되어 순수 모델 상대비만 남습니다. 켈빈 모델에
+            # 없는 틴트 성분이 게인에 실리지 않으므로 베이스의 틴트가
+            # 보존되고, 목표가 as-shot 추정치면 게인이 정확히 1입니다 —
+            # 예전에는 모델 절대값/실측의 잔차(실측 R 8.2%)가 그대로
+            # 걸려, 슬라이더를 as-shot 표시 위치로 확정만 해도 녹황색이
+            # 돌았습니다.
+            from ..raw_io import _estimate_as_shot_kelvin
+
+            est = _estimate_as_shot_kelvin(tuple(camera), tuple(daylight))
+            base_ref = (float(base_kelvin)
+                        if base_kelvin and base_kelvin > 0 else float(est))
+            gain = _kelvin_to_rgb(base_ref) / _kelvin_to_rgb(target_kelvin)
         else:
-            base_mult = np.array(camera_wb[:3], dtype=np.float64)
-        gain = target_mult / np.maximum(base_mult, 1e-6)
+            # 배수를 못 읽는 파일 — 예전 혼합 근사로 물러섭니다
+            target_mult = daylight * (_kelvin_to_rgb(NEUTRAL_KELVIN)
+                                      / _kelvin_to_rgb(target_kelvin))
+            if base_kelvin and base_kelvin > 0:
+                base_mult = daylight * (_kelvin_to_rgb(NEUTRAL_KELVIN)
+                                        / _kelvin_to_rgb(base_kelvin))
+            else:
+                base_mult = np.maximum(camera, 1e-6)
+            gain = target_mult / np.maximum(base_mult, 1e-6)
     else:
         gain = _kelvin_to_rgb(NEUTRAL_KELVIN) / _kelvin_to_rgb(target_kelvin)
         if base_kelvin and base_kelvin > 0:
@@ -1466,8 +1488,17 @@ def apply_settings(
     bit_depth: int = 8,
     base_kelvin: float = 0,
     scene_hw: "tuple[int, int] | None" = None,
+    display: bool = False,
 ) -> np.ndarray:
     """BGR uint8 이미지에 보정 전체를 적용합니다.
+
+    display=True면 결과를 **화면용 sRGB로 옮겨** 돌려줍니다. 보정은 작업
+    공간(sRGB보다 넓음)에서 걸리므로, 화면에 올리는 렌더는 마지막에 이
+    변환이 필요합니다 — 빠뜨리면 뷰포트만 내보내기와 다른 색이 됩니다
+    (실측: 채도 높은 컷에서 R/G 12%). editable(JPEG·HEIF) 입력은 처음부터
+    sRGB라 변환하지 않고, 내보내기는 대상 색공간을 스스로 고르므로 기본값
+    False를 씁니다. to_display가 여기 결과(uint8)를 그대로 통과시키기
+    때문에, 화면 경로는 반드시 이 인자로 변환해야 합니다.
 
     bit_depth=16이면 uint16(0~65535)로 돌려줍니다. 파이프라인은 원래
     float32로 흐르므로 마지막 양자화만 달라집니다 — 실측으로 계조가
@@ -1499,12 +1530,6 @@ def apply_settings(
     if image_bgr.size == 0:
         return quantize(image_bgr, bit_depth)
 
-    if settings.is_neutral():
-        # 보정이 없어도 반환 계약(정수 BGR)은 지켜야 합니다. 디모자이크 입력은
-        # float 0~255라, 그대로 돌려주면 미리보기는 컬러 노이즈가 되고 저장은
-        # 인코더에서 깨집니다. 실제로 '최종 미리보기'에서 발생한 버그입니다.
-        return quantize(image_bgr, bit_depth)
-
     # 보정값이 놓인 공간. RAW는 디코더 감마와 표준 프로파일을 지난 값이고,
     # JPEG·HEIF는 카메라가 구운 진짜 sRGB라 디모자이크도 프로파일도 지나지
     # 않습니다(_baseline_transfer). 빛에 거는 연산은 전부 이 값을 봐야
@@ -1513,6 +1538,25 @@ def apply_settings(
 
     editable = source is not None and is_editable_image(source)
     profiled = not editable
+
+    # uint8 입력은 이미 화면용 값입니다(내장 JPEG 프리뷰, 저하 모드 —
+    # to_display와 같은 계약). 작업 공간 값은 디모자이크의 float만 옵니다.
+    came_as_display = image_bgr.dtype == np.uint8
+
+    def _screen(array: np.ndarray) -> np.ndarray:
+        """display=True일 때만 작업 공간 → 화면 sRGB. 양자화 전에 한 번."""
+        if not display or not profiled or came_as_display:
+            return array
+        from . import icc
+
+        return icc.working_to(
+            np.clip(array, 0.0, 255.0).astype(np.float32), "srgb")
+
+    if settings.is_neutral():
+        # 보정이 없어도 반환 계약(정수 BGR)은 지켜야 합니다. 디모자이크 입력은
+        # float 0~255라, 그대로 돌려주면 미리보기는 컬러 노이즈가 되고 저장은
+        # 인코더에서 깨집니다. 실제로 '최종 미리보기'에서 발생한 버그입니다.
+        return quantize(_screen(image_bgr), bit_depth)
 
     # JPEG·HEIF는 센서 데이터가 없어 load_demosaiced가 target_kelvin을 **조용히
     # 무시합니다**. 그런데도 base_kelvin을 받아 들이면 게인이 1이 되어
@@ -1621,7 +1665,7 @@ def apply_settings(
     output = apply_overlays(
         np.clip(result, 0.0, 255.0).astype(np.float32),
         settings, source, metadata)
-    return quantize(output, bit_depth)
+    return quantize(_screen(output), bit_depth)
 
 
 def apply_overlays(

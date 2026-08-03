@@ -333,52 +333,347 @@ def curve_for_lut(lut: np.ndarray, weights: np.ndarray,
                    points_rgb=lut_to_curve_points(lut))
 
 
+def _wb_log_ratios(mean_bgr: np.ndarray) -> tuple[float, float]:
+    """표시값 채널 평균 → 선형 → (log R/G, log B/G)."""
+    from .engine import srgb_to_linear
+
+    lin = srgb_to_linear(np.maximum(np.asarray(mean_bgr, np.float64), 1.0)
+                         / 255.0)
+    return float(np.log(lin[2] / lin[1])), float(np.log(lin[0] / lin[1]))
+
+
+def _wb_means(render: np.ndarray, target: np.ndarray):
+    """비교에 쓸 (target, render) 채널 평균.
+
+    무채색 후보가 있으면 그것을(조명 색에 안 휘둘림), 없으면 전체 평균을
+    씁니다 — 색조명 장면(이자카야 LED 등)은 무채색이 아예 없는데, 하필
+    그런 컷이 이 피팅을 가장 필요로 합니다.
+    """
+    from .calibration import _neutral_means
+
+    pair = _neutral_means(target, np.clip(render, 0, 255).astype(np.uint8))
+    if pair is not None:
+        return pair
+    return (target.reshape(-1, 3).mean(axis=0),
+            np.clip(render, 0, 255).reshape(-1, 3).mean(axis=0))
+
+
+def _wb_gap(render: np.ndarray, target: np.ndarray) -> float:
+    """두 그림의 색 균형 차이 — log(R/G)·log(B/G) 절대합."""
+    t_mean, r_mean = _wb_means(render, target)
+    want, got = _wb_log_ratios(t_mean), _wb_log_ratios(r_mean)
+    return abs(got[0] - want[0]) + abs(got[1] - want[1])
+
+
+CHANNEL_POINTS = 8
+"""채널별 잔차 곡선의 분위수 표본 수. 잔차용이라 성글게 잡습니다."""
+
+CHANNEL_MAX_SHIFT = 12.0
+"""채널 곡선이 움직일 수 있는 최대 레벨. 분위수 대응이 폭주하는 것만
+막습니다 — 색이 나빠지는 쪽은 스코어 판정(match_settings)이 잡습니다."""
+
+CHANNEL_MIN_GAIN = 0.05
+"""채널 곡선 채택에 요구하는 최소 상대 개선. 여기 스코어는 작은 근사
+렌더(WB 근사·광학 보정 없음)로 재는데, 실제 정착 경로(재디모자이크·광학
+포함)로 넘어가면 아슬아슬한 이득은 뒤집힐 수 있습니다 — 실측: 내부 +2~3%
+이득이던 P1032946이 정착 렌더에서 -2% 손해로 반전. 진짜 수혜 컷은 내부
+-21~-30%라 5% 문턱과는 한 자릿수 차이로 떨어져 있습니다."""
+
+
+def _fit_channel_curve(render_ch: np.ndarray, target_ch: np.ndarray) -> tuple:
+    """한 채널의 잔차를 분위수 대응으로 — 편집기 좌표 점들. 없으면 ()."""
+    quantiles = np.linspace(0.03, 0.97, CHANNEL_POINTS)
+    src = np.quantile(render_ch, quantiles)
+    dst = np.clip(np.quantile(target_ch, quantiles),
+                  src - CHANNEL_MAX_SHIFT, src + CHANNEL_MAX_SHIFT)
+    xs = np.clip(np.round(src), 1, 254)
+    ys = np.clip(np.round(dst), 0, 255)
+    points, seen = [], set()
+    for x, y in zip(xs, ys):
+        if int(x) in seen:
+            continue
+        seen.add(int(x))
+        points.append((int(x), int(y)))
+    if not points or max(abs(y - x) for x, y in points) < 1.5:
+        return ()                      # 잔차가 반올림 수준 — 항등으로 둡니다
+    return ((0, 0), *points, (255, 255))
+
+
+def _apply_matched_wb(render: np.ndarray, kelvin: int, tint: int,
+                      wb) -> np.ndarray:
+    """(색온도, 색조)가 **정착 후** 실제로 만드는 그림을 예측합니다.
+
+    슬라이더가 놓이면 색온도는 재디모자이크로 **선형에서** 걸리고
+    (raw_io.load_demosaiced의 앵커 배수), 색조는 표시값 G 곱으로
+    남습니다(engine._apply_white_balance). 피팅의 검증·사전 적용이 이
+    조합과 다른 공간을 쓰면 — 처음에 드래그용 근사(전부 감마 곱)를 썼다가
+    왕복 테스트가 잡았습니다: 켈빈 3000을 건 목표에서 2200·틴트 -87이
+    나왔습니다. 감마에 곱한 게인을 선형 가정으로 읽으면 2.4승으로
+    부풀기 때문입니다.
+    """
+    from ..raw_io import _estimate_as_shot_kelvin
+    from .engine import _kelvin_to_rgb, linear_to_srgb, srgb_to_linear
+
+    camera = np.array(wb[0][:3], dtype=np.float64)
+    daylight = np.array(wb[1][:3], dtype=np.float64)
+    est = _estimate_as_shot_kelvin(tuple(camera), tuple(daylight))
+    gain = _kelvin_to_rgb(float(est)) / _kelvin_to_rgb(float(kelvin))
+    gain = gain / gain[1]
+
+    linear = srgb_to_linear(np.clip(render, 0, 255).astype(np.float64) / 255.0)
+    linear[..., 2] *= gain[0]                 # R
+    linear[..., 0] *= gain[2]                 # B
+    out = linear_to_srgb(np.clip(linear, 0.0, 1.0)) * 255.0
+    if tint:
+        out[..., 1] *= 1.0 - tint / 100.0 * 0.18
+    return np.clip(out, 0, 255).astype(np.float32)
+
+
+def _kelvin_working(working: np.ndarray, kelvin: int, wb) -> np.ndarray:
+    """작업 공간 float에 앵커 켈빈 게인을 미리 겁니다 (정착의 근사).
+
+    정착은 센서 선형(색 행렬 앞)에 배수를 걸지만, 여기서는 행렬 뒤의 작업
+    선형에 같은 배수를 겁니다 — 앵커(추정 켈빈) 근처의 작은 게인에서는
+    차이가 작고, 채택은 어차피 실제 렌더 스코어로 판정하므로 근사가 나쁘면
+    그대로 기각됩니다. 작업 공간 전달함수는 sRGB 곡선입니다(Melissa).
+    """
+    from ..raw_io import _estimate_as_shot_kelvin
+    from .engine import _kelvin_to_rgb, linear_to_srgb, srgb_to_linear
+
+    camera = np.array(wb[0][:3], dtype=np.float64)
+    daylight = np.array(wb[1][:3], dtype=np.float64)
+    est = _estimate_as_shot_kelvin(tuple(camera), tuple(daylight))
+    gain = _kelvin_to_rgb(float(est)) / _kelvin_to_rgb(float(kelvin))
+    gain = gain / gain[1]
+
+    linear = srgb_to_linear(np.clip(working, 0, 255).astype(np.float64)
+                            / 255.0)
+    linear[..., 2] *= gain[0]                 # R
+    linear[..., 0] *= gain[2]                 # B
+    return (linear_to_srgb(np.clip(linear, 0.0, 1.0))
+            * 255.0).astype(np.float32)
+
+
+def fit_white_balance(render: np.ndarray, target: np.ndarray,
+                      wb) -> tuple[int, int] | None:
+    """render의 색 균형을 target에 맞추는 (색온도, 색조). 못 맞추면 None.
+
+    채널 비(R/G, B/G)를 목표로 앵커 모델(camera × K(추정)/K(t))의 켈빈과,
+    켈빈 축에 없는 초록-마젠타 성분을 색조로 역산합니다. 앵커 공식이라
+    "temperature=t"가 렌더에 주는 선형 게인이 정확히 K(추정)/K(t)이고,
+    그 예측 위에서 2축을 2변수로 풉니다.
+
+    **개선될 때만 답을 냅니다.** 색 차이에는 켈빈·색조 축 밖의 성분(제조사
+    색 렌더)도 섞여 있어서, 억지로 맞추면 한 축을 줄이며 다른 축을
+    키웁니다 — 실측에서 파나소닉 컷의 R/G가 2.0%에서 4.9%로 나빠졌습니다.
+    맞춘 결과의 색 균형 차이가 10% 이상 줄지 않으면 None을 돌려주고,
+    호출자는 기존 값을 둡니다.
+    """
+    from ..raw_io import _estimate_as_shot_kelvin
+    from .engine import _kelvin_to_rgb, linear_to_srgb
+
+    if wb is None:
+        return None
+    camera = np.array(wb[0][:3], dtype=np.float64)
+    daylight = np.array(wb[1][:3], dtype=np.float64)
+    if camera[1] <= 0 or daylight[1] <= 0:
+        return None
+
+    t_mean, r_mean = _wb_means(render, target)
+    want = _wb_log_ratios(t_mean)
+    got = _wb_log_ratios(r_mean)
+    want_rg, want_bg = want[0] - got[0], want[1] - got[1]
+
+    est = _estimate_as_shot_kelvin(tuple(camera), tuple(daylight))
+    anchor = _kelvin_to_rgb(float(est))
+
+    best = None
+    for kelvin in range(2000, 12001, 25):
+        gain = anchor / _kelvin_to_rgb(float(kelvin))
+        model_rg = float(np.log(gain[0] / gain[1]))
+        model_bg = float(np.log(gain[2] / gain[1]))
+        # 색조(G만 곱함)는 (log R/G, log B/G) 공간에서 (+d, +d) 방향입니다
+        delta = ((want_rg - model_rg) + (want_bg - model_bg)) / 2.0
+        residual = ((want_rg - model_rg - delta) ** 2
+                    + (want_bg - model_bg - delta) ** 2)
+        if best is None or residual < best[0]:
+            best = (residual, kelvin, delta)
+
+    _, kelvin, delta = best
+    # delta = 선형 G 공통 성분. tint의 정의는 **표시값** G 게인
+    # (1 - 0.18·tint/100)이므로 중간 회색에서 정확히 환산합니다.
+    grey = 0.18
+    disp_gain = float(linear_to_srgb(np.float64(grey * np.exp(-delta)))
+                      / linear_to_srgb(np.float64(grey)))
+    tint = int(np.clip(round((1.0 - disp_gain) * 100.0 / 0.18), -100, 100))
+
+    adjusted = _apply_matched_wb(render, int(kelvin), tint, wb)
+    if _wb_gap(adjusted, target) >= _wb_gap(render, target) * 0.9:
+        return None
+    return int(kelvin), tint
+
+
 def match_settings(
     render: np.ndarray,
     target: np.ndarray,
     base: DevelopSettings | None = None,
+    wb=None,
+    working: np.ndarray | None = None,
 ) -> DevelopSettings:
     """중립 현상 render를 내장 JPEG target에 근접시키는 DevelopSettings.
 
     render는 보정창 베이스(디모자이크+프로파일)의 8비트 BGR, target은
-    load_preview 결과입니다. base를 주면 그 설정에서 **노출·채도·톤 곡선만**
-    바꾼 사본을 돌려줍니다 — 디테일·마스크·크롭 등 다른 편집은 그대로
-    둡니다(원클릭 버튼이 기존 편집을 지우면 안 됩니다).
+    load_preview 결과입니다. base를 주면 그 설정에서 **색온도·색조·노출·
+    채도·톤 곡선만** 바꾼 사본을 돌려줍니다 — 디테일·마스크·크롭 등 다른
+    편집은 그대로 둡니다(원클릭 버튼이 기존 편집을 지우면 안 됩니다).
+
+    working은 같은 컷의 **작업 공간 float**(보정창의 self._source)입니다.
+    주면 피팅·검증 렌더를 전부 실제 화면 경로(작업 공간에 적용 →
+    display=True로 sRGB 변환)로 돌립니다. 표시값 위에서 피팅·검증하면
+    커브·채도가 실제로는 더 넓은 작업 공간에 걸리는 것과 어긋납니다 —
+    실측으로 같은 설정이 두 공간에서 R/G 12%까지 다른 색을 만듭니다
+    (채도 높은 컷일수록 큼). 없으면 예전처럼 표시값 위에서 피팅합니다.
+
+    wb는 (camera_whitebalance, daylight_whitebalance)입니다. 주면 색 균형을
+    먼저 맞춥니다(fit_white_balance) — 노출·커브·채도는 밝기와 크로마
+    크기만 다루므로, 색 균형이 어긋난 상태로는 "맞추기를 눌러도 색이
+    다르다"가 됩니다(실측: 이자카야 LED에서 R/G 8.1%·B/G 11.2% 어긋남이
+    피팅으로 0.3%·1.2%가 됩니다). 색이 개선되지 않는 컷(제조사 색 렌더가
+    지배)은 자동으로 건너뜁니다.
 
     채도는 연구처럼 YCrCb 근사가 아니라 **실제 엔진 렌더**(apply_settings)
     위에서 잽니다. 엔진은 커브를 채널별로 적용해 크로마가 함께 움직이므로,
     같은 채도값이라도 YCrCb 근사와 결과가 다릅니다 — 화면에 나올 그
     경로에서 재야 화면=결과가 맞습니다.
     """
+    from ..raw_io import to_display
     from .engine import apply_settings
 
     base = base or DevelopSettings()
-    render_s, target_s = _pair(render, target)
+    if working is not None:
+        # 실제 프레임: 렌더 비교 기준도 작업 이미지에서 파생시킵니다.
+        # (전달된 render와 사실상 같지만, 한 원본에서 나와야 어긋날 수
+        # 없습니다.)
+        working_s = _small(np.clip(working, 0.0, 255.0).astype(np.float32))
+        render_s = to_display(working_s)
+        _, target_s = _pair(render_s, target)
+    else:
+        working_s = None
+        render_s, target_s = _pair(render, target)
 
-    fitted = fit_look(render_s, target_s)
-    exposure = float(np.clip(round(fitted["exposure"], EXPOSURE_DECIMALS),
-                             -5.0, 5.0))
+    def fit_tone(source: np.ndarray, source_working, tone_tint: int):
+        """색 균형이 정해진 소스에서 노출·커브·채도를 피팅합니다.
 
-    weights = _weights(render_s, exposure)
-    curve = curve_for_lut(fitted["lut"], weights, base.curve)
+        source_working이 있으면 렌더는 실제 화면 경로(작업 공간 적용 후
+        sRGB 변환)를 씁니다. tone_tint는 그 렌더에 함께 태우는 색조 —
+        정착 화면도 색조를 엔진에서 겁니다.
+        """
+        def real(applied: DevelopSettings) -> np.ndarray:
+            if source_working is None:
+                return apply_settings(source, applied)
+            return apply_settings(source_working, applied, display=True)
 
-    # 채도는 톤을 확정한 뒤 실제 엔진 응답에서 잽니다. 톤·채도만 넣은
-    # 벌거벗은 설정을 쓰는 이유: base의 크롭·마스크·정보 띠가 끼면 작은
-    # 비교 이미지가 잘리거나 덧그려져 측정 자체가 깨집니다.
-    tone_only = DevelopSettings(
-        basic=BasicSettings(exposure=exposure),
-        curve=CurveSettings(
-            highlights=curve.highlights, lights=curve.lights,
-            darks=curve.darks, shadows=curve.shadows,
-            points_rgb=curve.points_rgb,
-        ),
-    )
-    toned = apply_settings(render_s, tone_only)
-    ratio = (_chroma(target_s) + 1e-6) / (_chroma(toned) + 1e-6)
-    saturation = int(np.clip(round((ratio - 1.0) * 100.0), -100, 100))
+        fitted = fit_look(source, target_s)
+        exposure = float(np.clip(round(fitted["exposure"], EXPOSURE_DECIMALS),
+                                 -5.0, 5.0))
+        weights = _weights(source, exposure)
+        curve = curve_for_lut(fitted["lut"], weights, base.curve)
+
+        # 채도는 톤을 확정한 뒤 실제 엔진 응답에서 잽니다. 톤·채도만 넣은
+        # 벌거벗은 설정을 쓰는 이유: base의 크롭·마스크·정보 띠가 끼면 작은
+        # 비교 이미지가 잘리거나 덧그려져 측정 자체가 깨집니다.
+        tone_only = DevelopSettings(
+            basic=BasicSettings(exposure=exposure, tint=tone_tint),
+            curve=CurveSettings(
+                highlights=curve.highlights, lights=curve.lights,
+                darks=curve.darks, shadows=curve.shadows,
+                points_rgb=curve.points_rgb,
+            ),
+        )
+        toned = real(tone_only)
+        ratio = (_chroma(target_s) + 1e-6) / (_chroma(toned) + 1e-6)
+        saturation = int(np.clip(round((ratio - 1.0) * 100.0), -100, 100))
+        rendered = real(replace(tone_only,
+                                basic=replace(tone_only.basic,
+                                              saturation=saturation)))
+        luma_err, chroma_err = score(rendered, target_s)
+        return exposure, curve, saturation, luma_err + chroma_err, rendered
+
+    # 색 균형을 먼저 맞추고, 노출·커브·채도는 그 위에서 잽니다. 실제
+    # 화면도 같은 순서입니다(화이트밸런스 → 톤). 사전 적용은 정착 후
+    # 실제와 같은 공간을 씁니다 — 실제 프레임에서는 켈빈 게인을 작업
+    # 선형에 걸고(_kelvin_working) 색조는 엔진 렌더에 태우며, 표시값
+    # 폴백에서는 _apply_matched_wb를 씁니다.
+    #
+    # **채택은 최종 그림으로 판정합니다.** 색 균형 지표만 보면 무채색은
+    # 좋아지는데 커브·채도까지 얹은 결과가 나빠지는 컷이 있습니다(실측
+    # 파나소닉: 균형 지표는 개선인데 최종 B/G가 0.0% → 4.6%). 그래서 두
+    # 후보(피팅 WB / 지금 WB)를 끝까지 피팅해 실제 엔진 렌더가 목표에 더
+    # 가까운 쪽을 씁니다 — 채도를 엔진 응답에서 재는 것과 같은 원칙입니다.
+    temperature = base.basic.temperature
+    tint = base.basic.tint
+    source, source_working = render_s, working_s
+    cur_tint = tint if working_s is not None else 0
+    exposure, curve, saturation, err, rendered = fit_tone(
+        render_s, working_s, cur_tint)
+
+    fitted_wb = fit_white_balance(render_s, target_s, wb)
+    if fitted_wb is not None:
+        if working_s is not None:
+            cand_working = _kelvin_working(working_s, fitted_wb[0], wb)
+            cand_display = to_display(cand_working)
+            wb_fit = fit_tone(cand_display, cand_working, fitted_wb[1])
+        else:
+            cand_working = None
+            cand_display = np.clip(
+                _apply_matched_wb(render_s, fitted_wb[0], fitted_wb[1], wb),
+                0, 255).astype(np.uint8)
+            wb_fit = fit_tone(cand_display, None, 0)
+        if wb_fit[3] < err:
+            temperature, tint = fitted_wb
+            exposure, curve, saturation, err, rendered = wb_fit
+            source, source_working = cand_display, cand_working
+            cur_tint = tint if working_s is not None else 0
+
+    # 남은 색 잔차를 **채널별 곡선**으로 한 번 더 좁힙니다 — 승자 렌더와
+    # 목표의 채널별 분위수 대응입니다(SIZE 렌더라 왕복이 ms 단위). 연구는
+    # 채널별 커브를 기각했지만(채도 악화) 그때는 WB 선행도 스코어 판정도
+    # 없었습니다. 지금은 실제 엔진 렌더의 스코어가 좋아질 때만 채택하므로
+    # 그 우려를 판정이 직접 잡습니다 — 실측: 이자카야 LED 컷 합 8.87→7.02,
+    # 형광 혼합 컷 12.05→9.52, 개선 없는 컷은 자동 기각.
+    #
+    # 두 번 반복은 무익했습니다(곡선을 누적이 아니라 대체하므로 늘 악화).
+    #
+    # base에 사용자가 넣어 둔 채널 곡선이 있으면 시도하지 않습니다 —
+    # 채널 곡선은 매칭 소유가 아니라는 계약(curve_for_lut)이 우선입니다.
+    if not (base.curve.points_red or base.curve.points_green
+            or base.curve.points_blue):
+        rendered_s, tgt_s = _pair(rendered, target_s)
+        channelled = replace(
+            curve,
+            points_red=_fit_channel_curve(rendered_s[..., 2].ravel(),
+                                          tgt_s[..., 2].ravel()),
+            points_green=_fit_channel_curve(rendered_s[..., 1].ravel(),
+                                            tgt_s[..., 1].ravel()),
+            points_blue=_fit_channel_curve(rendered_s[..., 0].ravel(),
+                                           tgt_s[..., 0].ravel()),
+        )
+        if channelled != curve:
+            trial_settings = DevelopSettings(
+                basic=BasicSettings(exposure=exposure, saturation=saturation,
+                                    tint=cur_tint),
+                curve=channelled)
+            if source_working is None:
+                trial = apply_settings(source, trial_settings)
+            else:
+                trial = apply_settings(source_working, trial_settings,
+                                       display=True)
+            if sum(score(trial, target_s)) < err * (1.0 - CHANNEL_MIN_GAIN):
+                curve = channelled
 
     return replace(
         base,
-        basic=replace(base.basic, exposure=exposure, saturation=saturation),
+        basic=replace(base.basic, exposure=exposure, saturation=saturation,
+                      temperature=temperature, tint=tint),
         curve=curve,
     )
