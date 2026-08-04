@@ -1488,17 +1488,27 @@ def apply_settings(
     bit_depth: int = 8,
     base_kelvin: float = 0,
     scene_hw: "tuple[int, int] | None" = None,
-    display: bool = False,
+    output_space: "str | None" = None,
 ) -> np.ndarray:
     """BGR uint8 이미지에 보정 전체를 적용합니다.
 
-    display=True면 결과를 **화면용 sRGB로 옮겨** 돌려줍니다. 보정은 작업
-    공간(sRGB보다 넓음)에서 걸리므로, 화면에 올리는 렌더는 마지막에 이
-    변환이 필요합니다 — 빠뜨리면 뷰포트만 내보내기와 다른 색이 됩니다
-    (실측: 채도 높은 컷에서 R/G 12%). editable(JPEG·HEIF) 입력은 처음부터
-    sRGB라 변환하지 않고, 내보내기는 대상 색공간을 스스로 고르므로 기본값
-    False를 씁니다. to_display가 여기 결과(uint8)를 그대로 통과시키기
-    때문에, 화면 경로는 반드시 이 인자로 변환해야 합니다.
+    output_space를 주면 결과를 그 색공간으로 옮겨 돌려줍니다 — 화면은
+    "srgb", 내보내기는 사용자가 고른 공간. 보정은 작업 공간(sRGB보다
+    넓음)에서 걸리므로 밖으로 나가는 마지막 자리에서 이 변환이 필요하고,
+    **양자화보다 먼저**여야 합니다. 작업 공간에서 8비트로 떨군 뒤 옮기면
+    ProPhoto의 거친 8비트 눈금이 sRGB 그림자에 그대로 남습니다(실측:
+    16비트 경유 기준 화면 최대 1레벨 vs 사후 변환 최대 28레벨).
+
+    None(기본)은 작업 공간 값을 그대로 돌려줍니다 — 중간 단계로 쓰는
+    호출(카메라 룩의 작업 공간 검증 등)용입니다.
+
+    입력이 어느 공간인지는 dtype이 가릅니다. float은 디모자이크·editable
+    로드가 만든 **작업 공간**이고, uint8은 이미 화면용 sRGB입니다(내장
+    JPEG 프리뷰, 저하 폴백 — to_display와 같은 계약). 예전에는 editable
+    (JPEG·HEIF) 소스도 제외했는데 그 전제가 틀렸습니다 — 0.15.7부터
+    editable도 로드 시 to_working으로 작업 공간이 됩니다(실측: HIF
+    베이스가 sRGB 디코드와 6.58, ProPhoto 변환과 0.19 차이). 그래서
+    보정창의 JPEG·HEIF만 색이 어긋났습니다.
 
     bit_depth=16이면 uint16(0~65535)로 돌려줍니다. 파이프라인은 원래
     float32로 흐르므로 마지막 양자화만 달라집니다 — 실측으로 계조가
@@ -1539,24 +1549,34 @@ def apply_settings(
     editable = source is not None and is_editable_image(source)
     profiled = not editable
 
-    # uint8 입력은 이미 화면용 값입니다(내장 JPEG 프리뷰, 저하 모드 —
-    # to_display와 같은 계약). 작업 공간 값은 디모자이크의 float만 옵니다.
+    # uint8 입력은 이미 화면용 sRGB 값입니다(내장 JPEG 프리뷰, 저하 폴백 —
+    # to_display와 같은 계약). 작업 공간 값은 float으로만 옵니다. 소스
+    # 종류(editable)로 가르면 안 됩니다 — editable도 float 베이스는 로드
+    # 시 to_working을 지난 작업 공간입니다(위 독스트링).
     came_as_display = image_bgr.dtype == np.uint8
 
-    def _screen(array: np.ndarray) -> np.ndarray:
-        """display=True일 때만 작업 공간 → 화면 sRGB. 양자화 전에 한 번."""
-        if not display or not profiled or came_as_display:
+    def _to_output(array: np.ndarray) -> np.ndarray:
+        """output_space가 있으면 그 공간으로. 양자화 전에 한 번."""
+        if output_space is None:
             return array
         from . import icc
 
+        source_space = "srgb" if came_as_display else icc.WORKING_SPACE
+        if source_space == output_space:
+            return array
+        if came_as_display:
+            # 저하 폴백(uint8 sRGB)을 Adobe RGB 등으로 내보내는 드문 경우.
+            # working_to를 쓰면 sRGB 값을 작업 공간 값으로 오해합니다 —
+            # 예전 사후 변환이 실제로 그랬습니다.
+            return icc.convert_from_srgb(array, output_space)
         return icc.working_to(
-            np.clip(array, 0.0, 255.0).astype(np.float32), "srgb")
+            np.clip(array, 0.0, 255.0).astype(np.float32), output_space)
 
     if settings.is_neutral():
         # 보정이 없어도 반환 계약(정수 BGR)은 지켜야 합니다. 디모자이크 입력은
         # float 0~255라, 그대로 돌려주면 미리보기는 컬러 노이즈가 되고 저장은
         # 인코더에서 깨집니다. 실제로 '최종 미리보기'에서 발생한 버그입니다.
-        return quantize(_screen(image_bgr), bit_depth)
+        return quantize(_to_output(image_bgr), bit_depth)
 
     # JPEG·HEIF는 센서 데이터가 없어 load_demosaiced가 target_kelvin을 **조용히
     # 무시합니다**. 그런데도 base_kelvin을 받아 들이면 게인이 1이 되어
@@ -1665,7 +1685,7 @@ def apply_settings(
     output = apply_overlays(
         np.clip(result, 0.0, 255.0).astype(np.float32),
         settings, source, metadata)
-    return quantize(_screen(output), bit_depth)
+    return quantize(_to_output(output), bit_depth)
 
 
 def apply_overlays(
@@ -1782,13 +1802,6 @@ def export_image(
         log.info("%s는 16비트를 저장하지 못해 8비트로 내보냅니다", suffix)
         bit_depth = 8
 
-    result = apply_settings(image, settings, source, metadata, wb=wb,
-                            main_face_box=main_face_box, bit_depth=bit_depth,
-                            base_kelvin=base_kelvin)
-
-    # 색공간 변환은 마지막입니다 — 보정은 전부 작업 공간(sRGB로 해석되는
-    # 표시값)에서 이뤄지고, 여기서 목표 공간의 숫자로 옮깁니다. 태그는
-    # 저장 뒤에 붙입니다(인코딩된 바이트를 건드리지 않기 위해).
     from . import icc
 
     # WebP는 ICC를 못 실어서 sRGB로만 나갑니다 — 태그 없이 다른 공간의
@@ -1799,7 +1812,18 @@ def export_image(
     # 대기열처럼 그 dataclass를 안 거치는 경로가 있습니다. 렌즈 자동 보정에서
     # 같은 이유로 이중으로 막고 있습니다(위 apply_settings).
     target = "srgb" if suffix.lstrip(".") in ("webp",) else color_space
-    result = icc.working_to(result, target)
+
+    # 색공간 변환은 apply_settings 안에서 **양자화보다 먼저** 겁니다.
+    # 예전에는 여기서 양자화된 결과에 걸었는데, 그러면 작업 공간의 거친
+    # 8비트 눈금이 sRGB 그림자에 남습니다(실측: 16비트 경유 기준 최대
+    # 28레벨 vs 지금 1레벨). 화면(output_space="srgb")과 같은 자리를
+    # 지나므로 화면 == 내보낸 파일이 비트 심도와 무관하게 성립합니다.
+    # 저하 폴백(uint8 sRGB 프리뷰)도 dtype으로 구분되어, sRGB 값을 작업
+    # 공간 값으로 오해하던 것이 함께 고쳐집니다. 프로파일 태그는 저장
+    # 뒤에 붙입니다(인코딩된 바이트를 건드리지 않기 위해).
+    result = apply_settings(image, settings, source, metadata, wb=wb,
+                            main_face_box=main_face_box, bit_depth=bit_depth,
+                            base_kelvin=base_kelvin, output_space=target)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1830,7 +1854,10 @@ def export_image(
 
     # 색 프로파일은 **EXIF 다음**에 넣습니다. EXIF를 쓰는 쪽이 세그먼트를
     # 다시 배치하면서 먼저 넣은 APP2를 떨굴 수 있기 때문입니다.
+    # 프로파일은 화소가 실제로 놓인 공간(target)을 따라갑니다 — color_space
+    # 인자와 갈리는 경우는 WebP 강제 sRGB뿐이고 WebP는 임베드 대상이
+    # 아니지만, 화소와 태그가 어긋날 구조 자체를 남기지 않습니다.
     if suffix in icc.EMBEDDABLE:
-        icc.embed(destination, color_space)
+        icc.embed(destination, target)
 
     return destination

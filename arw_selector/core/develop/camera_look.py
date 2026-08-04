@@ -529,7 +529,7 @@ def match_settings(
 
     working은 같은 컷의 **작업 공간 float**(보정창의 self._source)입니다.
     주면 피팅·검증 렌더를 전부 실제 화면 경로(작업 공간에 적용 →
-    display=True로 sRGB 변환)로 돌립니다. 표시값 위에서 피팅·검증하면
+    output_space="srgb"로 변환)로 돌립니다. 표시값 위에서 피팅·검증하면
     커브·채도가 실제로는 더 넓은 작업 공간에 걸리는 것과 어긋납니다 —
     실측으로 같은 설정이 두 공간에서 R/G 12%까지 다른 색을 만듭니다
     (채도 높은 컷일수록 큼). 없으면 예전처럼 표시값 위에서 피팅합니다.
@@ -571,7 +571,7 @@ def match_settings(
         def real(applied: DevelopSettings) -> np.ndarray:
             if source_working is None:
                 return apply_settings(source, applied)
-            return apply_settings(source_working, applied, display=True)
+            return apply_settings(source_working, applied, output_space="srgb")
 
         fitted = fit_look(source, target_s)
         exposure = float(np.clip(round(fitted["exposure"], EXPOSURE_DECIMALS),
@@ -667,7 +667,7 @@ def match_settings(
                 trial = apply_settings(source, trial_settings)
             else:
                 trial = apply_settings(source_working, trial_settings,
-                                       display=True)
+                                       output_space="srgb")
             if sum(score(trial, target_s)) < err * (1.0 - CHANNEL_MIN_GAIN):
                 curve = channelled
 

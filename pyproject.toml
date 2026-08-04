@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "raw-selector"
-version = "0.15.8"
+version = "0.15.9"
 description = "RAW focus-based select / develop automation tool"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,7 +25,7 @@ dependencies = [
 gui = ["PySide6>=6.6"]
 # 렌즈 프로필 자동 보정. 없어도 수동 광학 보정은 그대로 동작한다.
 lens = ["lensfunpy>=1.14"]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-xdist>=3.5"]
 
 [project.scripts]
 raw-select = "arw_selector.cli:main"
@@ -41,3 +41,8 @@ include = ["arw_selector*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 병렬 실행이 기본입니다. 1,904개 직렬 20분 → 병렬 87초 (M1 Pro 10코어,
+# 실패 0으로 그대로 통과 — conftest의 상태 격리와 프로세스별 QApplication
+# 덕에 테스트 수정이 없었습니다). 한 테스트만 디버깅할 때는 -n0을 붙이면
+# 워커 없이 돕니다: pytest tests/test_x.py -n0
+addopts = "-n auto"

@@ -368,7 +368,7 @@ class FinalRenderWorker(QThread):
             # 132px 늘고 같은 문구가 두 줄이 됐습니다. 빠른 미리보기 경로
             # (_render)는 처음부터 이렇게 하고 있었는데 이 워커만 빠져
             # 있었고, 그래서 Full Render를 켤 때만 증상이 났습니다.
-            # display=True: 보정은 작업 공간에서 걸리지만 이 결과는 화면으로
+            # output_space="srgb": 보정은 작업 공간에서 걸리지만 이 결과는 화면으로
             # 갑니다. 엔진이 양자화 전에 sRGB로 옮겨야 뷰포트가 내보내기와
             # 같은 색이 됩니다 — to_display는 uint8을 그대로 통과시킵니다.
             result = engine.apply_settings(
@@ -378,7 +378,7 @@ class FinalRenderWorker(QThread):
                 self._path, self._metadata,
                 wb=self._wb, main_face_box=face_box,
                 base_kelvin=self._base_kelvin, scene_hw=scene_hw,
-                display=True)
+                output_space="srgb")
             if self._cancelled:
                 return
             self.done.emit(result)
@@ -1505,7 +1505,7 @@ class LoupeDialog(QDialog):
                 wb=self._wb.engine_wb if self._wb else None,
                 main_face_box=self.record.main_face_norm,
                 base_kelvin=self._base_kelvin,
-                display=True,
+                output_space="srgb",
             )
 
         # 오버레이 좌표 변환이 쓸, **화면에 실제로 적용된** 기하를 남깁니다.
@@ -1515,7 +1515,7 @@ class LoupeDialog(QDialog):
                                   else settings.geometry)
 
         # 전/후 비교의 원본은 작업 공간 float이므로 여기서 화면용으로 옮기고,
-        # 보정 렌더는 엔진이 display=True로 이미 옮겨 왔습니다(uint8 통과).
+        # 보정 렌더는 엔진이 output_space="srgb"로 이미 옮겨 왔습니다(uint8 통과).
         image = to_display(image)
         self.histogram.set_image(image)
         # 곡선 편집기 배경에도 같은 히스토그램을 깔아 줍니다.
@@ -1862,7 +1862,7 @@ class LoupeDialog(QDialog):
             return
         if worker.generation != self._final_generation:
             return
-        # 워커가 display=True로 렌더하므로 보통은 화면용 uint8이 옵니다.
+        # 워커가 output_space="srgb"로 렌더하므로 보통은 화면용 uint8이 옵니다.
         # to_display는 그때 통과이고, 혹시 float이 오면 여기서 옮깁니다.
         self.preview.set_busy(False)
         # 이 결과에 적용된 기하 — 오버레이 좌표 변환이 씁니다(_draw_roi).
