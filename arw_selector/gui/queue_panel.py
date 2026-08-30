@@ -1,11 +1,12 @@
-"""내보내기 대기열 패널.
+"""Export queue panel.
 
-여러 폴더를 돌며 "이 컷들은 이 프리셋으로" 를 쌓아두고 마지막에 한 번에
-내보냅니다. 현상까지 하면 장당 수백 ms라, 작업할 때마다 기다리는 대신
-모아서 돌리는 편이 낫습니다.
+You work across several folders, stacking up "these shots with this preset"
+and exporting them all at once at the end. With develop included it is
+several hundred ms per shot, so collecting them and running them together
+beats waiting every time you work.
 
-목록이 아니라 표로 보여 줍니다. 파일 / 보정 / 크롭 세 가지를 한눈에 대조해야
-"이 컷에 뭐가 걸려 있더라"를 확인할 수 있습니다.
+It is shown as a table, not a list. You have to line up file / develop /
+crop all three at a glance to check "what was hanging off this shot again".
 """
 
 from __future__ import annotations
@@ -28,9 +29,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..core.develop import DevelopSettings
+from dataclasses import replace
+
+from ..core.develop import DevelopSettings, WatermarkSettings
 from ..core.export_queue import ExportQueue
-from ..core.presets import develop_presets
+from ..core.presets import develop_presets, watermark_presets
 from . import theme
 from .i18n import tr
 
@@ -51,16 +54,17 @@ def COLUMNS() -> tuple[str, ...]:
 
 
 class QueuePanel(QWidget):
-    """대기열 표 + 제거/비우기/저장/불러오기."""
+    """The queue table + remove/clear/save/load."""
 
     export_requested = Signal()
-    edit_requested = Signal(object)  # Path — 그 컷을 보정 화면에서 엽니다
+    edit_requested = Signal(object)  # Path - opens that shot in develop view
     changed = Signal()
 
     def __init__(self, queue: ExportQueue, parent=None):
         super().__init__(parent)
         self.queue = queue
         self.store = develop_presets()
+        self.watermark_store = watermark_presets()
         self._loading = False
         self.setFixedWidth(430)
 
@@ -138,9 +142,25 @@ class QueuePanel(QWidget):
         apply_button.clicked.connect(self.apply_preset_to_selection)
         row.addWidget(apply_button)
 
+        # The watermark lives in a store of its own (presets.watermark_
+        # presets), so it needs its own picker here - without it the only
+        # way to stamp a batch is to open every shot in the develop window.
+        self.bulk_watermark = QComboBox()
+        self.bulk_watermark.setMinimumWidth(120)
+        self.bulk_watermark.setToolTip(tr(
+            "Watermark preset to stamp on the selected rows"))
+        row.addWidget(self.bulk_watermark, 1)
+
+        watermark_button = QPushButton(tr("Stamp"))
+        watermark_button.setToolTip(tr(
+            "Set the watermark on the selected rows. The develop settings\n"
+            "are left alone - only the watermark changes."))
+        watermark_button.clicked.connect(self.apply_watermark_to_selection)
+        row.addWidget(watermark_button)
+
         return row
 
-    # ------------------------------------------------------------ 갱신
+    # ------------------------------------------------------------ Refresh
 
     def _preset_names(self) -> list[str]:
         return [info.name for info in self.store.list()]
@@ -152,6 +172,11 @@ class QueuePanel(QWidget):
         self.bulk_preset.clear()
         self.bulk_preset.addItem(NONE_LABEL())
         self.bulk_preset.addItems(names)
+
+        self.bulk_watermark.clear()
+        self.bulk_watermark.addItem(NONE_LABEL())
+        self.bulk_watermark.addItems(
+            [info.name for info in self.watermark_store.list()])
 
         self.table.setRowCount(len(self.queue))
         for row, entry in enumerate(self.queue):
@@ -221,9 +246,10 @@ class QueuePanel(QWidget):
         return entry.preset_name or CUSTOM()
 
     def _on_double_click(self, row: int, column: int) -> None:
-        """행을 더블클릭하면 그 컷을 보정 화면에서 엽니다.
+        """Double-clicking a row opens that shot in the develop window.
 
-        프리셋 콤보 칸은 제외합니다 — 거기서는 더블클릭이 콤보 조작입니다.
+        The preset combo column is left out - a double-click there is
+        working the combo.
         """
         if column == 1 or row >= len(self.queue.entries):
             return
@@ -237,7 +263,7 @@ class QueuePanel(QWidget):
             return
         self.edit_requested.emit(entry.source)
 
-    # ------------------------------------------------------------ 프리셋
+    # ------------------------------------------------------------ Presets
 
     def _on_preset_changed(self, row: int) -> None:
         if self._loading or row >= len(self.queue.entries):
@@ -251,10 +277,11 @@ class QueuePanel(QWidget):
         self.changed.emit()
 
     def _assign_preset(self, row: int, label: str) -> None:
-        """행에 프리셋을 적용합니다.
+        """Applies a preset to a row.
 
-        크롭은 컷마다 구도가 달라서 프리셋으로 덮어쓰지 않습니다. 원래 잡아
-        둔 크롭은 그대로 두고 색보정만 바꿉니다.
+        A crop is not overwritten by a preset, because the framing differs
+        per shot. The crop that was set originally is left as it is and
+        only the colour adjustment changes.
         """
         from dataclasses import replace
 
@@ -275,16 +302,18 @@ class QueuePanel(QWidget):
                 self, tr("Preset"), tr("Could not load:\n{error}").format(error=exc))
             return
 
-        # 지금 프리셋은 도형·마스크·워터마크를 담지 않지만(for_preset),
-        # **예전 버전이 저장한 파일**에는 그 컷의 크롭·마스크가 들어 있을 수
-        # 있습니다 — 실제로 갓 넣은 사진들이 남의 구도로 잘린 적이 있습니다.
-        # 파일을 믿지 말고 여기서 한 번 더 걷어냅니다.
+        # Presets today do not carry geometry/masks/watermark (for_preset),
+        # but **a file saved by an older version** can have that shot's crop
+        # and masks in it - freshly added photos really did get cut to
+        # someone else's framing. Do not trust the file; strip it once more
+        # here.
         settings = settings.without_geometry()
         if entry.develop is not None:
-            # 프리셋이 안 담는 것(도형·마스크·워터마크)은 항목의 지금 값을
-            # 지킵니다 — 보정창의 프리셋 불러오기와 같은 계약입니다.
-            # 예전에는 geometry·masks만 지켜서, 프리셋을 갈아타면 항목에
-            # 걸어 둔 워터마크가 조용히 꺼졌습니다.
+            # What a preset does not carry (geometry/masks/watermark) keeps
+            # the entry's current value - the same contract as loading a
+            # preset in the develop window. It used to keep only geometry
+            # and masks, so switching preset silently turned off a
+            # watermark set on the entry.
             settings = entry.develop.with_preset(settings)
         entry.develop = settings
         entry.preset_name = label
@@ -304,7 +333,46 @@ class QueuePanel(QWidget):
         self.refresh()
         self.changed.emit()
 
-    # ------------------------------------------------------------ 동작
+    def apply_watermark_to_selection(self) -> None:
+        """Stamps one watermark preset onto every selected row.
+
+        Only the watermark changes. Each row keeps its own develop
+        settings, crop and masks - this gets reached for once the looks are
+        already set, and taking those away here would undo the work.
+        """
+        rows = {index.row() for index in self.table.selectedIndexes()}
+        if not rows:
+            QMessageBox.information(
+                self, tr("Queue"), tr("Select some rows first"))
+            return
+
+        label = self.bulk_watermark.currentText()
+        watermark = WatermarkSettings()
+        if label != NONE_LABEL():
+            try:
+                data = self.watermark_store.load(label)
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(
+                    self, tr("Watermark"),
+                    tr("Could not load:\n{error}").format(error=exc))
+                return
+            # The preset file holds just the one section (develop_panel
+            # writes {"watermark": {...}}), but read a whole settings dump
+            # tolerantly too - hand-edited files turn up.
+            section = data.get("watermark", data) if isinstance(data, dict) else {}
+            watermark = DevelopSettings.from_dict({"watermark": section}).watermark
+
+        for row in sorted(rows):
+            if row >= len(self.queue.entries):
+                continue
+            entry = self.queue.entries[row]
+            base = entry.develop if entry.develop is not None else DevelopSettings()
+            entry.develop = replace(base, watermark=watermark)
+
+        self.refresh()
+        self.changed.emit()
+
+    # ------------------------------------------------------------ Behaviour
 
     def remove_selected(self) -> None:
         rows = {index.row() for index in self.table.selectedIndexes()}

@@ -1,15 +1,18 @@
-"""초점 판정.
+"""Focus scoring.
 
-기본 전략: 얼굴을 찾고, 얼굴 랜드마크의 눈 위치에서 ROI를 잘라 그 안의
-선명도만 측정합니다. 배경이 아무리 선명해도 눈이 나가면 버리는 컷이고,
-그 반대도 마찬가지이기 때문입니다. 얼굴이 없으면 격자 타일 중 가장 선명한
-영역을 주 피사체로 간주합니다.
+The basic strategy: find a face, cut an ROI out of the eye positions in
+the face landmarks, and measure sharpness only inside it. However sharp
+the background is, a frame with the eyes out of focus is a discard, and
+the reverse holds just as well. With no face, the sharpest tile of a grid
+is taken to be the main subject.
 
-선명도는 콘트라스트로 정규화합니다. Laplacian variance는 콘트라스트의
-제곱에 비례해서 커지므로, 정규화 없이 쓰면 저조도/저대비 장면이
-초점과 무관하게 전부 낮은 점수를 받습니다. 이것이 오판의 가장 큰 원인입니다.
+Sharpness is normalised by contrast. Laplacian variance grows in
+proportion to the square of contrast, so used without normalising,
+low-light / low-contrast scenes all score low regardless of focus. That is
+the single largest source of wrong calls.
 
-이 모듈의 함수는 전부 순수 함수입니다 — ndarray를 받아 dataclass를 돌려줍니다.
+Every function in this module is pure - it takes an ndarray and returns a
+dataclass.
 """
 
 from __future__ import annotations
@@ -28,111 +31,130 @@ from .types import FocusResult, FocusSource
 log = logging.getLogger(__name__)
 
 ALGORITHM_VERSION = 5
-"""측정 알고리즘 버전. 캐시 키에 들어갑니다.
+"""Measurement algorithm version. It goes into the cache key.
 
-5: 장면 지문(dhash)을 원본 프리뷰가 아니라 얼굴 검출용 1024px 축소본에서
-   뜹니다. 초점 판정은 한 픽셀도 바뀌지 않고(실측 60/60 완전 일치) 지문만
-   최대 1비트 달라집니다(60장 중 4장). 장면 묶기 임계가 64비트 중 40이라
-   결과는 같았지만(150장 12그룹 동일), 한 폴더 안에 옛 방식과 새 방식의
-   지문이 섞이면 앵커 비교가 두 방식을 오가므로 캐시를 갈아 끼웁니다.
+5: The scene fingerprint (dhash) is taken from the 1024px reduction used
+   for face detection rather than from the original preview. Focus scoring
+   does not move by a single pixel (measured: 60/60 exact match) and only
+   the fingerprint differs, by at most 1 bit (4 of 60 frames). The scene
+   grouping threshold is 40 of 64 bits so the result was the same (150
+   frames, the same 12 groups), but if old-style and new-style
+   fingerprints mix inside one folder the anchor comparison flips between
+   the two methods, so we roll the cache over.
 
 
-설정값이 그대로여도 알고리즘이 바뀌면 예전 결과는 무횹니다. 이 값을 올리지
-않으면 캐시가 옛날 점수를 그대로 돌려주고, 고친 내용이 반영되지 않은 채
-"고쳤다"고 착각하게 됩니다. 실제로 발생한 사례입니다.
+Even with the settings unchanged, old results are invalid once the
+algorithm changes. Fail to bump this value and the cache hands back the
+old scores while you believe you "fixed" something that never took effect.
+That has actually happened.
 
-v2: 저분산 영역 게이트(MIN_VARIANCE) 추가, 타일 선정을 원시 그래디언트
-    에너지 기준으로 변경 — 어두운 배경 노이즈가 피사체로 뽑히던 문제
-v3: 주 피사체 얼굴을 면적×신뢰도로 고르도록 변경(큰 오검출이 ROI를
-    가로채던 문제), 얼굴 ROI일 때 배경 선명도(background_sharpness)를
-    따로 측정 — "초점이 얼굴이 아니라 배경에 맞은" 컷을 가리기 위함
-v4: 선명도에서 노이즈 기여분을 해석적으로 차감(measure_patch의 noise_var).
-    노이즈가 선명도를 부풀려(실측 1.63배) 5개 기종 11개 실측 ROI 중
-    3개에서 '노이즈 낀 흐린 컷'이 '선명한 컷'을 이겼던 문제 — 차감 후 0개
+v2: Added the low-variance region gate (MIN_VARIANCE) and changed tile
+    selection to go by raw gradient energy - dark background noise was
+    being picked as the subject
+v3: Changed main-subject face selection to area x confidence (a large
+    false detection was hijacking the ROI), and measured background
+    sharpness (background_sharpness) separately when the ROI is a face -
+    to screen out frames "focused on the background, not the face"
+v4: Subtract the noise contribution from sharpness analytically (noise_var
+    in measure_patch). Noise inflated sharpness (measured 1.63x) so that
+    in 3 of 11 measured ROIs across 5 camera bodies a 'noisy blurry frame'
+    beat a 'sharp frame' - after the subtraction, 0
 """
 
 MODEL_PATH = Path(__file__).parent / "models" / "face_detection_yunet_2023mar.onnx"
 
 DETECT_LONG_EDGE = 1024
-"""얼굴 검출용 축소 해상도. YuNet은 이 정도면 충분히 정확하고 훨씬 빠릅니다."""
+"""Reduced resolution for face detection. YuNet is accurate enough at this
+size and far faster."""
 
 MIN_ROI_PX = 24
-"""이보다 작은 ROI는 선명도 측정이 무의미합니다."""
+"""An ROI smaller than this makes a sharpness measurement meaningless."""
 
 FACE_DISPLAY_MIN_SCORE = 0.80
-"""화면에 얼굴 박스를 그릴 최소 확신도.
+"""Minimum confidence for drawing a face box on screen.
 
-검출 임계값(0.6)보다 높게 잡습니다. 실촬영 표본을 눈으로 확인해 보면
-0.60~0.75 구간에는 스피커 콘, 흰 장갑, 어두운 얼룩 같은 오검출이 몰려
-있습니다. 화면에 그려 봐야 "왜 저게 얼굴이지"만 남습니다.
+Set higher than the detection threshold (0.6). Going through real shooting
+samples by eye, the 0.60~0.75 band is where the false detections pile up -
+speaker cones, white gloves, dark blotches. Drawing them leaves nothing
+behind but "why is that a face".
 
-검출 자체를 이 값으로 끊지는 않습니다 — 같은 구간에 측면·모션블러·무대
-조명 속 **진짜 얼굴**도 많아서, 끊으면 실측 16%를 잃습니다.
+Detection itself is not cut at this value - the same band also holds many
+**real faces**, in profile, in motion blur, and under stage lighting, and
+cutting there loses a measured 16%.
 """
 
 FACE_MAIN_MIN_SCORE = 0.75
-"""주 피사체(눈 ROI 기준)가 될 수 있는 최소 확신도.
+"""Minimum confidence to become the main subject (the basis of the eye ROI).
 
-이보다 낮은 검출만 있으면 어쩔 수 없이 그중에서 고르지만, 더 확신 있는
-얼굴이 하나라도 있으면 그쪽을 씁니다. 초점 판정의 기준점이 되는 자리라
-오검출이 앉으면 그 컷의 점수가 통째로 틀립니다.
+If only detections below this exist we have no choice but to pick from
+among them, but if there is even one more confident face we use that one.
+This slot is the reference point for focus scoring, so a false detection
+sitting in it makes the whole frame's score wrong.
 """
 
 _EPS = 1e-6
 
 MIN_VARIANCE = 25.0
-"""판정 가능한 최소 분산 (표준편차 5에 해당).
+"""Minimum variance that can be scored (a standard deviation of 5).
 
-정규화는 콘트라스트 불변성을 위한 것이지만, 신호가 없는 영역에서는 비율
-자체가 의미를 잃습니다. 어두운 무대의 빈 배경(분산 0.9)은 원시 그래디언트가
-노이즈 수준인데도 분산으로 나누는 순간 실제 피사체(분산 2000)보다 높은
-점수를 받았습니다.
+Normalising is there for contrast invariance, but in a region with no
+signal the ratio itself loses its meaning. An empty dark stage background
+(variance 0.9) has raw gradients at noise level, yet the moment you divide
+by the variance it scored higher than a real subject (variance 2000).
 
-분모에 하한만 두는 것으로는 부족했습니다. 백색 노이즈는 Laplacian 응답 자체가
-하한과 비슷한 크기라 여전히 통과합니다. 그래서 하한이 아니라 게이트로 쓴다 —
-표준편차 5 미만은 센서 노이즈 영역이고 초점을 판정할 근거가 없으므로 0입니다.
+Clamping the denominator was not enough on its own. With white noise the
+Laplacian response itself is about the size of the clamp, so it still gets
+through. So it is used as a gate rather than a floor - below a standard
+deviation of 5 is sensor noise territory, with no basis for scoring focus,
+so the answer is 0.
 
-실측 기준: 문제가 된 노이즈 타일은 분산 0.9, 실제 피사체 타일은 227~2000.
+Measured: the offending noise tile was variance 0.9, real subject tiles
+227~2000.
 """
 
 FRAME_LONG_EDGE = 1024
-"""frame_sharpness 측정용 고정 해상도.
+"""Fixed resolution for measuring frame_sharpness.
 
-전체 프레임 선명도는 반드시 항상 같은 스케일에서 재야 합니다. Laplacian
-계열 지표는 해상도에 민감해서, 스케일이 다르면 값 자체가 비교 불가능해집니다.
+Whole-frame sharpness must always be measured at the same scale.
+Laplacian-family metrics are sensitive to resolution, so at a different
+scale the values themselves stop being comparable.
 """
 
-# 정규화된 지표를 0~100으로 눌러 담는 포화 상수 — 해당 값에서 50점이 됩니다.
-# A6700 실배치(ILCE-6700, 망원/표준 혼합 85장)의 중앙값으로 잡았습니다.
-# 촬영 스타일에 따라 분포가 달라지므로 config로 덮어쓸 수 있어야 합니다.
+# Saturation constants that squeeze the normalised metrics into 0~100 - a
+# metric scores 50 points at its constant. Set to the median of a real
+# A6700 batch (ILCE-6700, 85 frames mixing telephoto and standard).
+# The distribution shifts with shooting style, so config has to be able to
+# override them.
 LAPLACIAN_K = 0.053
 TENENGRAD_K = 1.63
 FRAME_LAPLACIAN_K = 0.053
 FRAME_TENENGRAD_K = 1.63
 
 
-# ---------------------------------------------------------------- 얼굴 검출
+# -------------------------------------------------------------- face detection
 
 _detector_local = threading.local()
 
 
 @contextlib.contextmanager
 def _quiet_opencv():
-    """OpenCV의 C++ 경고를 이 블록 동안만 막습니다.
+    """Block OpenCV's C++ warnings for the duration of this block only.
 
-    YuNet을 만들 때마다 OpenCV 5.0이 이 줄을 찍습니다:
+    Every time a YuNet is built, OpenCV 5.0 prints this line:
 
         setPreferableTarget Targets are not supported by the new graph engine
 
-    실행 대상 힌트가 무시된다는 뜻일 뿐이고 검출은 정상입니다 — 실측으로
-    확인했습니다(8장, 얼굴 개수 동일, 주 얼굴 상자 0화소 차이). 그런데 주
-    피사체를 바꿀 때마다 검출기를 새로 만들어서 콘솔에 계속 쌓이고, 그러면
-    정작 봐야 할 경고가 묻힙니다.
+    It only means the execution-target hint is ignored; detection is fine -
+    confirmed by measurement (8 frames, same face count, 0 pixel difference
+    in the main face box). But the detector is rebuilt every time the main
+    subject changes, so these keep piling up in the console, and then the
+    warnings that actually matter get buried.
 
-    범위를 이 블록으로 좁힙니다. 전역으로 낮추면 진짜 오류까지 사라집니다.
+    The scope is narrowed to this block. Lowering it globally would make
+    real errors disappear too.
     """
     logging_api = getattr(getattr(cv2, "utils", None), "logging", None)
-    if logging_api is None:  # 빌드에 따라 없을 수 있습니다
+    if logging_api is None:  # may be absent depending on the build
         yield
         return
     previous = logging_api.getLogLevel()
@@ -144,9 +166,10 @@ def _quiet_opencv():
 
 
 def _get_detector(size: tuple[int, int]) -> "cv2.FaceDetectorYN | None":
-    """YuNet 검출기를 프로세스/스레드마다 하나씩 재사용합니다.
+    """Reuse one YuNet detector per process/thread.
 
-    ONNX 로딩은 장당 반복하기엔 비쌉니다. 4000장이면 그 비용이 전붑니다.
+    Loading ONNX is too expensive to repeat per frame. At 4000 frames that
+    cost is the whole bill.
     """
     if not MODEL_PATH.exists():
         return None
@@ -171,10 +194,11 @@ def _get_detector(size: tuple[int, int]) -> "cv2.FaceDetectorYN | None":
 
 
 def detect_faces(image_bgr: np.ndarray) -> np.ndarray | None:
-    """축소된 BGR 이미지에서 얼굴을 검출합니다.
+    """Detect faces in a reduced BGR image.
 
-    반환: (N, 15) 배열 — x, y, w, h, 우안xy, 좌안xy, 코xy, 입 좌우xy, score.
-    좌표는 입력 이미지 좌표곕니다.
+    Returns: an (N, 15) array - x, y, w, h, right eye xy, left eye xy, nose
+    xy, mouth corners xy, score. The coordinates are in the input image's
+    coordinate system.
     """
     h, w = image_bgr.shape[:2]
     detector = _get_detector((w, h))
@@ -188,25 +212,30 @@ def detect_faces(image_bgr: np.ndarray) -> np.ndarray | None:
     return faces if faces is not None and len(faces) else None
 
 
-# ---------------------------------------------------------------- 선명도 측정
+# ------------------------------------------------------- sharpness measurement
 
 
 def measure_patch(gray_patch: np.ndarray, noise_var: float = 0.0) -> tuple[float, float]:
-    """그레이스케일 패치의 (정규화 Laplacian, 정규화 Tenengrad)를 반환합니다.
+    """(normalised Laplacian, normalised Tenengrad) of a greyscale patch.
 
-    둘 다 패치의 분산으로 나눠 콘트라스트 불변으로 만듭니다. Tenengrad는
-    Laplacian보다 방향성 모션블러에 민감해서 손떨림 컷을 더 잘 잡아냅니다.
+    Both are divided by the patch variance to make them contrast-invariant.
+    Tenengrad is more sensitive than Laplacian to directional motion blur,
+    so it catches camera-shake frames better.
 
-    noise_var(프레임 노이즈 분산 σ², frame_noise_sigma 참고)를 주면 노이즈
-    기여분을 빼고 잽니다. 그 나눗셈이 노이즈 함정의 근원이었습니다 —
-    노이즈는 분자와 분모를 함께 올리는데 분자를 더 크게 올려서, 고감도의
-    노이즈 낀 소프트 컷이 선명 점수를 받습니다(실측 1.63배 부풀림, 5개 기종
-    11개 눈 ROI 중 3개에서 순위 역전).
+    Given noise_var (the frame noise variance σ², see frame_noise_sigma),
+    the noise contribution is subtracted before measuring. That division
+    was the root of the noise trap - noise raises the numerator and the
+    denominator together, but it raises the numerator more, so a noisy soft
+    frame at high ISO gets a sharp score (measured 1.63x inflation, rank
+    reversal in 3 of 11 eye ROIs across 5 camera bodies).
 
-    백색 노이즈 σ²의 기여분은 커널 계수 제곱합으로 정확히 계산됩니다:
-    3×3 Laplacian 분산에 **20σ²**, Sobel x·y 제곱합 평균에 **24σ²**, 패치
-    분산에 **σ²**. 각각 빼면 역전이 0이 되고 분리력·모션블러 반응은
-    유지됩니다(RESEARCH_FOCUS_NOISE.md). 기본값 0.0이면 예전과 동일합니다.
+    The contribution of white noise σ² is computed exactly from the sum of
+    squared kernel coefficients: **20σ²** on the 3x3 Laplacian variance,
+    **24σ²** on the mean of the summed squares of Sobel x/y, and **σ²** on
+    the patch variance. Subtracting each brings the reversals to 0 while
+    separating power and motion-blur response hold up
+    (RESEARCH_FOCUS_NOISE.md). At the default 0.0 this is identical to
+    before.
     """
     if gray_patch.size == 0:
         return 0.0, 0.0
@@ -214,10 +243,11 @@ def measure_patch(gray_patch: np.ndarray, noise_var: float = 0.0) -> tuple[float
     patch = gray_patch.astype(np.float32)
     variance = float(patch.var()) - noise_var
 
-    # 신호가 없는 영역은 판정 불가로 처리한다 (MIN_VARIANCE 주석 참고).
-    # 여기서 걸러내지 않으면 어두운 배경 노이즈가 피사체를 이깁니다.
-    # 노이즈 분산을 뺀 값으로 판정하므로, '노이즈뿐인' 패치는 보정만으로도
-    # 자연스럽게 걸러집니다 — 게이트는 이중 방어로 남습니다.
+    # A region with no signal is treated as unscoreable (see the
+    # MIN_VARIANCE docstring). Without filtering here, dark background
+    # noise beats the subject. Since scoring runs on the variance with the
+    # noise removed, a patch that is 'nothing but noise' drops out from the
+    # correction alone - the gate stays on as a second line of defence.
     if variance < MIN_VARIANCE:
         return 0.0, 0.0
 
@@ -235,27 +265,31 @@ def measure_patch(gray_patch: np.ndarray, noise_var: float = 0.0) -> tuple[float
 
 
 _NOISE_KERNEL = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float32)
-"""Immerkær(1996) 노이즈 추정 마스크. 백색 노이즈에 대한 응답 표준편차가
-정확히 6σ라서(계수 제곱합 36), 중앙절대편차로 σ를 역산할 수 있습니다."""
+"""Immerkær (1996) noise estimation mask. Its response to white noise has a
+standard deviation of exactly 6σ (sum of squared coefficients 36), so σ can
+be recovered back out of the median absolute deviation."""
 
 
 def frame_noise_sigma(gray: np.ndarray, grid: int = 5, tile: int = 96) -> float:
-    """프레임 전체의 노이즈 표준편차를 추정합니다 (measure_patch에 넘길 값).
+    """Estimate the noise standard deviation of the whole frame (the value
+    to pass to measure_patch).
 
-    **패치별이 아니라 프레임 단위로 한 번만 잽니다.** 눈 ROI에서 패치별로
-    재면 속눈썹·머리카락 같은 실제 텍스처가 마스크 응답에 새어 들어,
-    선명한 패치일수록 σ̂이 부풉니다(실측 2~3배) — 그러면 선명한 눈에서
-    과대 차감되어 분리력을 깎습니다. 중앙값이라 프레임의 절반 이상이
-    평탄하면 텍스처에 끌려가지 않습니다.
+    **Measured once per frame, not per patch.** Measured per patch on an
+    eye ROI, real texture such as eyelashes and hair leaks into the mask
+    response, so the sharper the patch the more σ̂ inflates (measured
+    2~3x) - which then over-subtracts on sharp eyes and eats into
+    separating power. Being a median, it is not dragged around by texture
+    as long as more than half the frame is flat.
 
-    ISO를 사전정보로 쓰지 않습니다. 실측(A6700 표본 90장)에서 같은
-    ISO 2000의 프리뷰 σ̂이 0.49~6.42까지 벌어졌습니다 — 장면 밝기와 카메라
-    NR이 지배해서 ISO는 거의 정보가 없고, Panasonic RW2처럼 ISO 자체가
-    안 읽히는 파일도 있습니다.
+    ISO is not used as prior information. Measured (a 90-frame A6700
+    sample), preview σ̂ at the same ISO 2000 spread from 0.49 to 6.42 -
+    scene brightness and in-camera NR dominate, so ISO carries almost no
+    information, and there are files, such as Panasonic RW2, where the ISO
+    itself cannot be read.
 
-    전체에 filter2D를 돌리면 26MP에서 판독 예산(장당 ~30ms)을 넘으므로
-    격자 표본 타일에만 돌립니다. 타일 가장자리 2px는 filter2D 경계 반사가
-    섞여 버립니다.
+    Running filter2D over the whole image blows the read budget (~30ms per
+    frame) at 26MP, so it runs only on a grid of sample tiles. The outer
+    2px of a tile is contaminated by filter2D's border reflection.
     """
     h, w = gray.shape[:2]
     if h < 8 or w < 8:
@@ -284,11 +318,11 @@ def frame_noise_sigma(gray: np.ndarray, grid: int = 5, tile: int = 96) -> float:
 
 
 def gradient_energy(gray_patch: np.ndarray) -> float:
-    """정규화하지 않은 그래디언트 에너지.
+    """Gradient energy, un-normalised.
 
-    한 이미지 안에서 영역끼리 비교할 때 씁니다. 같은 사진의 타일들은 노출이
-    동일하므로 정규화가 필요 없고, 오히려 정규화하면 어두운 노이즈 영역이
-    실제 피사체를 이깁니다.
+    Used when comparing regions within one image. Tiles of the same photo
+    share one exposure, so normalising is unnecessary; worse, normalising
+    lets a dark noisy region beat the real subject.
     """
     if gray_patch.size == 0:
         return 0.0
@@ -299,15 +333,16 @@ def gradient_energy(gray_patch: np.ndarray) -> float:
 
 
 def _saturate(value: float, k: float) -> float:
-    """0~inf 값을 0~100으로 단조 매핑합니다. k에서 50점."""
+    """Map a 0~inf value monotonically onto 0~100. 50 points at k."""
     return 100.0 * value / (value + k) if value > 0 else 0.0
 
 
-# ---------------------------------------------------------------- ROI 선정
+# --------------------------------------------------------------- ROI selection
 
 
 def _eye_roi(face: np.ndarray, scale: float, shape: tuple[int, int]) -> tuple[int, int, int, int] | None:
-    """랜드마크의 양 눈을 감싸는 ROI를 원본 좌표계로 역투영합니다."""
+    """ROI enclosing both landmark eyes, back-projected into the original
+    coordinate system."""
     right_eye = np.array([face[4], face[5]], dtype=np.float32)
     left_eye = np.array([face[6], face[7]], dtype=np.float32)
     eye_distance = float(np.linalg.norm(left_eye - right_eye))
@@ -320,30 +355,34 @@ def _eye_roi(face: np.ndarray, scale: float, shape: tuple[int, int]) -> tuple[in
     return _clip_box(center[0] - half_w, center[1] - half_h, half_w * 2, half_h * 2, shape)
 
 
-#: 주 피사체 후보로 선명도까지 재 볼 얼굴 수. 단체 사진에서 수십 명을
-#: 전부 원본 해상도로 재면 느려지므로, 면적 상위 몇 개만 봅니다.
+#: How many faces to go as far as measuring sharpness on as main-subject
+#: candidates. Measuring dozens of people in a group photo at full
+#: resolution is slow, so only the largest few by area are looked at.
 MAX_FOCUS_CANDIDATES = 8
 
-#: 최고 선명도의 이 비율 이상이면 "초점이 맞은 얼굴"로 봅니다.
+#: At or above this fraction of the best sharpness counts as an "in-focus
+#: face".
 IN_FOCUS_RATIO = 0.85
 
 
 FACE_MAIN_MIN_CONTRAST = 8.0
-"""주 피사체가 되려면 이만큼은 명암이 있어야 합니다(8비트 표준편차).
+"""A face needs at least this much contrast to be the main subject
+(8-bit standard deviation).
 
-진짜 얼굴은 눈·코·입 그림자 때문에 반드시 무늬가 있습니다. 관객석의 어두운
-얼룩은 평탄합니다 — 실측에서 진짜 얼굴은 34~72, 오검출 얼룩은 5.7~6.6
-이었습니다.
+A real face always has structure, because of the shadows of the eyes, nose
+and mouth. A dark blotch in the audience is flat - measured, real faces
+came in at 34~72 and false-detection blotches at 5.7~6.6.
 
-**얼룩을 걸러내는 최소한으로만 잡습니다.** 처음에 12.0으로 뒀더니 어둡게
-찍힌 진짜 얼굴까지 후보에서 빠질 여지가 컸습니다. 8.0이면 얼룩(5.7~6.6)은
-그대로 걸리면서 여유가 생깁니다.
+**Set no higher than it takes to screen out the blotches.** Left at 12.0
+to begin with, there was plenty of room for genuinely dark-exposed real
+faces to fall out of the candidate pool as well. At 8.0 the blotches
+(5.7~6.6) are still caught and there is headroom.
 """
 
 
 def _patch_contrast(face: np.ndarray, gray_full: np.ndarray,
                     scale: float, shape: tuple[int, int]) -> float:
-    """얼굴 상자 안의 명암 정도. 못 재면 0."""
+    """How much contrast there is inside the face box. 0 if unmeasurable."""
     box = _clip_box(face[0] / scale, face[1] / scale,
                     face[2] / scale, face[3] / scale, shape)
     x, y, w, h = box
@@ -355,16 +394,21 @@ def _patch_contrast(face: np.ndarray, gray_full: np.ndarray,
 
 def _pick_central_face(faces: np.ndarray, gray_full: np.ndarray,
                        scale: float, shape: tuple[int, int]) -> int:
-    """1인 구도 우선 — 검증된 가중 면적¼:중앙1:선명¼로 고릅니다.
+    """Single-subject composition first - picked by the validated weighting
+    area 0.25 : centre 1 : sharpness 0.25.
 
-    포트레이트·팬사이트처럼 주인공을 정중앙에 두는 장르용 옵션입니다.
-    암묵 정답 47,990컷(점 지정 AF = 사진사의 주인공) 홀드아웃에서 95.4%로
-    검증됐고(선명 항을 빼면 90.0%라 뺄 수 없습니다), 반대로 무대·그룹
-    장르 라벨 110장에서는 현행 픽이 이깁니다(75.5% vs 68.2%) — 그래서
-    기본이 아니라 **분석 시작 옵션**입니다 (RESEARCH_METADATA.md 8절).
+    An option for genres that put the protagonist dead centre, such as
+    portraits and fan-site shooting. Validated at 95.4% on a held-out set
+    of 47,990 frames with implicit ground truth (spot-selected AF = the
+    photographer's protagonist); drop the sharpness term and it is 90.0%,
+    so it cannot be dropped. On 110 frames labelled as the stage/group
+    genre the current pick wins instead (75.5% vs 68.2%) - which is why
+    this is an **analysis start option** rather than the default
+    (RESEARCH_METADATA.md section 8).
 
-    선명도는 연구와 같은 방식: 얼굴 패치를 긴변 160px로 줄여 라플라시안
-    분산 — 크기가 선명도 측정을 오염시키지 않게 하기 위해서입니다.
+    Sharpness is computed the same way as in the research: the face patch
+    is reduced to a 160px long edge and the Laplacian variance taken - so
+    that size does not contaminate the sharpness measurement.
     """
     height, width = shape[:2]
     diag_half = (width ** 2 + height ** 2) ** 0.5 / 2
@@ -408,17 +452,20 @@ def _pick_main_face(
     laplacian_k: float,
     tenengrad_k: float,
 ) -> int:
-    """여러 얼굴 중 주 피사체의 인덱스를 고릅니다.
+    """Pick the index of the main subject out of several faces.
 
-    예전에는 면적×신뢰도만 봤습니다. 그러면 앞쪽에 크게 잡힌 행인이 뒤에서
-    초점이 맞은 인물을 이기고, ROI가 흐린 얼굴로 가서 잘 찍힌 컷이 낮은
-    점수를 받습니다.
+    This used to look only at area x confidence. That lets a passer-by
+    caught large in the foreground beat the person in focus behind them;
+    the ROI goes to the blurred face and a well-shot frame gets a low
+    score.
 
-    사진에서 "주 피사체"는 촬영자가 초점을 맞춘 대상입니다. 그래서 먼저
-    얼굴마다 실제 선명도를 재고, 초점이 맞은 축에 드는 얼굴만 남긴 뒤 그
-    안에서 면적×신뢰도로 고릅니다. 모두 같은 거리인 단체 사진에서는 전부
-    초점이 맞은 축이라 예전과 같은 결과가 나옵니다 — 달라지는 것은 피사계
-    심도가 얕아 누구는 맞고 누구는 나간 경우뿐입니다.
+    In a photograph the "main subject" is whatever the photographer focused
+    on. So we first measure the actual sharpness of each face, keep only
+    the faces that fall on the in-focus side, and pick among those by
+    area x confidence. In a group photo where everyone is at the same
+    distance they are all on the in-focus side, so the result comes out the
+    same as before - the only case that changes is a shallow depth of field
+    where some are in focus and some are not.
     """
     area = faces[:, 2] * faces[:, 3]
     confidence = np.clip(faces[:, 14], 0.0, None)
@@ -427,18 +474,20 @@ def _pick_main_face(
     if len(faces) == 1:
         return 0
 
-    # 확신이 낮은 검출은 주 피사체 후보에서 뺍니다. 스피커 콘이나 어두운
-    # 얼룩이 이 자리에 앉으면 그 컷의 초점 판정이 통째로 틀립니다. 다만
-    # 낮은 것밖에 없으면 어쩔 수 없이 그중에서 고릅니다 — 아무도 못 고르는
-    # 것보다는 낫습니다.
+    # Drop low-confidence detections from the main-subject candidates. If a
+    # speaker cone or a dark blotch sits in this slot, the whole frame's
+    # focus scoring is wrong. If only low ones exist we have no choice but
+    # to pick from among them - better than picking nobody.
     trusted = [i for i in range(len(faces))
                if confidence[i] >= FACE_MAIN_MIN_SCORE]
     pool = trusted if trusted else list(range(len(faces)))
 
-    # 무늬가 거의 없는 조각도 뺍니다. 진짜 얼굴은 눈·코·입 그림자 때문에
-    # 반드시 명암이 있습니다. 실측(DSC03360): 진짜 얼굴 6개의 표준편차가
-    # 43~72인데 관객석 어두운 얼룩 둘은 5.7과 6.6이었고, 그중 하나가
-    # 신뢰도 0.80으로 임계값을 통과해 주 피사체로 뽑혔습니다.
+    # Drop patches with almost no structure too. A real face always has
+    # contrast, because of the shadows of the eyes, nose and mouth.
+    # Measured (DSC03360): six real faces had standard deviations of 43~72
+    # while two dark blotches in the audience were 5.7 and 6.6, and one of
+    # those cleared the threshold at confidence 0.80 and was picked as the
+    # main subject.
     detailed = [i for i in pool
                 if _patch_contrast(faces[i], gray_full, scale, shape)
                 >= FACE_MAIN_MIN_CONTRAST]
@@ -448,7 +497,7 @@ def _pick_main_face(
     if len(pool) == 1:
         return int(pool[0])
 
-    # 면적 상위 후보만 원본 해상도에서 재 봅니다
+    # Only the top candidates by area are measured at full resolution
     ordered = sorted(pool, key=lambda i: size_rank[i], reverse=True)
     candidates = ordered[:MAX_FOCUS_CANDIDATES]
 
@@ -461,23 +510,28 @@ def _pick_main_face(
         if min(box[2], box[3]) < MIN_ROI_PX:
             continue
         x, y, w, h = box
-        # **정규화하지 않은** 그래디언트 에너지로 비교합니다.
+        # Compare on **un-normalised** gradient energy.
         #
-        # 예전에는 _measure_sharpness(패치 분산으로 나눈 값)를 썼습니다.
-        # 어두운 영역은 분산이 작아서 노이즈만으로도 값이 치솟습니다. 실측
-        # (DSC04240): 무대 위 주인공 얼굴이 밝기 140·그래디언트 4886인데
-        # 정규화 선명도는 51, 뒤쪽 어두운 관객 얼굴은 밝기 19·그래디언트
-        # 233인데 정규화 선명도가 83이었습니다. 그래서 매번 관객이 주
-        # 피사체로 뽑혔습니다(사용자 리포트 3장 전부 같은 양상).
+        # This used to use _measure_sharpness (the value divided by the
+        # patch variance). Dark regions have a small variance, so noise
+        # alone sends the value soaring. Measured (DSC04240): the
+        # protagonist's face on stage was brightness 140, gradient 4886,
+        # yet normalised sharpness 51; a dark audience face at the back was
+        # brightness 19, gradient 233, yet normalised sharpness 83. So the
+        # audience got picked as the main subject every time (all 3
+        # user-reported frames showed the same pattern).
         #
-        # 같은 사진 안의 얼굴끼리는 노출이 같으므로 정규화가 필요 없습니다.
-        # 타일 선정은 이미 같은 이유로 gradient_energy를 씁니다.
+        # Faces within one photo share one exposure, so normalising is
+        # unnecessary. Tile selection already uses gradient_energy for the
+        # same reason.
         #
-        # **제곱근을 씌웁니다.** 그래디언트 에너지는 대비의 제곱에 비례해서,
-        # 날것으로 쓰면 밝고 복잡한 얼굴이 압도적으로 유리합니다. 그러면
-        # 조명을 세게 받은 사람만 계속 주 피사체가 됩니다. 제곱근을 씌우면
-        # 대비에 비례하는 정도로 눌러져, 아래 IN_FOCUS_RATIO 문턱을 여러
-        # 얼굴이 함께 통과하고 최종 판단이 면적·신뢰도로 넘어갑니다.
+        # **Take the square root.** Gradient energy is proportional to the
+        # square of contrast, so used raw it overwhelmingly favours bright,
+        # busy faces. Then only whoever is lit hardest keeps becoming the
+        # main subject. The square root squashes it back down to something
+        # proportional to contrast, so several faces clear the
+        # IN_FOCUS_RATIO threshold below together and the final call passes
+        # to area and confidence.
         energy = gradient_energy(gray_full[y:y + h, x:x + w])
         sharpness[int(index)] = float(np.sqrt(max(0.0, energy)))
 
@@ -488,13 +542,14 @@ def _pick_main_face(
     if best <= 0:
         return int(max(pool, key=lambda i: size_rank[i]))
 
-    # 초점이 맞은 축에 드는 얼굴들 — 그 안에서는 크고 확실한 쪽이 주 피사체
+    # The faces on the in-focus side - among those, the larger and more
+    # certain one is the main subject
     in_focus = [i for i, value in sharpness.items() if value >= best * IN_FOCUS_RATIO]
     return max(in_focus, key=lambda i: size_rank[i])
 
 
 def _clip_box(x: float, y: float, w: float, h: float, shape: tuple[int, int]) -> tuple[int, int, int, int]:
-    """박스를 이미지 경계 안으로 자릅니다."""
+    """Clip a box to inside the image bounds."""
     height, width = shape
     x0 = max(0, int(round(x)))
     y0 = max(0, int(round(y)))
@@ -505,11 +560,13 @@ def _clip_box(x: float, y: float, w: float, h: float, shape: tuple[int, int]) ->
 
 def _nearest_face(af_box: tuple[int, int, int, int],
                   faces: tuple[tuple[int, int, int, int], ...]) -> int:
-    """AF 상자 중심에서 가장 가까운 얼굴 번호. 신뢰도 신호(af_face)용.
+    """Index of the face nearest the AF box centre. For the confidence
+    signal (af_face).
 
-    존 AF는 몸통을 가리키지만 2인 이상 컷은 얼굴이 가로로 떨어져 있어
-    중심 최근접이면 충분합니다 — 라벨 117장으로 검증했고, "얼굴 열 아래
-    몸통" 규칙을 써도 결과가 같았습니다(research_af_confidence.py).
+    Zone AF points at the torso, but in frames with two or more people the
+    faces are separated horizontally, so nearest-to-centre is enough -
+    validated on 117 labelled frames, and a "torso below the row of faces"
+    rule gave the same result (research_af_confidence.py).
     """
     ax, ay = af_box[0] + af_box[2] / 2.0, af_box[1] + af_box[3] / 2.0
     best, best_dist = -1, float("inf")
@@ -525,7 +582,8 @@ def _nearest_face(af_box: tuple[int, int, int, int],
 def _boxes_overlap(
     a: tuple[float, float, float, float], b: tuple[float, float, float, float]
 ) -> bool:
-    """두 (x, y, w, h) 박스가 겹치는지. 배경 타일에서 얼굴 영역을 빼는 데 씁니다."""
+    """Whether two (x, y, w, h) boxes overlap. Used to subtract the face
+    region out of the background tiles."""
     ax0, ay0, aw, ah = a
     bx0, by0, bw, bh = b
     return not (ax0 + aw <= bx0 or bx0 + bw <= ax0 or ay0 + ah <= by0 or by0 + bh <= ay0)
@@ -535,16 +593,19 @@ def _best_tile(gray_small: np.ndarray, scale: float, shape: tuple[int, int],
                grid: tuple[int, int] = (6, 4),
                exclude: tuple[float, float, float, float] | None = None
                ) -> tuple[int, int, int, int] | None:
-    """격자 타일 중 실제 디테일이 가장 많은 곳을 피사체(또는 배경)로 봅니다.
+    """Take the grid tile with the most real detail as the subject (or the
+    background).
 
-    정규화된 값이 아니라 원시 그래디언트 에너지로 고릅니다. 같은 사진 안의
-    타일들은 노출이 같아서 정규화가 불필요하고, 정규화하면 어두운 배경의
-    노이즈가 피사체를 이겨 버린다 (실측: 노이즈 타일 ten_raw 13 vs
-    피사체 7808인데 정규화 후에는 14.4 vs 3.9로 역전).
+    Picked on raw gradient energy rather than on the normalised value.
+    Tiles within one photo share one exposure so normalising is
+    unnecessary, and normalising lets noise in a dark background beat the
+    subject (measured: noise tile ten_raw 13 vs subject 7808, but after
+    normalising 14.4 vs 3.9 - reversed).
 
-    exclude(축소본 좌표계의 얼굴 박스)를 주면 그와 겹치는 타일은 건너뜁니다.
-    얼굴 밖에서 가장 선명한 배경 영역을 찾을 때 씁니다. 이 모드에서는 쓸
-    타일이 없거나 격자를 만들 수 없으면 None을 돌려줍니다.
+    Given exclude (a face box in the reduced image's coordinate system),
+    tiles overlapping it are skipped. Used when looking for the sharpest
+    background region outside the face. In that mode, None is returned if
+    there is no usable tile or the grid cannot be formed.
     """
     cols, rows = grid
     h, w = gray_small.shape[:2]
@@ -568,7 +629,8 @@ def _best_tile(gray_small: np.ndarray, scale: float, shape: tuple[int, int],
         return None
 
     r, c = best_rc
-    # 인접 타일까지 살짝 넓게 잡아 피사체가 타일 경계에 걸린 경우를 흡수합니다
+    # Reach a little into the neighbouring tiles to absorb the case where
+    # the subject straddles a tile boundary
     x = (c * tile_w - tile_w * 0.25) / scale
     y = (r * tile_h - tile_h * 0.25) / scale
     return _clip_box(x, y, (tile_w * 1.5) / scale, (tile_h * 1.5) / scale, shape)
@@ -578,28 +640,32 @@ def _measure_sharpness(
     gray_full: np.ndarray, box: tuple[int, int, int, int],
     laplacian_k: float, tenengrad_k: float, noise_var: float = 0.0,
 ) -> float:
-    """박스 영역의 최종 선명도(0~100)를 ROI와 같은 방식으로 잽니다."""
+    """Final sharpness (0~100) of a box region, measured the same way as
+    the ROI."""
     x, y, w, h = box
     lap_raw, ten_raw = measure_patch(gray_full[y:y + h, x:x + w], noise_var)
     return 0.4 * _saturate(lap_raw, laplacian_k) + 0.6 * _saturate(ten_raw, tenengrad_k)
 
 
 MIN_EYE_PX = 12.0
-"""눈 가로 폭이 이보다 작으면 개폐를 재지 않습니다.
+"""Below this eye width, openness is not measured.
 
-멀리 있는 얼굴은 눈이 몇 화소뿐이라 사람이 봐도 못 맞힙니다. 억지로 값을
-내면 그 값으로 감점하게 되므로 아예 '못 쟀음'으로 둡니다.
+On a distant face the eye is only a few pixels across, and a person
+looking at it cannot call it either. Forcing a value out means penalising
+on that value, so it is left as 'not measured' outright.
 """
 
 
 def _measure_eye_opening(image_bgr: np.ndarray, box) -> float:
-    """주 피사체의 눈 종횡비(EAR). 못 재면 -1.
+    """Eye aspect ratio (EAR) of the main subject. -1 if unmeasurable.
 
-    **양쪽 중 더 떠 있는 쪽**을 씁니다. 옆얼굴에서 먼 쪽 눈은 거의 안 보여
-    항상 '감음'으로 나오는데, 그걸로 감점하면 측면 컷이 전부 떨어집니다.
+    **Uses whichever of the two eyes is more open.** On a face in profile
+    the far eye is barely visible and always comes out as 'closed', and
+    penalising on that drops every profile frame.
 
-    비용은 얼굴당 1.3ms입니다. 주 피사체 하나만 재므로 4000장에 5초 남짓이라
-    분석 시간에 영향이 없습니다.
+    The cost is 1.3ms per face. Only the one main subject is measured, so
+    4000 frames comes to a little over 5 seconds - no effect on analysis
+    time.
     """
     try:
         from . import face_mesh
@@ -626,21 +692,23 @@ def _measure_eye_opening(image_bgr: np.ndarray, box) -> float:
             horizontal = float(np.linalg.norm(p[0] - p[3]))
             best = max(best, vertical / (2.0 * horizontal + 1e-6))
         return best
-    except Exception:  # noqa: BLE001 - 눈을 못 재도 분석 전체가 멈추면 안 됩니다
+    except Exception:  # noqa: BLE001 - a failed eye must not stop analysis
         log.debug("눈 개폐 측정 실패", exc_info=True)
         return -1.0
 
 
-# ---------------------------------------------------------------- 진입점
+# ----------------------------------------------------------------- entry point
 
 
 def reduce_for_detection(image_bgr: np.ndarray,
                          detect_long_edge: int = DETECT_LONG_EDGE) -> np.ndarray:
-    """얼굴 검출용 축소본. 분석 한 장에서 가장 비싼 resize입니다(실측 28.5ms).
+    """Reduced copy for face detection. The most expensive resize in
+    analysing one frame (measured 28.5ms).
 
-    호출부에서도 쓸 수 있게 따로 뺐습니다. 장면 지문과 썸네일이 같은
-    축소본을 재사용하면 원본 6192×4128에서 다시 줄이는 비용이 사라집니다 —
-    맥 실측으로 dhash 10.9→2.7ms, 썸네일 47.0→2.3ms입니다.
+    Split out so callers can use it too. When the scene fingerprint and the
+    thumbnail reuse the same reduction, the cost of shrinking down from the
+    6192x4128 original again disappears - measured on a Mac, dhash
+    10.9->2.7ms, thumbnail 47.0->2.3ms.
     """
     full_h, full_w = image_bgr.shape[:2]
     long_edge = max(full_h, full_w)
@@ -666,20 +734,24 @@ def analyze_focus(
     noise_compensation: bool = True,
     reduced: np.ndarray | None = None,
 ) -> FocusResult:
-    """프리뷰 이미지 한 장의 초점 상태를 측정합니다.
+    """Measure the focus state of one preview image.
 
-    검출은 축소본에서, ROI 선명도 측정은 원본 해상도에서 합니다.
-    선명도는 원본 픽셀에서 재야 의미가 있기 때문입니다.
+    Detection runs on the reduced copy, the ROI sharpness measurement at
+    full resolution. Sharpness only means anything measured on the original
+    pixels.
 
-    주의: detect_long_edge를 바꾸면 얼굴 검출 결과가 달라져 ROI가 바뀔 수
-    있습니다. frame_sharpness는 이 값과 무관하게 FRAME_LONG_EDGE에서 재므로
-    설정을 바꿔도 컷 간 비교가 유지됩니다.
+    Note: change detect_long_edge and the face detection result changes,
+    which can change the ROI. frame_sharpness is measured at
+    FRAME_LONG_EDGE regardless of this value, so comparisons between frames
+    hold up across a settings change.
 
-    force_main_face를 주면 자동 선정을 건너뛰고 그 얼굴을 주 피사체로 삼습니다.
-    화면에서 사용자가 다른 얼굴을 고른 경우입니다. ROI·선명도·배경 선명도가
-    **전부 그 얼굴 기준으로 다시** 계산되어야 판정이 실제로 따라옵니다 —
-    표시만 바꾸면 점수는 엉뚱한 얼굴 그대로입니다. 그래서 별도 경로를 두지
-    않고 이 함수를 다시 태웁니다.
+    Given force_main_face, automatic selection is skipped and that face is
+    taken as the main subject. This is the case where the user picked a
+    different face on screen. The ROI, the sharpness and the background
+    sharpness all have to be recomputed **entirely against that face** for
+    the scoring to actually follow - change only the display and the score
+    stays on the wrong face. So rather than keeping a separate path, this
+    function is simply run again.
     """
     full_h, full_w = image_bgr.shape[:2]
     shape = (full_h, full_w)
@@ -692,7 +764,7 @@ def analyze_focus(
     gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
     gray_full = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
 
-    # 노출 상태 — 축소본으로 재도 충분합니다
+    # Exposure state - measuring on the reduced copy is enough
     mean_luma = float(gray_small.mean())
     total = gray_small.size
     clipped_highlights = float(np.count_nonzero(gray_small >= 250)) / total
@@ -742,11 +814,13 @@ def analyze_focus(
                 roi, source = candidate, FocusSource.FACE
 
     if roi is None and af_box is not None and use_af_roi:
-        # 카메라가 기록한 AF 위치를 ROI로 씁니다(정밀 분석 옵션). 얼굴·눈
-        # ROI가 있으면 여기 오지 않습니다 — 존 AF의 기록은 눈이 아니라
-        # 존(몸통)이라(실측 47장, RESEARCH_METADATA.md) 얼굴 검출을 이길 수
-        # 없습니다. 얼굴이 없는 컷에서만 "가장 선명한 타일" 추측 대신
-        # 카메라의 실제 초점 위치를 씁니다.
+        # Use the AF position the camera recorded as the ROI (a precise
+        # analysis option). We never get here if a face or eye ROI exists -
+        # what zone AF records is the zone (the torso), not the eye
+        # (measured on 47 frames, RESEARCH_METADATA.md), so it cannot beat
+        # face detection. Only on frames with no face do we use the
+        # camera's actual focus position instead of guessing at "the
+        # sharpest tile".
         candidate = _clip_box(af_box[0], af_box[1], af_box[2], af_box[3], shape)
         if candidate and min(candidate[2], candidate[3]) >= MIN_ROI_PX:
             roi, source = candidate, FocusSource.AF
@@ -759,19 +833,25 @@ def analyze_focus(
     if roi is None:
         roi, source = (0, 0, full_w, full_h), FocusSource.FRAME
 
-    # 카메라 AF가 가리킨 얼굴 — 신뢰도 신호(af_face). 점수는 안 건드립니다.
-    # AF 상자 중심에서 가장 가까운 얼굴로 매칭합니다. 존 AF는 몸통을
-    # 가리키지만, 2인 컷은 얼굴이 가로로 떨어져 있어 중심 최근접이면 충분히
-    # 맞습니다(라벨 117장 검증: 같은 사람 54장 정답 87%, 다른 사람 63장 49%,
-    # research_af_confidence.py). af_box가 없거나 얼굴이 없으면 -1.
+    # The face the camera's AF pointed at - a confidence signal (af_face).
+    # It does not touch the score. Matched to the face nearest the AF box
+    # centre. Zone AF points at the torso, but in two-person frames the
+    # faces are separated horizontally, so nearest-to-centre is accurate
+    # enough (validated on 117 labelled frames: 87% correct on the 54
+    # frames of the same person, 49% on the 63 frames of a different
+    # person, research_af_confidence.py). -1 if there is no af_box or no
+    # face.
     af_face = -1
     if af_box is not None and face_boxes:
         af_face = _nearest_face(af_box, face_boxes)
 
-    # 노이즈 차감용 프레임 σ². ROI·배경은 원본 해상도에서 재므로 원본
-    # 해상도의 σ를 씁니다. 축소본(frame_gray)은 축소가 노이즈를 평균해
-    # σ가 전혀 달라지므로 그쪽은 따로 잽니다.
-    # noise_compensation=False면 v3과 동일한 측정입니다(차감 없음).
+    # Frame σ² for the noise subtraction. The ROI and the background are
+    # measured at full resolution, so the σ of the full resolution is used.
+    # On the reduced copy (frame_gray) the reduction averages the noise
+    # away and σ comes out completely different, so that one is measured
+    # separately.
+    # With noise_compensation=False this is the same measurement as v3
+    # (no subtraction).
     noise_var = frame_noise_sigma(gray_full) ** 2 if noise_compensation else 0.0
 
     x, y, w, h = roi
@@ -779,11 +859,12 @@ def analyze_focus(
 
     laplacian = _saturate(laplacian_raw, laplacian_k)
     tenengrad = _saturate(tenengrad_raw, tenengrad_k)
-    # Tenengrad에 더 무게를 준다 — 모션블러 판별력이 좋습니다
+    # Weight Tenengrad more - it discriminates motion blur better
     sharpness = 0.4 * laplacian + 0.6 * tenengrad
 
-    # 얼굴을 ROI로 썼으면, 얼굴 밖에서 가장 선명한 배경도 재 둡니다. 얼굴은
-    # 흐린데 배경이 쨍하면(초점이 뒤로 빠진 컷) 얼굴 우선 모드가 감점합니다.
+    # If a face was used as the ROI, also measure the sharpest background
+    # outside the face. When the face is soft but the background is crisp
+    # (focus fell behind the subject), face-priority mode penalises it.
     if source in (FocusSource.EYE, FocusSource.FACE) and face_box_small is not None:
         bg_box = _best_tile(gray_small, scale, shape, exclude=face_box_small)
         if bg_box and min(bg_box[2], bg_box[3]) >= MIN_ROI_PX:
@@ -791,8 +872,9 @@ def analyze_focus(
                 gray_full, bg_box, laplacian_k, tenengrad_k, noise_var
             )
 
-    # ROI와 무관한 기준선. 반드시 FRAME_LONG_EDGE 스케일에서 재야 합니다.
-    # detect_long_edge가 마침 같으면 이미 만들어 둔 gray_small을 재사용합니다.
+    # A baseline independent of the ROI. It must be measured at the
+    # FRAME_LONG_EDGE scale. If detect_long_edge happens to be the same,
+    # the gray_small already built is reused.
     if max(gray_small.shape[:2]) == FRAME_LONG_EDGE:
         frame_gray = gray_small
     else:
@@ -828,9 +910,9 @@ def analyze_focus(
         clipped_highlights=clipped_highlights,
         clipped_shadows=clipped_shadows,
         mean_luma=mean_luma,
-        # roi·faces 가 어느 크기를 기준으로 한 좌표인지 함께 남깁니다.
-        # 이게 없으면 화면 쪽에서 추측할 수밖에 없고, 실제로 그 추측이
-        # 틀려서 박스가 엉뚱한 자리에 그려졌습니다.
+        # Record alongside them which size roi and faces are coordinates
+        # against. Without this the display side can only guess, and that
+        # guess was in fact wrong, so boxes got drawn in the wrong place.
         source_width=full_w,
         source_height=full_h,
     )

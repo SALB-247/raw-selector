@@ -1,24 +1,27 @@
-"""CR3(ISO/IEC 14496-12 BMFF) 메타데이터 파서.
+"""CR3 (ISO/IEC 14496-12 BMFF) metadata parser.
 
-exifread는 TIFF 기반 RAW(ARW, NEF, CR2 …)만 읽습니다. CR3는 컨테이너가 아예
-다른 ISO BMFF라 "File format not recognized"로 떨어지고, 그 결과 렌즈 정보가
-통째로 비어 자동 렌즈 보정이 동작하지 않았습니다.
+exifread reads only TIFF-based RAWs (ARW, NEF, CR2 ...). CR3's container is
+an entirely different ISO BMFF, so it falls out with "File format not
+recognized", and as a result the lens information was empty wholesale and
+automatic lens correction did not work.
 
-구조 (실제 파일에서 확인):
+Structure (verified on a real file):
 
     ftyp                      brand 'crx '
     moov
-      uuid 85c0b687-820f-11e0-8111-f4ce462b6a48   ← 캐논 메타데이터 컨테이너
-        CMT1   II*\\0 …   IFD0     (Make, Model, Orientation)
-        CMT2   II*\\0 …   ExifIFD  (노출, ISO, 렌즈, 촬영시각)
-        CMT3   II*\\0 …   캐논 MakerNote
-        CMT4   II*\\0 …   GPS
+      uuid 85c0b687-820f-11e0-8111-f4ce462b6a48   <- Canon metadata container
+        CMT1   II*\\0 ...   IFD0     (Make, Model, Orientation)
+        CMT2   II*\\0 ...   ExifIFD  (exposure, ISO, lens, capture time)
+        CMT3   II*\\0 ...   Canon MakerNote
+        CMT4   II*\\0 ...   GPS
 
-CMT 박스는 각각 **완전한 TIFF 스트림**(엔디안 표식 + 매직 + IFD 오프셋)이라,
-잘라내서 그대로 exifread에 먹이면 됩니다. TIFF 파싱을 새로 짜지 않습니다.
+Each CMT box is a **complete TIFF stream** (endianness marker + magic + IFD
+offset), so it can be sliced out and fed to exifread as it is. We do not
+write a new TIFF parser.
 
-파일 전체(수십 MB)를 읽지 않습니다. 박스 헤더만 따라가며 seek해서 필요한
-조각만 읽습니다 — 4000장 배치에서 이 차이가 큽니다.
+The whole file (tens of MB) is not read. It seeks along the box headers and
+reads only the pieces it needs - on a 4000-frame batch that difference is
+large.
 """
 
 from __future__ import annotations
@@ -33,16 +36,17 @@ import exifread
 log = logging.getLogger(__name__)
 
 CANON_UUID = bytes.fromhex("85c0b687820f11e08111f4ce462b6a48")
-"""캐논이 CR3 메타데이터를 담는 uuid 박스 식별자."""
+"""The uuid box identifier Canon puts CR3 metadata in."""
 
 META_BOXES = (b"CMT1", b"CMT2", b"CMT3", b"CMT4")
 
 _MAX_BOX_BYTES = 8 * 1024 * 1024
-"""한 박스에서 읽어들일 상한. 손상 파일이 터무니없는 크기를 주장해도 막습니다."""
+"""The ceiling on how much is read from one box. It holds even when a
+damaged file claims an absurd size."""
 
 
 def _iter_boxes(fh, end: int) -> Iterator[tuple[bytes, int, int]]:
-    """[크기][타입] 박스를 순회합니다. (타입, 페이로드 시작, 박스 끝)."""
+    """Walks the [size][type] boxes. (type, payload start, box end)."""
     while True:
         position = fh.tell()
         if position + 8 > end:
@@ -55,13 +59,13 @@ def _iter_boxes(fh, end: int) -> Iterator[tuple[bytes, int, int]]:
         box_type = header[4:8]
         header_length = 8
 
-        if size == 1:  # 64비트 확장 크기
+        if size == 1:  # 64-bit extended size
             extended = fh.read(8)
             if len(extended) < 8:
                 return
             size = int.from_bytes(extended, "big")
             header_length = 16
-        elif size == 0:  # 파일 끝까지
+        elif size == 0:  # to the end of the file
             size = end - position
 
         if size < header_length or position + size > end:
@@ -72,22 +76,24 @@ def _iter_boxes(fh, end: int) -> Iterator[tuple[bytes, int, int]]:
 
 
 def _tiff_tags(payload: bytes) -> dict:
-    """CMT 박스 페이로드(완전한 TIFF)를 exifread로 읽습니다."""
+    """Reads a CMT box payload (a complete TIFF) with exifread."""
     if len(payload) < 8 or payload[:2] not in (b"II", b"MM"):
         return {}
     try:
         return exifread.process_file(io.BytesIO(payload), details=False) or {}
-    except Exception as exc:  # noqa: BLE001 - 한 박스가 깨져도 나머지는 씁니다
+    except Exception as exc:  # noqa: BLE001 - one broken box, the rest still used
         log.debug("CMT 박스 파싱 실패: %s", exc)
         return {}
 
 
 def read_exif_tags(path: Path) -> dict:
-    """CR3에서 EXIF 태그를 모아 돌려줍니다. 못 읽으면 빈 dict.
+    """Gathers the EXIF tags out of a CR3. An empty dict if it cannot be
+    read.
 
-    CMT1~CMT4를 각각 독립 TIFF로 읽어 합칩니다. 각 박스가 자기 스트림의
-    IFD0이라 exifread는 전부 "Image ..." 접두사를 붙입니다. 호출부가 헷갈리지
-    않도록 흔히 쓰는 키는 표준 이름으로도 함께 넣어 줍니다.
+    CMT1~CMT4 are each read as an independent TIFF and merged. Each box is
+    the IFD0 of its own stream, so exifread prefixes them all with
+    "Image ...". So that callers are not confused, the commonly used keys
+    are also put in under their standard names.
     """
     path = Path(path)
     tags: dict = {}
@@ -110,7 +116,7 @@ def read_exif_tags(path: Path) -> dict:
                         length = min(meta_end - meta_start, _MAX_BOX_BYTES)
                         fh.seek(meta_start)
                         tags.update(_tiff_tags(fh.read(length)))
-                break  # moov는 하나뿐입니다
+                break  # there is only one moov
     except OSError as exc:
         log.debug("CR3 읽기 실패 %s: %s", path.name, exc)
         return {}
@@ -118,7 +124,8 @@ def read_exif_tags(path: Path) -> dict:
     return _normalize(tags)
 
 
-# exifread가 붙이는 접두사가 박스마다 달라, 표준 이름으로도 찾을 수 있게 합니다.
+# The prefix exifread attaches differs per box, so we make the standard
+# names findable too.
 _ALIASES = {
     "EXIF LensModel": ("Image LensModel", "MakerNote LensModel", "EXIF LensModel"),
     "Image Model": ("Image Model",),
@@ -130,8 +137,9 @@ _ALIASES = {
     "EXIF FocalLength": ("Image FocalLength", "EXIF FocalLength"),
     "EXIF SubSecTimeOriginal": ("Image SubSecTimeOriginal", "EXIF SubSecTimeOriginal"),
     "Image Orientation": ("Image Orientation",),
-    # 환산 초점거리 계산용. 캐논은 FocalLengthIn35mmFilm을 안 써서
-    # FocalPlane 해상도로 센서 크기를 역산합니다 (raw_io._focal_35mm_from_tags).
+    # For computing the 35mm-equivalent focal length. Canon does not write
+    # FocalLengthIn35mmFilm, so the sensor size is worked back out from the
+    # FocalPlane resolution (raw_io._focal_35mm_from_tags).
     "EXIF FocalLengthIn35mmFilm": (
         "Image FocalLengthIn35mmFilm", "EXIF FocalLengthIn35mmFilm"),
     "EXIF FocalPlaneXResolution": (
@@ -146,7 +154,7 @@ _ALIASES = {
 
 
 def _normalize(tags: dict) -> dict:
-    """표준 키 이름으로도 접근할 수 있게 별칭을 채워 넣습니다."""
+    """Fills in aliases so the standard key names work for access too."""
     if not tags:
         return {}
     result = dict(tags)
@@ -161,7 +169,8 @@ def _normalize(tags: dict) -> dict:
 
 
 def is_cr3(path: Path) -> bool:
-    """확장자가 아니라 실제 브랜드로 판별합니다 (이름만 바뀐 파일 대비)."""
+    """Decided by the real brand, not the extension (in case a file has
+    only been renamed)."""
     try:
         with Path(path).open("rb") as fh:
             header = fh.read(12)

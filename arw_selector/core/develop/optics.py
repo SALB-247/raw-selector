@@ -1,14 +1,17 @@
-"""광학 보정 — 렌즈 왜곡, 비네팅, 색수차.
+"""Optical correction - lens distortion, vignetting, chromatic aberration.
 
-두 갈래로 동작합니다.
+It works down two paths.
 
-1. **자동**: lensfun 데이터베이스에서 카메라와 렌즈를 찾아 프로필을 적용합니다.
-   정확하지만 DB에 없는 렌즈는 사용할 수 없습니다. 실측에서 소니 순정 E PZ 16-50mm는
-   매칭됐지만 탐론 A069(50-300mm)는 DB에 없었습니다.
-2. **수동**: 왜곡·비네팅·색수차를 직접 조정합니다. DB에 없는 렌즈나 자동 결과가
-   마음에 안 들 때 씁니다.
+1. **Automatic**: look the camera and lens up in the lensfun database and
+   apply the profile. Accurate, but a lens the DB does not carry cannot be
+   used. Measured: Sony's own E PZ 16-50mm matched, but the Tamron A069
+   (50-300mm) was not in the DB.
+2. **Manual**: adjust distortion, vignetting and chromatic aberration by
+   hand. Used for a lens the DB does not carry, or when the automatic
+   result is not to your liking.
 
-lensfunpy가 없어도 수동 보정은 동작해야 합니다 — 선택 의존성으로 둡니다.
+Manual correction has to work even without lensfunpy - it is kept an
+optional dependency.
 """
 
 from __future__ import annotations
@@ -30,20 +33,21 @@ try:
     import lensfunpy
 
     LENSFUN_AVAILABLE = True
-except ImportError:  # pragma: no cover - 설치 여부에 따라 갈립니다
+except ImportError:  # pragma: no cover - branches on whether it is installed
     lensfunpy = None
     LENSFUN_AVAILABLE = False
 
 
-# OpticsSettings는 settings.py 한 곳에만 둡니다. 예전에 여기에도 같은 이름의
-# 사본이 있었는데, settings.py 쪽만 계속 자라면서(lens_override, defringe_green,
-# 색조 지정 등) 둘이 갈라졌습니다. 실수로 이 모듈에서 import하면 필드가 빠진
-# 다른 클래스를 쓰게 되어 저장/불러오기가 조용히 어긋납니다.
+# OpticsSettings lives in settings.py and nowhere else. There used to be a
+# copy of the same name here as well, and the two drifted apart as only the
+# settings.py side kept growing (lens_override, defringe_green, hue
+# selection and so on). Import it from this module by mistake and you get a
+# different class with fields missing, so save/load quietly goes wrong.
 
 
 @dataclass(frozen=True)
 class LensMatch:
-    """렌즈 DB 조회 결과. UI가 무엇이 잡혔는지 보여줘야 합니다."""
+    """The result of a lens DB lookup. The UI has to show what was matched."""
 
     camera: str | None = None
     lens: str | None = None
@@ -58,12 +62,14 @@ class LensMatch:
 
 
 def user_lens_db_dir() -> "Path":
-    """사용자가 추가 렌즈 프로필(.xml)을 넣는 폴더.
+    """The folder the user drops extra lens profiles (.xml) into.
 
-    번들 DB는 lensfunpy 릴리스 시점 스냅샷이라 최신 렌즈가 빠져 있습니다
-    (실측: 탐론 A069 미등록). 앱을 다시 빌드하지 않고도 커버리지를 넓힐 수
-    있도록, 이 폴더의 XML을 번들 DB에 얹어 함께 읽습니다. lensfun 공식
-    저장소나 직접 만든 프로필을 그대로 떨어뜨리면 됩니다.
+    The bundled DB is a snapshot taken at the lensfunpy release, so recent
+    lenses are missing from it (measured: the Tamron A069 is not
+    registered). So that coverage can be widened without rebuilding the
+    app, the XML in this folder is read on top of the bundled DB. Drop in
+    profiles from the official lensfun repository, or ones you made
+    yourself, as they are.
     """
     from pathlib import Path as _Path
 
@@ -73,18 +79,20 @@ def user_lens_db_dir() -> "Path":
 
 
 V1_CACHE_DIR = ".v1cache"
-"""버전 2 XML을 버전 1로 변환해 두는 폴더 (사용자 폴더 하위)."""
+"""Where version 2 XML is converted to version 1 (under the user folder)."""
 
 
 def _prepare_user_xmls(user_dir: "Path") -> list[str]:
-    """사용자 폴더의 XML을 라이브러리가 읽을 수 있는 형태로 준비합니다.
+    """Prepare the XML in the user folder in a form the library can read.
 
-    lensfun 저장소의 최신 DB는 포맷 버전 2인데 설치된 라이브러리는 1까지만
-    읽습니다. 사용자가 받은 파일을 그대로 넣어도 되도록, 버전 2면 변환본을
-    만들어 그것을 넘깁니다. 원본은 건드리지 않습니다.
+    The latest DB in the lensfun repository is format version 2, while the
+    installed library only reads up to 1. So that the user can drop the
+    file they downloaded in as it is, a converted copy is made when it is
+    version 2 and that is what gets handed over. The original is left
+    untouched.
 
-    lensfunpy의 paths는 폴더가 아니라 **파일 목록**을 받습니다(폴더를 주면
-    Permission denied로 실패합니다).
+    lensfunpy's paths takes a **list of files**, not a folder (give it a
+    folder and it fails with Permission denied).
     """
     from .lensfun_db import convert_to_v1, needs_conversion
 
@@ -116,10 +124,10 @@ def _prepare_user_xmls(user_dir: "Path") -> list[str]:
 
 @lru_cache(maxsize=1)
 def _database():
-    """lensfun DB는 로딩이 무거우므로 한 번만 만듭니다.
+    """The lensfun DB is expensive to load, so it is built only once.
 
-    사용자 폴더에 XML이 있으면 함께 읽습니다. 그 폴더가 깨져 있어도 번들
-    DB만으로 계속 동작해야 합니다.
+    If there is XML in the user folder it is read along with it. Even with
+    that folder broken, this has to keep working on the bundled DB alone.
     """
     if not LENSFUN_AVAILABLE:
         return None
@@ -148,20 +156,21 @@ def _database():
 
 
 def reload_database() -> tuple[int, int]:
-    """렌즈 DB를 다시 읽습니다. 새 (바디 수, 렌즈 수)를 돌려줍니다.
+    """Re-read the lens DB. Returns the new (body count, lens count).
 
-    DB는 로딩이 무거워 한 번만 읽고 캐시합니다. 그래서 앱을 켜 둔 채 프로필
-    XML을 넣으면 반영되지 않습니다 — 사용자가 직접 다시 읽게 해 줍니다.
+    The DB is expensive to load, so it is read once and cached. That means
+    profile XML dropped in while the app is running does not take effect -
+    this lets the user re-read it themselves.
     """
     _database.cache_clear()
     return database_coverage()
 
 
 def ensure_user_lens_db_dir() -> "Path":
-    """사용자 렌즈 프로필 폴더를 만들어 두고 경로를 돌려줍니다.
+    """Create the user lens profile folder and return its path.
 
-    폴더가 없으면 어디에 넣어야 할지 알 수 없습니다. 열어 보여 주기 전에
-    만들어 둡니다.
+    With no folder there is no way to know where to put anything. It is
+    created before we open it up to show.
     """
     folder = user_lens_db_dir()
     try:
@@ -181,7 +190,7 @@ def ensure_user_lens_db_dir() -> "Path":
 
 
 def database_coverage() -> tuple[int, int]:
-    """(바디 수, 렌즈 수). 사용자 폴더를 더한 최종 커버리지입니다."""
+    """(body count, lens count). The final coverage, user folder added in."""
     db = _database()
     if db is None:
         return (0, 0)
@@ -189,46 +198,48 @@ def database_coverage() -> tuple[int, int]:
 
 
 _APERTURE = re.compile(r"\bF(\d)", re.IGNORECASE)
-_MODEL_CODE = re.compile(r"\s+[A-Z]\d{3,4}\b")  # 탐론 A069, 시그마 C013 같은 코드
+_MODEL_CODE = re.compile(r"\s+[A-Z]\d{3,4}\b")  # e.g. Tamron A069, Sigma C013
 
 _GLUED_MOUNT = re.compile(
     r"^(RF|EF-S|EF|FE|E|Z|XF|XC|DT|DA|FA)(?=\d)", re.IGNORECASE
 )
-"""초점거리에 바로 붙은 마운트 표기 (RF100-500mm, XF18-55mm …)."""
+"""A mount marking glued straight onto the focal length (RF100-500mm,
+XF18-55mm ...)."""
 
 _PENTAX_PREFIX = re.compile(r"^(smc|hd)\s+pentax-?[a-z*]*\s+", re.IGNORECASE)
-"""smc PENTAX-DA / HD PENTAX-D FA* 같은 펜탁스 접두사."""
+"""Pentax prefixes such as smc PENTAX-DA / HD PENTAX-D FA*."""
 
 
 def _lens_name_variants(name: str) -> list[str]:
-    """EXIF 렌즈명을 lensfun 표기에 맞춰 여러 후보로 풀어 줍니다.
+    """Expand an EXIF lens name into candidates in lensfun's notation.
 
-    제조사마다 EXIF 표기가 제각각입니다:
+    Every maker writes EXIF differently:
       "E 50-300mm F4.5-6.3 A069"  (Sony/Tamron EXIF)
-      "50-300mm f/4.5-6.3"        (lensfun 표기)
-    한 번에 못 찾으면 조금씩 느슨하게 만들어 다시 시도합니다.
+      "50-300mm f/4.5-6.3"        (lensfun notation)
+    If it is not found in one go, the name is loosened a little at a time
+    and tried again.
     """
     variants = [name]
 
-    # F4.5 -> f/4.5 (lensfun은 슬래시 표기를 씁니다)
+    # F4.5 -> f/4.5 (lensfun uses the slash notation)
     slashed = _APERTURE.sub(r"f/\1", name)
     if slashed != name:
         variants.append(slashed)
 
-    # 끝에 붙는 제조사 모델 코드(A069 등)를 떼어 봅니다
+    # Try stripping the maker's model code on the end (A069 and the like)
     for candidate in list(variants):
         stripped = _MODEL_CODE.sub("", candidate).strip()
         if stripped and stripped != candidate:
             variants.append(stripped)
 
-    # 제조사마다 앞에 붙이는 말이 다릅니다. lensfun은 대체로 이걸 떼고 씁니다.
-    #   Sony      "FE 70-200mm F2.8 GM OSS II" / "E 18-135mm …" / "DT …"
-    #   Canon     "RF100-500mm …" / "EF24-70mm …"
-    #   Nikon     "NIKKOR Z 24-70mm f/2.8 S" / "AF-S NIKKOR …"
-    #   Fujifilm  "XF18-55mmF2.8-4 R LM OIS" / "XC …"
-    #   Olympus   "OLYMPUS M.12-40mm F2.8" / "M.Zuiko Digital …"
+    # Each maker prefixes something different. lensfun mostly drops it.
+    #   Sony      "FE 70-200mm F2.8 GM OSS II" / "E 18-135mm ..." / "DT ..."
+    #   Canon     "RF100-500mm ..." / "EF24-70mm ..."
+    #   Nikon     "NIKKOR Z 24-70mm f/2.8 S" / "AF-S NIKKOR ..."
+    #   Fujifilm  "XF18-55mmF2.8-4 R LM OIS" / "XC ..."
+    #   Olympus   "OLYMPUS M.12-40mm F2.8" / "M.Zuiko Digital ..."
     #   Panasonic "LUMIX G VARIO 12-60/F3.5-5.6"
-    #   Pentax    "smc PENTAX-DA 18-55mm …" / "HD PENTAX-DA …"
+    #   Pentax    "smc PENTAX-DA 18-55mm ..." / "HD PENTAX-DA ..."
     for candidate in list(variants):
         parts = candidate.split()
         if len(parts) > 1 and parts[0].upper() in {
@@ -237,20 +248,22 @@ def _lens_name_variants(name: str) -> list[str]:
         }:
             variants.append(" ".join(parts[1:]))
 
-    # 마운트 표기가 초점거리에 바로 붙는 경우 ("RF100-500mm", "XF18-55mm").
-    # 공백으로 나눠서는 못 떼므로 숫자 앞에서 잘라 냅니다.
+    # When the mount marking is glued to the focal length ("RF100-500mm",
+    # "XF18-55mm"). Splitting on whitespace cannot strip it, so we cut in
+    # front of the digits.
     for candidate in list(variants):
         stripped = _GLUED_MOUNT.sub("", candidate).strip()
         if stripped and stripped != candidate:
             variants.append(stripped)
 
-    # 펜탁스는 "smc PENTAX-DA", "HD PENTAX-D FA*" 처럼 하위 구분자가 붙습니다.
+    # Pentax attaches a sub-classifier: "smc PENTAX-DA", "HD PENTAX-D FA*".
     for candidate in list(variants):
         stripped = _PENTAX_PREFIX.sub("", candidate).strip()
         if stripped and stripped != candidate:
             variants.append(stripped)
 
-    # 두 단어짜리 접두사도 떼어 봅니다 (AF-S NIKKOR, LUMIX G, M.Zuiko Digital …)
+    # Two-word prefixes are tried as well (AF-S NIKKOR, LUMIX G,
+    # M.Zuiko Digital ...)
     for candidate in list(variants):
         lowered = candidate.lower()
         for prefix in (
@@ -276,7 +289,7 @@ _FOCAL = re.compile(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*mm|(\d+(?:\.\d+)?)
 
 
 def _focal_range_from_name(name: str) -> tuple[float, float] | None:
-    """렌즈명에서 초점거리 범위를 뽑습니다. "50-300mm" -> (50, 300)."""
+    """Pull the focal range out of a lens name. "50-300mm" -> (50, 300)."""
     match = _FOCAL.search(name)
     if not match:
         return None
@@ -288,51 +301,56 @@ def _focal_range_from_name(name: str) -> tuple[float, float] | None:
 
 
 def _focal_matches(lens, wanted: tuple[float, float] | None) -> bool:
-    """후보 렌즈의 초점거리 범위가 실제 렌즈와 겹치는지.
+    """Whether the candidate lens's focal range overlaps the real lens.
 
-    lensfun의 loose_search는 아주 관대해서, 전혀 다른 이름에도 아무 렌즈나
-    돌려줍니다(실측: "존재하지않는렌즈 999mm" -> "E 24mm F2.8"). 그대로 쓰면
-    엉뚱한 왜곡·비네팅 프로필이 사진에 적용됩니다. 보정을 안 하는 것보다
-    나쁩니다. 초점거리로 최소한의 검산을 합니다.
+    lensfun's loose_search is extremely generous: it hands back some lens
+    or other even for a completely different name (measured: a
+    made-up "nonexistent lens 999mm" -> "E 24mm F2.8"). Used as it is, a
+    wrong distortion/vignetting profile gets applied to the photo. That is
+    worse than doing no correction at all. The focal length gives us a
+    minimal check.
     """
     if wanted is None:
         return True
     try:
         low, high = float(lens.min_focal), float(lens.max_focal)
     except (AttributeError, TypeError, ValueError):
-        return True  # 정보가 없으면 막지 않습니다
+        return True  # with no information, we do not block it
     if low <= 0 or high <= 0:
         return True
-    # 범위가 '겹치기만' 하면 통과시키면 안 됩니다. 이름이 24-105인데 100-500
-    # 렌즈가 100~105 구간에서 겹친다는 이유로 통과해 버립니다. 같은 렌즈라면
-    # 양 끝이 비슷해야 합니다.
+    # Letting it through on the ranges merely 'overlapping' is not
+    # allowed. With the name 24-105, a 100-500 lens gets through on the
+    # grounds that it overlaps over 100~105. If it is the same lens, both
+    # ends have to be close.
     #
-    # 허용치는 10%입니다. 20%로 뒀더니 망원에서 너무 헐거워, DB가 커지자
-    # 800mm 렌즈가 999mm 요청에 걸렸습니다(199 < 999*0.2). 실제 표기 반올림은
-    # 1% 수준이라 10%면 충분합니다.
+    # The tolerance is 10%. Left at 20% it was too loose at the telephoto
+    # end, and once the DB grew an 800mm lens caught a 999mm request
+    # (199 < 999*0.2). Real notation rounds at about the 1% level, so 10%
+    # is enough.
     return (
         abs(low - wanted[0]) <= max(2.0, wanted[0] * 0.1)
         and abs(high - wanted[1]) <= max(2.0, wanted[1] * 0.1)
     )
 
 
-# 앞에 \b를 두면 "E-M1MarkIII"처럼 숫자에 바로 붙은 표기를 놓칩니다
-# ('1'과 'M' 사이에는 단어 경계가 없습니다).
+# Putting a \b in front misses notation glued straight onto a digit, as in
+# "E-M1MarkIII" (there is no word boundary between '1' and 'M').
 _MARK = re.compile(r"mark\s*([ivx]+)\b", re.IGNORECASE)
 _ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6"}
 
 
 def _camera_name_variants(model: str, make: str | None = None) -> list[str]:
-    """EXIF 바디명을 lensfun 표기에 맞춰 여러 후보로 풀어 줍니다.
+    """Expand an EXIF body name into candidates in lensfun's notation.
 
-    카메라 EXIF의 Model 필드에는 제조사가 안 들어갑니다("EOS R6 Mark II").
-    반면 lensfun은 제조사를 붙여 짧게 씁니다("Canon EOS R6m2"). 예전에는
-    모델명 첫 단어를 제조사로 넘겼는데, 그러면 maker="EOS"로 조회해서
-    캐논 바디가 통째로 안 잡혔습니다.
+    The Model field of a camera's EXIF does not carry the maker ("EOS R6
+    Mark II"). lensfun, on the other hand, attaches the maker and writes
+    it short ("Canon EOS R6m2"). We used to hand the first word of the
+    model name over as the maker, which looked up maker="EOS" and meant
+    Canon bodies were not matched at all.
     """
     variants = [model]
 
-    # "Mark II" -> "m2" (lensfun 표기)
+    # "Mark II" -> "m2" (lensfun notation)
     def _to_m(match: "re.Match[str]") -> str:
         return "m" + _ROMAN.get(match.group(1).lower(), match.group(1))
 
@@ -341,8 +359,9 @@ def _camera_name_variants(model: str, make: str | None = None) -> list[str]:
     if shortened != model:
         variants.append(shortened)
 
-    # 제조사를 앞에 붙인 형태도 시도합니다. EXIF Make가 있으면 그걸 쓰고,
-    # 없으면 모델명 생김새로 추정합니다(제조사별 접두사는 꽤 고유합니다).
+    # The form with the maker prefixed is tried as well. If EXIF Make is
+    # there we use it, otherwise we guess from the shape of the model name
+    # (the per-maker prefixes are fairly distinctive).
     guessed = None
     upper = model.upper()
     if upper.startswith("EOS") or upper.startswith("POWERSHOT"):
@@ -378,10 +397,11 @@ def _camera_name_variants(model: str, make: str | None = None) -> list[str]:
 
 
 def _find_cameras_loose(db, camera_model: str, make: str | None = None):
-    """바디명 표기 변형을 차례로 시도합니다. maker는 넘기지 않습니다.
+    """Try the body-name notation variants in turn. maker is not passed.
 
-    EXIF Model에는 제조사가 없어서, 첫 단어를 maker로 넘기면 오히려 검색이
-    실패합니다. lensfun의 loose_search가 제조사 없이도 잘 찾습니다.
+    EXIF Model does not carry the maker, so handing the first word over as
+    the maker makes the search fail instead. lensfun's loose_search finds
+    it well enough without a maker.
     """
     for candidate in _camera_name_variants(camera_model, make):
         try:
@@ -394,11 +414,12 @@ def _find_cameras_loose(db, camera_model: str, make: str | None = None):
 
 
 def _is_generic_placeholder(lens) -> bool:
-    """lensfun의 범용 대체 렌즈인지.
+    """Whether this is one of lensfun's generic stand-in lenses.
 
-    이름이 전혀 안 맞으면 lensfun은 "Rectilinear 10-1000mm f/1.0" 같은 범용
-    항목을 물려 줍니다. 실측 보정값이 없는 자리표시자라, 이걸 '찾았다'고
-    보고하면 사용자는 렌즈 프로필이 적용된 줄 착각합니다.
+    When the name does not match at all, lensfun hands back a generic
+    entry such as "Rectilinear 10-1000mm f/1.0". It is a placeholder with
+    no measured correction values, so reporting it as 'found' leaves the
+    user believing a lens profile was applied.
     """
     model = (getattr(lens, "model", "") or "").lower()
     if "rectilinear" in model:
@@ -407,15 +428,16 @@ def _is_generic_placeholder(lens) -> bool:
         low, high = float(lens.min_focal), float(lens.max_focal)
     except (AttributeError, TypeError, ValueError):
         return False
-    # 실제 줌은 아무리 넓어도 20배 남짓입니다 (18-300mm ≈ 16배)
+    # A real zoom is at most around 20x however wide it goes (18-300mm ~ 16x)
     return low > 0 and high / low > 25.0
 
 
 def _covers_focal(lens, focal: float | None) -> bool:
-    """실제로 그 초점거리로 찍을 수 있는 렌즈인지.
+    """Whether this lens can actually shoot at that focal length.
 
-    EXIF의 촬영 초점거리는 이름 추정보다 확실한 근거입니다. 363mm로 찍은
-    사진에 24-105mm 프로필이 붙으면 왜곡 보정이 엉뚱하게 들어갑니다.
+    The capture focal length in EXIF is firmer evidence than guessing from
+    the name. Attach a 24-105mm profile to a photo shot at 363mm and the
+    distortion correction goes in completely wrong.
     """
     if not focal or focal <= 0:
         return True
@@ -429,10 +451,11 @@ def _covers_focal(lens, focal: float | None) -> bool:
 
 
 def _find_lenses_loose(db, camera, lens_model: str, focal: float | None = None):
-    """표기 변형을 차례로 시도해 렌즈를 찾습니다. 못 찾으면 빈 리스트.
+    """Find the lens by trying notation variants in turn. [] if not found.
 
-    이름에서 뽑은 초점거리 범위와, 실제 촬영 초점거리(EXIF) 둘 다로
-    걸러냅니다 — 틀린 프로필을 적용하느니 수동 보정으로 넘기는 편이 낫습니다.
+    It filters on both the focal range pulled out of the name and the real
+    capture focal length (EXIF) - better to fall through to manual
+    correction than to apply the wrong profile.
     """
     wanted = _focal_range_from_name(lens_model)
     for candidate in _lens_name_variants(lens_model):
@@ -452,7 +475,7 @@ def _find_lenses_loose(db, camera, lens_model: str, focal: float | None = None):
 
 
 def find_lens(metadata: RawMetadata | None) -> LensMatch:
-    """EXIF로 카메라와 렌즈를 조회합니다."""
+    """Look the camera and lens up from EXIF."""
     if not LENSFUN_AVAILABLE:
         return LensMatch(reason="lensfunpy 미설치")
     if metadata is None or not metadata.camera_model:
@@ -479,9 +502,10 @@ def find_lens(metadata: RawMetadata | None) -> LensMatch:
         if not lenses:
             return LensMatch(
                 camera=camera.model,
-                # 절대 경로를 문구에 박지 않습니다. PC마다 다르고, 개발
-                # 기계의 경로가 그대로 보이면 남의 경로처럼 읽힙니다.
-                # 폴더는 바로 아래 '렌즈 프로필 폴더' 버튼이 열어 줍니다.
+                # No absolute path is baked into the wording. It differs
+                # per PC, and a development machine's path showing through
+                # reads like somebody else's path. The folder is opened by
+                # the 'lens profile folder' button just below.
                 reason=(
                     f"DB에 {metadata.lens_model} 없음 — 수동 보정을 쓰거나, "
                     "'렌즈 프로필 폴더' 버튼을 눌러 XML을 넣으십시오"
@@ -498,16 +522,19 @@ def find_lens(metadata: RawMetadata | None) -> LensMatch:
 def available_lenses(
     maker: str | None = None, keyword: str | None = None, limit: int = 0
 ) -> list[str]:
-    """데이터베이스에 등록된 렌즈 목록입니다.
+    """The list of lenses registered in the database.
 
-    EXIF 렌즈명이 비어 있거나 DB 이름과 다를 때 사용자가 직접 고를 수
-    있어야 합니다. 서드파티 렌즈나 어댑터를 쓰면 흔히 발생합니다.
+    When the EXIF lens name is empty or differs from the DB name, the user
+    has to be able to pick one themselves. It happens often with
+    third-party lenses or adapters.
 
-    maker는 **거르는 조건이 아니라 정렬 우선순위**입니다. 예전에는 소니 바디에
-    maker='Sony'로 걸러서 탐론·시그마 같은 서드파티 렌즈가 목록에서 통째로
-    사라졌습니다 — 서드파티를 물리는 경우가 훨씬 흔한데도 고를 수가 없었습니다.
-    limit도 기본 200이라 1304개 중 앞부분만 나왔습니다(탐론이 잘려 나갔습니다).
-    기본은 전부 보여 주고, limit은 0이면 무제한입니다.
+    maker is **a sort priority, not a filter condition**. We used to
+    filter a Sony body with maker='Sony', which made third-party lenses
+    such as Tamron and Sigma disappear from the list wholesale - even
+    though mounting a third-party lens is far more common, there was no
+    way to pick one. limit defaulted to 200 as well, so only the front of
+    the 1304 entries came out (Tamron was cut off). The default now shows
+    all of them, and limit 0 means unlimited.
     """
     db = _database()
     if db is None:
@@ -521,7 +548,7 @@ def available_lenses(
         names.add(label)
 
     def sort_key(label: str) -> tuple[int, str]:
-        # 같은 제조사를 위로 올리되, 나머지도 계속 보이게 둡니다
+        # Lift the same maker to the top, but leave the rest visible
         same_maker = bool(maker) and label.lower().startswith(maker.lower())
         return (0 if same_maker else 1, label.lower())
 
@@ -530,7 +557,7 @@ def available_lenses(
 
 
 def available_cameras(keyword: str | None = None, limit: int = 200) -> list[str]:
-    """데이터베이스에 등록된 카메라 목록입니다."""
+    """The list of cameras registered in the database."""
     db = _database()
     if db is None:
         return []
@@ -547,7 +574,7 @@ def available_cameras(keyword: str | None = None, limit: int = 200) -> list[str]
 
 
 def find_lens_by_name(camera_model: str, lens_name: str) -> LensMatch:
-    """사용자가 직접 고른 이름으로 렌즈를 찾습니다."""
+    """Find the lens by the name the user picked themselves."""
     if not LENSFUN_AVAILABLE:
         return LensMatch(reason="lensfunpy가 설치되어 있지 않습니다")
 
@@ -576,10 +603,10 @@ def find_lens_by_name(camera_model: str, lens_name: str) -> LensMatch:
 def apply_auto_correction(
     image: np.ndarray, metadata: RawMetadata | None, settings: OpticsSettings
 ) -> np.ndarray:
-    """lensfun 프로필로 왜곡과 비네팅을 보정합니다.
+    """Correct distortion and vignetting with the lensfun profile.
 
-    프로필이 없으면 원본을 그대로 돌려준다 — 실패를 조용히 넘기고 수동
-    보정이 이어서 동작하게 합니다.
+    With no profile it returns the original as it is - the failure passes
+    quietly and manual correction carries on working after it.
     """
     if not settings.auto_enabled or not LENSFUN_AVAILABLE or metadata is None:
         return image
@@ -596,7 +623,7 @@ def apply_auto_correction(
             return image
         camera = cameras[0]
 
-        # 사용자가 직접 고른 렌즈가 있으면 EXIF보다 우선합니다
+        # A lens the user picked themselves takes priority over EXIF
         lens_name = settings.lens_override or metadata.lens_model
         lenses = _find_lenses_loose(db, camera, lens_name)
         if not lenses:
@@ -606,57 +633,70 @@ def apply_auto_correction(
         modifier = lensfunpy.Modifier(
             lenses[0], camera.crop_factor, width, height
         )
-        # pixel_format을 반드시 맞춰야 합니다. 선언을 빼면 lensfun이
-        # 0~255 기준 연산을 0~1 값에 적용해 결과가 폭주합니다. float32는
-        # 0~1로 받습니다 — 아래 비네팅 보정이 선형 광량을 넘기기 때문에
-        # 이 형식이어야 합니다.
+        # pixel_format has to be matched. Leave the declaration out and
+        # lensfun applies a 0~255-based computation to 0~1 values, so the
+        # result runs away. float32 is taken as 0~1 - the vignetting
+        # correction below hands over linear light, so it has to be this
+        # format.
         modifier.initialize(
             metadata.focal_length or 50.0,
             metadata.aperture or 5.6,
-            10.0,            # 피사체 거리(m) — EXIF에 없으므로 일반적인 값
+            10.0,            # subject distance (m) - EXIF lacks it, so typical
             pixel_format=np.float32,
         )
 
         result = image
         if settings.auto_vignetting:
-            # **빛의 양에 걸어야 합니다.** 비네팅은 렌즈가 빛을 깎은
-            # 것이므로 되돌리는 배수도 빛의 양에 곱해야 합니다. 그런데
-            # lensfun은 넘겨받은 값에 그대로 곱합니다 — 실측에서 배수가
-            # 밝기와 무관하게 일정했고(단일 상수로 맞췄을 때 잔차 0.49레벨
-            # = uint8 반올림 한계), 즉 감마를 모릅니다.
+            # **It has to be applied to the amount of light.** Vignetting
+            # is the lens having cut light away, so the multiplier that
+            # undoes it has to multiply the amount of light too. But
+            # lensfun multiplies the value it was handed as it is -
+            # measured, the multiplier was constant regardless of
+            # brightness (fitting a single constant left a residual of
+            # 0.49 levels = the uint8 rounding limit), which is to say it
+            # does not know the gamma.
             #
-            # 감마가 걸린 0~255에 곱하면 실효 광량 배수가 g^2.2가 됩니다.
-            # DB 표본 58개에서 구석 과보정이 중앙값 +1.50스톱이었고, 합성
-            # 검증에서는 **보정 후가 보정 전보다 더 어긋났습니다**(평탄도
-            # 오차 20.9 → 31.1).
+            # Multiply into a gamma'd 0~255 and the effective light
+            # multiplier becomes g^2.2. Over 58 DB samples the corner
+            # over-correction had a median of +1.50 stops, and in the
+            # synthetic verification **after correction was further off
+            # than before correction** (flatness error 20.9 -> 31.1).
             #
-            # 되돌리는 곡선은 sRGB가 아니라 engine.to_light입니다. 여기
-            # 들어오는 그림은 postprocess(BT.709)·기종보정·프로파일 곡선을
-            # 이미 지났습니다. sRGB로 되돌리면 구석 잔차가 중앙 레벨에 따라
-            # -0.36 ~ +0.21스톱으로 **부호까지 뒤집힙니다** — 하필 비네팅이
-            # 펴려는 그 밝기 기울기 위에서 어긋납니다(평탄도 1.57레벨,
-            # 최대 3.44). to_light으로 되돌리면 0.00입니다.
+            # The curve we undo with is engine.to_light, not sRGB. The
+            # picture arriving here has already been through
+            # postprocess (BT.709), the body correction and the profile
+            # curve. Undo with sRGB and the corner residual runs
+            # -0.36 ~ +0.21 stops depending on the centre level, so **even
+            # the sign flips** - and it goes wrong on precisely the
+            # brightness gradient vignetting is trying to flatten
+            # (flatness 1.57 levels, maximum 3.44). Undone with to_light
+            # it is 0.00.
             #
-            # 예전 검증이 이것을 놓친 이유: sRGB에서 비네트를 씌우고 sRGB에서
-            # 되돌렸습니다. 같은 곡선으로 걸고 되돌리는 왕복은 그 곡선이
-            # 틀려도 0이 나옵니다. 광량에서 씌워야 판별됩니다.
+            # Why the old verification missed this: it laid the vignette
+            # on in sRGB and undid it in sRGB. A round trip that applies
+            # and undoes with the same curve comes out 0 even when that
+            # curve is wrong. It only shows up if you lay it on in light.
             #
-            # 자동 보정은 편집 가능 이미지에서 apply_settings가 꺼 버리므로
-            # 여기 오는 그림은 언제나 profiled입니다 — 분기가 필요 없습니다.
+            # Automatic correction is switched off by apply_settings on an
+            # editable image, so the picture arriving here is always
+            # profiled - no branch is needed.
             #
-            # 예전에는 uint8로 넘기느라 디모자이크가 준 float 정밀도까지
-            # 함께 버렸습니다. 입력 dtype을 유지해 돌려줍니다.
+            # We used to hand it over as uint8, which threw away the float
+            # precision demosaicing gave us along with it. The input dtype
+            # is preserved on the way back.
             from .engine import from_light, to_light
 
-            # 반드시 사본이어야 합니다. lensfun은 배열을 제자리에서 고치는데,
-            # ascontiguousarray는 이미 연속이면 원본을 그대로 돌려주므로
-            # 호출자가 넘긴 이미지까지 파괴됩니다.
+            # It has to be a copy. lensfun fixes the array in place, and
+            # ascontiguousarray hands back the original as it is when it
+            # is already contiguous, so the image the caller passed in
+            # gets destroyed along with it.
             buffer = np.ascontiguousarray(to_light(result),
                                           dtype=np.float32).copy()
             if modifier.apply_color_modification(buffer):
                 corrected = from_light(buffer)
-                # 프로필과 촬영 조건이 어긋나면 여전히 비정상 값이 나올 수
-                # 있습니다. 그대로 쓰면 픽셀이 쓰레기가 되므로 검사하고 버립니다.
+                # If the profile and the shooting conditions disagree,
+                # abnormal values can still come out. Used as they are
+                # the pixels turn to rubbish, so we check and throw away.
                 if np.all(np.isfinite(corrected)):
                     result = np.clip(corrected, 0, 255).astype(image.dtype)
                 else:
@@ -666,12 +706,14 @@ def apply_auto_correction(
                     )
 
         if settings.auto_chromatic:
-            # 배율 색수차 — 채널마다 배율이 미세하게 달라 생기는 색 테두립니다.
-            # 채널별 좌표를 따로 받아 각각 리매핑해야 합니다.
+            # Lateral chromatic aberration - the colour fringe that comes
+            # of each channel having a slightly different magnification.
+            # Per-channel coordinates have to be taken separately and
+            # each one remapped.
             coords = modifier.apply_subpixel_distortion()
             if coords is not None:
                 channels = list(cv2.split(result))
-                # lensfun은 (h, w, 3, 2) — 채널별 (x, y) 좌표를 줍니다
+                # lensfun gives (h, w, 3, 2) - per-channel (x, y) coords
                 for index in range(3):
                     channels[index] = cv2.remap(
                         channels[index],
@@ -690,15 +732,16 @@ def apply_auto_correction(
                 )
 
         return result
-    except Exception as exc:  # noqa: BLE001 - 보정 실패로 현상을 막지 않습니다
+    except Exception as exc:  # noqa: BLE001 - a failure must not block develop
         log.warning("자동 렌즈 보정 실패: %s", exc)
         return image
 
 
 def apply_manual_distortion(image: np.ndarray, amount: int) -> np.ndarray:
-    """수동 왜곡 보정. 방사 왜곡 모델을 단순화해서 씁니다.
+    """Manual distortion correction, using a simplified radial model.
 
-    음수는 배럴 왜곡(볼록)을 펴고, 양수는 핀쿠션(오목)을 폅니다.
+    Negative flattens barrel distortion (convex), positive flattens
+    pincushion (concave).
     """
     if not amount:
         return image
@@ -706,7 +749,7 @@ def apply_manual_distortion(image: np.ndarray, amount: int) -> np.ndarray:
     height, width = image.shape[:2]
     k = amount / 100.0 * 0.35
 
-    # 정규화 좌표에서 r' = r * (1 + k*r^2)
+    # In normalised coordinates, r' = r * (1 + k*r^2)
     center_x, center_y = width / 2.0, height / 2.0
     scale = max(center_x, center_y)
 
@@ -724,30 +767,38 @@ def apply_manual_distortion(image: np.ndarray, amount: int) -> np.ndarray:
     )
 
 
-#: 수동 비네팅 슬라이더 100이 이미지 네 귀퉁이에 거는 양(스톱).
+#: How much the manual vignetting slider at 100 applies to the four
+#: corners of the image (in stops).
 #:
-#: 수동은 lensfun에 프로필이 없는 렌즈(탐론 A069 등)를 위한 대체재이므로
-#: **자동이 닿는 곳까지는 손으로도 닿아야 합니다.** 실측에서 자동이 E PZ
-#: 16-50mm 구석에 거는 양이 +2.14스톱이라 그보다 조금 위로 잡았습니다.
+#: Manual is the stand-in for lenses lensfun has no profile for (the
+#: Tamron A069 and the like), so **by hand it has to reach as far as
+#: automatic reaches.** Measured, what automatic applies to the corners
+#: of the E PZ 16-50mm is +2.14 stops, so this was set a little above it.
 MANUAL_VIGNETTE_MAX_STOPS = 2.2
 
 
 def apply_manual_vignetting(image: np.ndarray, amount: int,
                             profiled: bool = True) -> np.ndarray:
-    """수동 비네팅 보정. 양수면 주변부를 밝혀 어두워짐을 상쇄합니다.
+    """Manual vignetting correction. Positive brightens the periphery to
+    offset the darkening.
 
-    **빛의 양에 겁니다.** 자동과 같은 물리 현상을 고치는 자리이므로 같은
-    공간에서 걸어야 합니다. 예전에는 0~255에 그대로 곱해서, 같은 슬라이더
-    값이 밝기마다 다른 뜻이었습니다 — 슬라이더 25가 레벨 40에서 +0.43,
-    레벨 190에서 +1.16스톱이었습니다(폭 0.74). 한 장 안에서도 갈려서,
-    어두운 구석을 보고 맞추면 밝은 구석이 터졌습니다. 실사진 슬라이더 50에서
-    날아간 화소가 1.68%(원본 0.08%)였고, 광량으로 걸면 0.13%입니다.
+    **It is applied to the amount of light.** This fixes the same physical
+    phenomenon as automatic does, so it has to be applied in the same
+    space. We used to multiply straight into 0~255, which meant the same
+    slider value meant something different at every brightness - slider 25
+    was +0.43 stops at level 40 and +1.16 stops at level 190 (a spread of
+    0.74). It split even within a single frame, so matching by eye on a
+    dark corner blew out a bright one. On a real photo at slider 50, 1.68%
+    of the pixels were blown (0.08% in the original); applied in light it
+    is 0.13%.
 
-    **슬라이더는 배수가 아니라 스톱에 선형입니다.** 예전 식(1 + k·r²)은
-    앞쪽 절반이 전체 효과의 60%를 해서 미세 조정이 어려웠습니다. 이제 50이
-    정확히 100의 절반이고, 눈금이 "구석을 몇 스톱 올린다"로 읽힙니다.
+    **The slider is linear in stops, not in the multiplier.** With the old
+    formula (1 + k*r²) the front half did 60% of the whole effect, which
+    made fine adjustment hard. Now 50 is exactly half of 100, and the
+    scale reads as "raise the corners by this many stops".
 
-    감쇠는 r²입니다 — 코사인4승 낙차를 스톱으로 보면 대체로 그 모양입니다.
+    The falloff is r² - seen in stops, the cos^4 drop is roughly that
+    shape.
     """
     if not amount:
         return image
@@ -758,32 +809,36 @@ def apply_manual_vignetting(image: np.ndarray, amount: int,
     radius = np.sqrt(
         ((x - center_x) / center_x) ** 2 + ((y - center_y) / center_y) ** 2
     )
-    # 귀퉁이에서 r²=2이므로 2로 나눠 그 지점이 슬라이더 눈금과 맞게 합니다.
+    # At the corners r²=2, so dividing by 2 makes that point line up with
+    # the slider scale.
     stops = ((amount / 100.0) * MANUAL_VIGNETTE_MAX_STOPS
              * np.clip(radius, 0.0, 1.5) ** 2 / 2.0)
     gain = np.exp2(stops)
 
     from .engine import from_light, to_light
 
-    # 입력 dtype을 유지합니다. 광학 보정은 파이프라인의 맨 앞이라, 여기서
-    # uint8로 떨구면 이후의 톤·곡선이 256단계 위에서 계산되어 부드러운 하늘
-    # 같은 곳에 띠(밴딩)가 생깁니다 — 디모자이크가 float으로 넘겨 준 14비트
-    # 정밀도를 비네팅 슬라이더 하나 때문에 잃게 됩니다.
+    # The input dtype is preserved. Optical correction is at the very
+    # front of the pipeline, so dropping to uint8 here makes every later
+    # tone and curve compute on top of 256 steps, which bands somewhere
+    # smooth like a sky - the 14-bit precision demosaicing handed over as
+    # float would be lost over a single vignetting slider.
     lit = to_light(image, profiled) * gain[:, :, None]
     return np.clip(from_light(lit, profiled), 0, 255).astype(image.dtype)
 
 
 def sample_hue(image: np.ndarray, x: int, y: int, radius: int = 4) -> int:
-    """지정한 지점 주변의 대표 색조를 구합니다 (스포이드).
+    """Get the representative hue around a given point (the eyedropper).
 
-    언저리 색은 렌즈와 장면마다 달라서 고정값으로는 잘 맞지 않습니다.
-    실제 언저리를 찍어 그 색조를 기준으로 삼는 편이 정확합니다.
+    Fringe colour differs per lens and per scene, so a fixed value does
+    not match well. Sampling the real fringe and taking that hue as the
+    reference is more accurate.
 
-    돌려주는 값은 apply_defringe와 같은 8비트 HSV 색조(0~179)입니다. 화면이
-    넘겨 주는 미리보기는 디모자이크 결과라 float인데, float을 그대로 HSV로
-    바꾸면 OpenCV가 색조를 0~359로 돌려주고 채도도 0~1이 됩니다. 그러면
-    스포이드가 실제와 전혀 다른 값을 내놓아(보라 145 → 110) 언저리 제거가
-    엉뚱한 색에 걸립니다. 8비트로 맞춘 뒤 계산합니다.
+    The value returned is the same 8-bit HSV hue (0~179) apply_defringe
+    uses. The preview the screen hands over is a demosaic result, so it is
+    float, and converting float straight to HSV has OpenCV hand hue back
+    as 0~359 and saturation as 0~1. Then the eyedropper produces a value
+    nothing like the real one (purple 145 -> 110) and fringe removal
+    catches the wrong colour. We match it to 8 bits before computing.
     """
     height, width = image.shape[:2]
     x0, x1 = max(0, x - radius), min(width, x + radius + 1)
@@ -798,9 +853,9 @@ def sample_hue(image: np.ndarray, x: int, y: int, radius: int = 4) -> int:
     hue = patch[:, :, 0].astype(np.float32)
     saturation = patch[:, :, 1].astype(np.float32)
 
-    # 채도가 낮은 픽셀은 색조가 불안정하므로 가중치를 줄입니다
+    # Hue is unstable on low-saturation pixels, so their weight is reduced
     weights = saturation + 1.0
-    # 색조는 원형이라 단순 평균이 아니라 벡터 평균을 써야 합니다
+    # Hue is circular, so a vector mean has to be used, not a plain mean
     angles = hue * 2.0 * np.pi / 180.0
     x_mean = float(np.sum(np.cos(angles) * weights))
     y_mean = float(np.sum(np.sin(angles) * weights))
@@ -814,23 +869,27 @@ def apply_defringe(
     purple_hue: int = 145,
     green_hue: int = 65,
 ) -> np.ndarray:
-    """색수차로 생긴 보라/녹색 언저리를 제거합니다.
+    """Remove the purple/green fringing chromatic aberration leaves.
 
-    고대비 경계에서 해당 색조를 띤 픽셀만 골라 채도를 낮춥니다. 실제 피사체
-    색까지 건드리지 않도록 경계 근처로 범위를 좁힙니다.
+    Only the pixels carrying that hue on a high-contrast edge are picked
+    out and desaturated. The range is narrowed to near the edge so that
+    the real subject colour is not touched as well.
     """
     if not purple and not green:
         return image
 
-    # **float32 HSV로 계산합니다.** 예전에는 uint8로 왕복해서 이 구간만
-    # 계조가 8비트로 떨어졌습니다(실측: 통과 후 고유 레벨 228).
+    # **The computation is in float32 HSV.** We used to round-trip through
+    # uint8, which dropped the gradation to 8 bits over this stretch alone
+    # (measured: 228 unique levels after the pass).
     #
-    # 예전 주석이 "float을 그대로 넘기면 사진이 흑백이 된다"고 경고했는데,
-    # 그것은 **범위 규약**의 문제였습니다. float32 HSV는 H 0~360, S 0~1,
-    # V는 입력 범위 그대로입니다(실측 확인). 8비트 눈금(S 0~255, H 0~179)
-    # 으로 계산한 값을 그 위에 쓰면 채도가 통째로 날아갑니다. 눈금을 맞춰
-    # 쓰면 정확하고, 8비트 눈금 상수(스포이드가 주는 색조)는 여기서 도수로
-    # 환산합니다.
+    # An older comment warned that "handing float over as it is turns the
+    # photo black and white", but that was a **range convention** problem.
+    # float32 HSV is H 0~360, S 0~1, and V in the input range as it is
+    # (measured and confirmed). Write values computed on the 8-bit scale
+    # (S 0~255, H 0~179) on top of that and the saturation is wiped out
+    # wholesale. Match the scale and it is accurate; the 8-bit scale
+    # constants (the hue the eyedropper gives) are converted to degrees
+    # here.
     from .engine import HUE_UINT8_TO_DEGREES
 
     source = np.clip(image, 0, 255).astype(np.float32)
@@ -838,7 +897,7 @@ def apply_defringe(
     hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV)
     hue, saturation = hsv[:, :, 0], hsv[:, :, 1]
 
-    # 경계 마스크 — 언저리는 대비가 큰 곳에만 생깁니다
+    # Edge mask - fringing only appears where the contrast is large
     gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
     edges = cv2.dilate(
         cv2.Laplacian(gray, cv2.CV_32F).__abs__(), np.ones((3, 3), np.uint8)
@@ -867,12 +926,13 @@ def apply_optics(
     image: np.ndarray, settings: OpticsSettings,
     metadata: RawMetadata | None = None, profiled: bool = True
 ) -> np.ndarray:
-    """광학 보정 전체. 자동 프로필 → 수동 조정 순으로 적용합니다.
+    """All of optical correction, applied automatic profile -> manual.
 
-    profiled는 이 그림이 놓인 공간입니다(engine._baseline_transfer 참고).
-    비네팅이 빛에 곱해야 하므로 필요합니다. 자동은 편집 가능 이미지에서
-    apply_settings가 꺼 버리지만 **수동은 잠기지 않으므로** JPEG 원본에도
-    걸립니다 — 거기서는 되돌릴 곡선이 다릅니다.
+    profiled is the space this picture sits in (see
+    engine._baseline_transfer). It is needed because vignetting has to
+    multiply into light. Automatic is switched off by apply_settings on an
+    editable image, but **manual is not locked**, so it applies to a JPEG
+    original as well - and there the curve to undo with is different.
     """
     if settings.is_neutral():
         return image

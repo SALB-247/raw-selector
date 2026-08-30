@@ -88,6 +88,11 @@ class MainWindow(QMainWindow):
         self.resize(1400, 900)
 
         self.config = Config()
+        # The analysis options are part of the cache fingerprint, so they
+        # have to come back exactly as they were left. Starting from the
+        # defaults made an already-analysed folder report nothing cached.
+        for key, value in state.analyze_options().items():
+            setattr(self.config.analyze, key, value)
         self.session: SelectionSession | None = None
         self.folder: Path | None = None
         self.analysis_worker: AnalysisWorker | None = None
@@ -504,8 +509,10 @@ class MainWindow(QMainWindow):
             tr("{count} files selected — press Analyse to start").format(
                 count=len(paths))
         )
-        # 파일을 직접 골라 넘어온 흐름은 바로 분석합니다 — 방금 고른 것을
-        # 또 확인창으로 되묻지 않습니다. 다이얼로그는 툴바의 분석 버튼용입니다.
+        # The flow that came in by picking files directly analyses straight
+        # away - it does not ask about what was just picked all over again
+        # in a confirmation window. The dialog is for the toolbar's analyse
+        # button.
         self.start_analysis(show_dialog=False)
 
     def start_analysis(self, *, show_dialog: bool = True) -> None:
@@ -514,17 +521,19 @@ class MainWindow(QMainWindow):
 
         self.config.recursive = self.recursive_check.isChecked()
 
-        # 어느 경로로 들어왔는지 남깁니다. "분석 버튼을 눌렀는데 옵션 창이
-        # 안 뜬다"는 신고가 왔을 때, 창이 생략된 것인지(파일을 직접 고른
-        # 흐름) 창이 떴는데 안 보인 것인지를 로그만으로 가르기 위해서입니다.
+        # Records which route it came in by. When a report arrives saying "I
+        # pressed the analyse button but the options window does not appear",
+        # this is so the log alone can tell whether the window was skipped
+        # (the pick-files-directly flow) or it did come up and was not seen.
         log.info(
             "분석 요청: 옵션 창 %s, 대상 %s",
             "표시" if show_dialog else "생략",
             f"고른 파일 {len(self._explicit_paths)}개"
             if self._explicit_paths else f"폴더 {self.folder}",
         )
-        # 무엇을 몇 장 분석하는지 먼저 보여 주고 옵션을 고르게 합니다.
-        # 파일을 직접 고른 흐름(show_dialog=False)은 지금처럼 바로 시작합니다.
+        # Shows what and how many are being analysed first, then lets the
+        # options be picked. The pick-files-directly flow (show_dialog=False)
+        # still starts straight away, as it does now.
         if show_dialog and not self._confirm_analysis():
             return
 
@@ -542,10 +551,12 @@ class MainWindow(QMainWindow):
         self.analysis_worker.start()
 
     def _confirm_analysis(self) -> bool:
-        """분석 시작 다이얼로그. 취소하면 False, 시작하면 옵션을 반영하고 True.
+        """Start-analysis dialog. False on cancel; on start it applies the
+        options and returns True.
 
-        사진 수와 캐시 상태를 세는 것은 가벼운 작업이라(파일 스캔 + 지문
-        조회, payload 역직렬화 없음) 창을 띄우기 전에 바로 셉니다.
+        Counting the photos and the cache state is light work (a file scan +
+        a fingerprint lookup, no payload deserialisation), so it is counted
+        right there before the window goes up.
         """
         from ..core.cache import AnalysisCache, default_cache_path
         from ..core.raw_io import has_small_preview, iter_raw_files
@@ -566,7 +577,7 @@ class MainWindow(QMainWindow):
             cache.open()
             cached = cache.count_ready(paths)
             cache.close()
-        except Exception:  # noqa: BLE001 - 캐시를 못 세도 분석은 할 수 있습니다
+        except Exception:  # noqa: BLE001 - analysis runs without a cache count
             cached = 0
 
         options = AnalysisStartDialog.ask(
@@ -579,6 +590,14 @@ class MainWindow(QMainWindow):
         self.config.analyze.af_roi_hint = options.af_roi_hint
         self.config.analyze.center_priority = options.center_priority
         self.config.analyze.demosaic_small_preview = options.demosaic_small_preview
+        # These four are the cache fingerprint. Losing them on exit made an
+        # analysed folder come back as "nothing cached" - see state.
+        state.set_analyze_options(
+            noise_compensation=options.noise_compensation,
+            af_roi_hint=options.af_roi_hint,
+            center_priority=options.center_priority,
+            demosaic_small_preview=options.demosaic_small_preview,
+        )
         self._pending_use_cache = options.use_cache
         return True
 
@@ -909,16 +928,19 @@ class MainWindow(QMainWindow):
 
         developed = sum(1 for r in records if r.develop is not None)
 
-        # 등급을 세어 그대로 보여 줍니다. 예전에는 전부 keep으로 적어서,
-        # review 사진 한 장을 내보내면서도 "keep 1 · review 0"이 떴습니다.
+        # Counts the grades and shows them as they are. It used to write
+        # everything as keep, so exporting a single review photo still came
+        # up as "keep 1 · review 0".
         counts = Counter(r.final_grade.value for r in records)
         summary = {grade: counts.get(grade, 0)
                    for grade in ("keep", "review", "reject")}
 
-        # 이 사진들은 사용자가 직접 열어서 고른 것입니다. 툴바 내보내기에서
-        # 등급 필터를 좁혀 둔 적이 있으면 그 값이 세션 내내 남는데, 여기까지
-        # 걸리면 고른 사진이 통째로 걸러져 한 장도 안 나가고 "0장 복사"로
-        # 끝났습니다 — 이유는 어디에도 안 나옵니다. 고른 등급은 켜 둡니다.
+        # These photos are ones the user opened and picked by hand. If the
+        # grade filter was ever narrowed in the toolbar export, that value
+        # stays for the whole session, and once it catches here the picked
+        # photos get filtered out wholesale, not one goes out, and it ended
+        # with "copied 0" - the reason shows up nowhere. The grades that
+        # were picked are left switched on.
         options = replace(self.export_options, grades=tuple(sorted(counts)))
 
         dialog = ExportDialog(

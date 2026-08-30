@@ -198,11 +198,23 @@ move between frames without breaking flow across hundreds of shots.
 Supported adjustments: basic tone (temperature, exposure, highlights, shadows,
 whites/blacks, texture, clarity, dehaze, vibrance, saturation), parametric +
 drag-edit curves (RGB/R/G/B), detail (sharpening, multi-pass noise reduction
-with a **face-priority** weighting, LED-wall destripe), local masks (brush /
-radial / linear / face / eye / background, 11 presets), HSL colour mixer,
-colour grading, effects (grain, vignette), optics (lensfun auto + manual
-distortion/vignetting/defringe), crop & straighten, an info strip, watermark,
-and selective EXIF.
+with a **face-priority** weighting, shadow-gated colour-noise removal, LED-wall
+destripe), local masks (brush / radial / linear / face / eye / background /
+subject, built from several pieces with add / subtract / intersect, each with
+its own tone curve), HSL colour mixer, colour grading, effects (grain,
+vignette), optics (lensfun auto + manual distortion / vignette correction /
+defringe), crop & straighten, an info strip, watermark, and selective EXIF.
+
+Colour noise is dealt with where it actually lives. The dark areas get a
+wider, repeated pass while the bright ones keep theirs, because reaching the
+same cleanliness across the whole frame costs saturation — measured on five
+real high-ISO files, colour noise left in the shadows runs 46% → 15% at the
+middle of the slider and 9% at the top, with bright-area colour unchanged
+throughout.
+
+A section that is not applying anything reads **(off)** in its header, and a
+photo you have not edited opens with every section off; touching any control
+switches its section back on.
 
 **Match camera JPEG** fits exposure, tone curve and saturation to the RAW's own
 embedded camera render (~16ms), so a develop starts where the JPEG you culled by

@@ -1,13 +1,17 @@
-"""마스크(국소 보정) 렌더.
+"""Mask (local adjustment) rendering.
 
-전역 보정이 끝난 이미지에, 마스크 영역만 국소 조정을 적용해 알파로 합성합니다.
-미리보기와 내보내기가 같은 엔진을 쓰므로 화면과 결과가 일치합니다.
+On an image whose global adjustments are finished, the local adjustment is
+applied to the mask region only and composited by alpha. The preview and
+the export use the same engine, so what you see is what you get.
 
-핵심 설계
-  - 얼굴/눈/배경/방사형/선형 마스크는 정규화 파라미터만 저장하고 여기서
-    이미지 크기에 맞춰 매번 알파를 다시 만든다 → 해상도 독립.
-  - 브러시만 축소된 알파 비트맵을 들고 다니고, 여기서 이미지 크기로 늘린다.
-  - 국소 연산은 알파의 bounding box 안에서만 돌려 6000×4000에서도 비용을 묶는다.
+Core design
+  - Face/eye/background/radial/linear masks store only normalised
+    parameters and rebuild the alpha here, to the image size, every time
+    -> resolution independent.
+  - Only the brush carries a shrunken alpha bitmap around, and it is
+    stretched to the image size here.
+  - The local operations run inside the alpha's bounding box only, which
+    ties the cost down even at 6000x4000.
 """
 
 from __future__ import annotations
@@ -25,32 +29,43 @@ from .engine import (
     _IDENTITY,
     _apply_lut,
     _apply_saturation,
+    _curve_lut,
     _local_contrast,
+    _spline_lut,
     _tone_lut,
+    curve_control_points,
 )
-from .settings import BasicSettings, LocalAdjustments, Mask, MaskType
+from .settings import (BasicSettings, LocalAdjustments, Mask, MaskCombine,
+                       MaskType)
 
 log = logging.getLogger(__name__)
 
-_FACE_KINDS = frozenset({MaskType.FACE, MaskType.EYE, MaskType.BACKGROUND})
+_FACE_KINDS = frozenset({MaskType.FACE, MaskType.EYE,
+                        MaskType.BACKGROUND, MaskType.SUBJECT})
+"""Masks that need face detection. The subject one needs faces to decide
+whether the model discarded a person (_subject_alpha)."""
 
 SIZE_KINDS = frozenset({MaskType.FACE, MaskType.EYE, MaskType.RADIAL})
-"""mask.size(범위 %)가 실제로 영역을 줄이는 종류. 나머지는 무시됩니다."""
+"""The kinds where mask.size (range %) really shrinks the region. The rest
+ignore it."""
 
 
 def _size_factor(mask: Mask) -> float:
-    """범위 % → 도형 반경에 곱할 배율. 0~200%(기본 100)."""
+    """Range % -> the factor multiplying the shape radius. 0~200%
+    (100 by default)."""
     return float(np.clip(mask.size, 0, 200)) / 100.0
 
 
 def _param(params: dict, key: str, default: float) -> float:
-    """도형 파라미터 하나를 유한한 실수로 읽습니다.
+    """Read one shape parameter as a finite real number.
 
-    params는 종류마다 다른 자유 형식 dict라 dataclass의 타입 정리를 못
-    거칩니다. 프리셋 YAML에 `.nan`이나 문자열이 들어오면 그대로 계산에
-    실려 **알파 전체가 NaN**이 됩니다. 알파의 NaN은 합성을 그냥 통과해
-    저장본에 쓰레기 화소로 남고 마스크 오버레이도 깨집니다 — 예외가 아니라
-    잘못된 그림이라 알아채기 어렵습니다.
+    params is a free-form dict that differs per kind, so it cannot go
+    through the dataclass's type tidying. Let a `.nan` or a string into
+    the preset YAML and it rides straight into the computation, making
+    **the whole alpha NaN**. A NaN in the alpha passes right through
+    compositing, stays as rubbish pixels in the saved file and breaks the
+    mask overlay too - it is not an exception but a wrong picture, which
+    makes it hard to notice.
     """
     value = params.get(key, default)
     try:
@@ -60,14 +75,17 @@ def _param(params: dict, key: str, default: float) -> float:
     return number if np.isfinite(number) else default
 
 
-# ---------------------------------------------------------------- 얼굴 검출
+# -------------------------------------------------------------- face detection
 
 
 def _detect_faces_full(detect_bgr: np.ndarray) -> np.ndarray | None:
-    """검출은 축소본에서 하고 좌표를 원본 스케일로 되돌립니다.
+    """Detect on a shrunken copy and put the coordinates back at the
+    original scale.
 
-    반환 좌표(0~13열: x,y,w,h,랜드마크 5쌍)는 detect_bgr 좌표계입니다.
-    14열(score)은 그대로 둡니다. 면적 큰 순으로 정렬해 index 0이 주 피사쳅니다.
+    The returned coordinates (columns 0~13: x, y, w, h, 5 landmark pairs)
+    are in the detect_bgr coordinate system. Column 14 (score) is left
+    alone. They are sorted by descending area, so index 0 is the main
+    subject.
     """
     h, w = detect_bgr.shape[:2]
     long_edge = max(h, w)
@@ -86,7 +104,7 @@ def _detect_faces_full(detect_bgr: np.ndarray) -> np.ndarray | None:
     faces = faces.astype(np.float64).copy()
     if scale < 1.0:
         faces[:, :14] /= scale
-    order = np.argsort(-(faces[:, 2] * faces[:, 3]))  # 면적 큰 순
+    order = np.argsort(-(faces[:, 2] * faces[:, 3]))  # descending area
     return faces[order]
 
 
@@ -103,10 +121,11 @@ FACE_TARGET_INDEX = "index"
 
 def _nearest_face(faces: np.ndarray, hint: tuple[float, float, float, float],
                   h: int, w: int) -> np.ndarray:
-    """정규화 힌트 상자의 중심에 가장 가까운 검출 얼굴.
+    """The detected face closest to the centre of the normalised hint box.
 
-    힌트는 분석 프리뷰에서 나온 좌표라 지금 이미지의 검출 결과와 크기·개수가
-    다를 수 있습니다. 인덱스로 맞추면 어긋나므로 위치로 맞춥니다.
+    The hint is a coordinate that came out of the analysis preview, so it
+    can differ in size and count from the detection result on the current
+    image. Matching by index goes wrong, so we match by position.
     """
     cx = (hint[0] + hint[2] / 2.0) * w
     cy = (hint[1] + hint[3] / 2.0) * h
@@ -120,15 +139,17 @@ def select_faces(
     faces: np.ndarray | None, mask: Mask, detect_bgr: np.ndarray,
     main_face_box: tuple[float, float, float, float] | None = None,
 ) -> list[np.ndarray]:
-    """이 마스크가 대상으로 삼을 얼굴들.
+    """The faces this mask takes as its target.
 
-    예전에는 **면적이 가장 큰 얼굴 하나**에 무조건 걸었습니다. 단체 사진에서
-    앞줄 행인이 주인공보다 크게 잡히면 엉뚱한 사람이 밝아졌고, 여러 명을
-    한꺼번에 손볼 방법도 없었습니다.
+    It used to apply unconditionally to **the single largest face by
+    area**. In a group photo, a passer-by in the front row caught larger
+    than the protagonist meant the wrong person got brightened, and there
+    was no way to work on several people at once either.
 
-    - main  : 초점 판정이 고른 주 피사체 (화면의 빨간 박스와 같은 얼굴)
-    - all   : 검출된 얼굴 전부
-    - index : 사용자가 고른 번호 (면적 큰 순)
+    - main  : the main subject the focus scoring picked (the same face as
+              the red box on screen)
+    - all   : every detected face
+    - index : the number the user picked (in descending area)
     """
     if faces is None or len(faces) == 0:
         return []
@@ -140,14 +161,15 @@ def select_faces(
         face = _pick_face(faces, int(mask.params.get("index", 0)))
         return [face] if face is not None else []
 
-    # 분석이 이미 고른 얼굴이 있으면 그것을 씁니다. 여기서 다시 고르면
-    # 해상도가 달라 다른 답이 나올 수 있고, 무엇보다 사용자가 화면에서
-    # 주 피사체를 바꿔도 마스크만 옛 얼굴에 남습니다.
+    # If the analysis already picked a face, that is what we use. Picking
+    # again here can give a different answer because the resolution
+    # differs, and above all, when the user changes the main subject on
+    # screen the mask alone would stay on the old face.
     if main_face_box is not None:
         h, w = detect_bgr.shape[:2]
         return [_nearest_face(faces, main_face_box, h, w)]
 
-    # 힌트가 없으면 초점 쪽과 **같은 기준**으로 직접 고릅니다
+    # With no hint we pick it ourselves, by **the same criterion** as focus
     try:
         from ..focus import LAPLACIAN_K, TENENGRAD_K, _pick_main_face
 
@@ -155,21 +177,22 @@ def select_faces(
         index = _pick_main_face(faces, gray, 1.0, gray.shape[:2],
                                 LAPLACIAN_K, TENENGRAD_K)
         return [faces[index]]
-    except Exception:  # noqa: BLE001 - 못 고르면 가장 큰 얼굴로 물러섭니다
+    except Exception:  # noqa: BLE001 - cannot pick -> the largest face
         log.debug("주 피사체 얼굴 선정 실패", exc_info=True)
         return [faces[0]]
 
 
-# ---------------------------------------------------------------- 알파 생성
+# ------------------------------------------------------------ alpha generation
 
 
 def _feather(alpha: np.ndarray, feather: int, reference_px: float | None = None) -> np.ndarray:
-    """경계를 가우시안으로 부드럽게 합니다.
+    """Soften the edge with a Gaussian.
 
-    도형 마스크는 reference_px(그 도형의 짧은 반경)를 기준으로 번짐을 잡습니다.
-    이미지 크기를 기준으로 잡으면 작은 마스크(눈밑 등)가 통째로 씻겨 나가,
-    범위를 줄일수록 효과가 사라지는 문제가 생깁니다. 기준이 없는 브러시·배경만
-    이미지 짧은 변 기준으로 갑니다.
+    A shape mask sets the spread against reference_px (that shape's short
+    radius). Set it against the image size and a small mask (under the
+    eye and so on) gets washed away wholesale, so the effect disappears
+    the more the range is shrunk. Only the brush and background, which
+    have no reference, go by the image's short edge.
     """
     h, w = alpha.shape[:2]
     if reference_px and reference_px > 0:
@@ -184,10 +207,12 @@ def _feather(alpha: np.ndarray, feather: int, reference_px: float | None = None)
 def _radial_alpha(params: dict, h: int, w: int, size: float = 1.0) -> np.ndarray:
     cx = _param(params, "cx", 0.5) * w
     cy = _param(params, "cy", 0.5) * h
-    # 하한은 반경 '전체'에 걸어야 합니다. params만 막으면 범위(size) 슬라이더를
-    # 0%까지 내렸을 때 곱한 결과가 0이 되어 아래 나눗셈이 0으로 나누기가 되고,
-    # 알파에 NaN이 섞입니다. NaN은 합성에서 그대로 살아남아 화면과 저장본에
-    # 쓰레기 화소로 남고, 마스크 오버레이도 깨집니다.
+    # The floor has to apply to the radius 'as a whole'. Guard params
+    # alone and taking the range (size) slider down to 0% makes the
+    # product 0, so the division below divides by zero and NaN gets mixed
+    # into the alpha. NaN survives compositing as it is, staying as
+    # rubbish pixels on screen and in the saved file, and breaking the
+    # mask overlay too.
     rx = max(1e-3, _param(params, "rx", 0.3) * w * size)
     ry = max(1e-3, _param(params, "ry", 0.3) * h * size)
     angle = np.radians(_param(params, "rotation", 0.0))
@@ -198,7 +223,8 @@ def _radial_alpha(params: dict, h: int, w: int, size: float = 1.0) -> np.ndarray
     xr = (dx * ca + dy * sa) / rx
     yr = (-dx * sa + dy * ca) / ry
     dist = np.sqrt(xr * xr + yr * yr)
-    # 안쪽은 꽉 찬 1, 경계까지 선형으로 0. feather는 알파 생성 뒤 따로 안 건다.
+    # 1 solid on the inside, linear down to 0 at the boundary. feather is
+    # not applied separately after the alpha is built.
     return np.clip(1.0 - dist, 0.0, 1.0).astype(np.float32)
 
 
@@ -233,7 +259,8 @@ def _brush_alpha(mask: Mask, h: int, w: int) -> np.ndarray | None:
 
 
 def _ellipse_poly(center, axes, angle: float = 0.0) -> np.ndarray:
-    """타원을 윤곽점으로. 폴백 경로도 윤곽과 같은 래스터라이저를 타게 합니다."""
+    """An ellipse as contour points. This lets the fallback path ride the
+    same rasteriser as the contours."""
     return cv2.ellipse2Poly(
         (int(round(center[0])), int(round(center[1]))),
         (max(1, int(round(axes[0]))), max(1, int(round(axes[1])))),
@@ -243,14 +270,17 @@ def _ellipse_poly(center, axes, angle: float = 0.0) -> np.ndarray:
 
 @dataclass
 class _Shapes:
-    """알파를 이루는 윤곽 목록. 래스터화는 `_rasterise`가 맡습니다.
+    """The list of contours that make up the alpha. `_rasterise` handles
+    the rasterisation.
 
-    구멍(눈·눈썹·입)의 페더 기준을 바깥 경계와 **따로** 들고 다니는 것이
-    핵심입니다. 예전 구현은 타원을 파낸 알파에 `_feather`를 한 번 걸었는데,
-    그 시그마는 얼굴 크기 기준이라(얼굴 400px이면 88px) 눈만 한 45px짜리
-    구멍이 흔적도 없이 씻겨 나갔습니다. 그래서 '피부만' 마스크의 덮인
-    면적이 일반 얼굴 마스크와 **소수점까지 같았고**(둘 다 33.75%), 피부를
-    매끄럽게 하면 눈썹과 입술이 같이 뭉개졌습니다.
+    The key point is carrying the feather reference of the holes (eyes,
+    brows, mouth) **separately** from the outer boundary. The old
+    implementation applied `_feather` once to an alpha with the ellipses
+    dug out, and that sigma went by face size (88px for a 400px face), so
+    a 45px hole the size of an eye was washed away without a trace. That
+    is why the covered area of the 'skin only' mask was **identical down
+    to the decimal** with the ordinary face mask (33.75% for both), and
+    smoothing the skin smeared the brows and lips along with it.
     """
 
     fill: list[np.ndarray]
@@ -265,21 +295,25 @@ def _sigma(feather: int, reference_px: float) -> float:
 
 def _rasterise(shapes: _Shapes | None, feather: int,
                h: int, w: int) -> np.ndarray | None:
-    """윤곽을 알파로. **경계상자 창 안에서만** 흐림을 돌립니다.
+    """Contours into an alpha. The blur runs **inside the bounding box
+    window only**.
 
-    전체 프레임에 가우시안을 걸면 6192×4128에서 마스크 하나에 0.9초가
-    걸립니다(실측). 얼굴은 화면의 일부일 뿐이므로 번짐 여유(3σ)만 두고
-    잘라서 돌리면 수십 ms로 끝납니다.
+    Run the Gaussian over the whole frame and one mask takes 0.9 seconds
+    at 6192x4128 (measured). A face is only part of the frame, so cutting
+    it out with just the spread margin (3σ) and running there finishes in
+    tens of milliseconds.
     """
     if shapes is None or not shapes.fill:
         return None
 
     sigma = _sigma(feather, shapes.reference)
 
-    # 구멍의 번짐은 구멍 반지름의 1/3로 묶습니다. 시그마가 반지름에 가까워지면
-    # 가우시안이 구멍 자체를 메워 버려서(반지름 40px·시그마 40px이면 중심
-    # 알파가 0.26까지 차오릅니다) 눈·입술이 도로 스무딩 대상이 됩니다.
-    # 3σ = 반지름이면 경계는 충분히 부드럽고 중심은 확실히 뚫려 있습니다.
+    # A hole's spread is tied to 1/3 of the hole radius. As sigma
+    # approaches the radius the Gaussian fills the hole itself back in
+    # (at radius 40px and sigma 40px the centre alpha climbs to 0.26), so
+    # the eyes and lips become smoothing targets again. At 3σ = the
+    # radius the boundary is soft enough and the centre is definitely
+    # open.
     hole_sigma = 0.0
     if shapes.holes:
         hole_sigma = min(_sigma(feather, shapes.hole_reference),
@@ -316,7 +350,8 @@ def _rasterise(shapes: _Shapes | None, feather: int,
 
 def _mesh_points(detect_bgr: np.ndarray | None,
                  face: np.ndarray) -> np.ndarray | None:
-    """이 얼굴의 468점. 모델이 없거나 실패하면 None(→ 예전 타원 방식)."""
+    """The 468 points of this face. None if the model is missing or fails
+    (-> the old ellipse method)."""
     if detect_bgr is None or not face_mesh.available():
         return None
     return face_mesh.landmarks(
@@ -326,10 +361,12 @@ def _mesh_points(detect_bgr: np.ndarray | None,
 
 def _contour(points: np.ndarray, indices, scale_x: float = 1.0,
              scale_y: float = 1.0, shift_y: float = 0.0) -> np.ndarray:
-    """윤곽점을 중심 기준으로 늘리고(범위 %) 아래로 밀어 정수 좌표로.
+    """Stretch the contour points about their centre (range %), push them
+    down, and turn them into integer coordinates.
 
-    shift_y는 **늘리기 전** 높이에 대한 비율입니다. 늘린 뒤 높이를 쓰면
-    범위를 키울수록 마스크가 얼굴 아래로 흘러내립니다.
+    shift_y is a ratio of the height **before** the stretch. Use the
+    height after the stretch and the mask slides down off the face the
+    more the range is raised.
     """
     poly = np.array([[points[i][0], points[i][1]] for i in indices], np.float64)
     centre = poly.mean(axis=0)
@@ -340,14 +377,16 @@ def _contour(points: np.ndarray, indices, scale_x: float = 1.0,
 
 
 def _contour_radius(polygon: np.ndarray) -> float:
-    """페더 기준이 될 크기 — 윤곽 경계상자의 짧은 쪽 절반."""
+    """The size the feather goes by - half the short side of the
+    contour's bounding box."""
     span_x = float(polygon[:, 0].max() - polygon[:, 0].min())
     span_y = float(polygon[:, 1].max() - polygon[:, 1].min())
     return max(2.0, min(span_x, span_y) / 2.0)
 
 
-# 이목구비 구멍은 윤곽보다 조금 넉넉하게 잡습니다. 딱 맞추면 속눈썹·입술
-# 경계선 한 줄이 마스크에 남아 그 선만 뭉갭니다.
+# The holes for the features are set a little more generously than the
+# contours. Fit them exactly and a single line of the eyelash and lip
+# boundary stays in the mask, and that line alone gets smeared.
 _HOLE_MARGIN = 1.22
 
 _FACE_HOLES = (face_mesh.LEFT_EYE, face_mesh.RIGHT_EYE,
@@ -372,7 +411,7 @@ def _mesh_face_shapes(region: str, points: np.ndarray, size: float) -> _Shapes:
                  for ring in (face_mesh.LEFT_BROW, face_mesh.RIGHT_BROW)]
         return _Shapes(polys, _smallest_radius(polys))
 
-    # skin — 얼굴 윤곽에서 이목구비를 뺀 '피부만'
+    # skin - the face contour with the features subtracted, 'skin only'
     oval = _contour(points, face_mesh.FACE_OVAL, size, size)
     holes = [_contour(points, ring, _HOLE_MARGIN, _HOLE_MARGIN)
              for ring in _FACE_HOLES]
@@ -387,12 +426,16 @@ def _mesh_eye_shapes(region: str, points: np.ndarray, size: float) -> _Shapes:
         polys = [_contour(points, ring, size, size) for ring in rings]
         return _Shapes(polys, _smallest_radius(polys))
 
-    # 눈가(under_eye) — 눈꼬리 주름과 눈밑 다크서클이 대상입니다. 눈 윤곽을
-    # 가로로 넓히고(주름) 아래로 밀어(다크서클) 잡은 뒤, 눈알은 도로 뺍니다.
+    # The eye area (under_eye) - crow's feet and the dark circles under
+    # the eye are the target. The eye contour is widened horizontally
+    # (the wrinkles) and pushed down (the dark circles), then the eyeball
+    # itself is subtracted back out.
     #
-    # 아래로 미는 양이 관건입니다. 눈 중심 기준으로만 늘리면 위쪽 절반이
-    # 눈꺼풀과 눈썹을 덮어, '언더아이'라면서 쌍꺼풀을 뭉개게 됩니다.
-    # 윗변이 눈 중심보다 살짝 위(눈꼬리 높이)에 오도록 맞춥니다.
+    # How far it is pushed down is the crux. Stretch about the eye centre
+    # alone and the upper half covers the eyelid and the brow, so an
+    # 'under-eye' adjustment ends up smearing the eyelid crease. The top
+    # edge is set to land just above the eye centre (at the height of the
+    # outer corner).
     polys = [_contour(points, ring, 2.0 * size, 2.1 * size, shift_y=0.85)
              for ring in rings]
     holes = [_contour(points, ring, _HOLE_MARGIN, _HOLE_MARGIN)
@@ -402,14 +445,15 @@ def _mesh_eye_shapes(region: str, points: np.ndarray, size: float) -> _Shapes:
 
 
 def _box_face_shapes(region: str, face: np.ndarray, size: float) -> _Shapes:
-    """폴백 — 모델이 없으면 YuNet 점 5개로 타원을 어림합니다."""
+    """Fallback - with no model, approximate ellipses from YuNet's 5 points."""
     fx, fy, fw, fh = face[0], face[1], face[2], face[3]
     r_mouth = np.array([face[10], face[11]])
     l_mouth = np.array([face[12], face[13]])
     mouth_width = max(4.0, float(np.linalg.norm(l_mouth - r_mouth)))
 
     if region in ("mouth", "teeth"):
-        # 점 5개로는 입술 안팎을 구분할 수 없어 치아도 입 전체로 갑니다
+        # 5 points cannot tell the inside of the lips from the outside,
+        # so teeth go as the whole mouth too
         poly = _ellipse_poly((r_mouth + l_mouth) / 2.0,
                              (mouth_width * 0.75 * size, mouth_width * 0.42 * size))
         return _Shapes([poly], mouth_width * 0.42 * size)
@@ -438,7 +482,8 @@ def _box_face_shapes(region: str, face: np.ndarray, size: float) -> _Shapes:
 
 
 def _box_eye_shapes(region: str, face: np.ndarray, size: float) -> _Shapes:
-    """폴백 — 눈 중심점 2개뿐이라 눈 모양을 알 수 없어 타원으로 어림합니다."""
+    """Fallback - with only the 2 eye centre points the eye shape is
+    unknown, so it is approximated with an ellipse."""
     right_eye = np.array([face[4], face[5]])
     left_eye = np.array([face[6], face[7]])
     eye_distance = max(4.0, float(np.linalg.norm(left_eye - right_eye)))
@@ -478,12 +523,71 @@ def _eye_alpha(mask: Mask, face: np.ndarray, h: int, w: int,
     return _rasterise(shapes, mask.feather, h, w)
 
 
+SUBJECT_MISSED = 0.35
+"""The alpha that divides off what the subject model saw as "this face is
+not the protagonist".
+
+Measured (5 people on stage): the person it adopted had a mean of 0.96
+over the face region, the discarded ones 0.000 and 0.018. Drawing the line
+anywhere in between gives the same decision, so it was set in the middle
+to avoid leaning either way."""
+
+
+def _subject_alpha(faces: np.ndarray | None, detect_bgr: np.ndarray,
+                   h: int, w: int, feather: int) -> np.ndarray | None:
+    """The subject alpha. If the model discarded anybody, only they get
+    filled in.
+
+    The model (U²-Netp) has fine edges but picks **only one
+    protagonist** - on a stage frame only the person in the centre scored
+    0.96 while the other four came in at 0.000~0.018. Quietly discarding
+    a detected face is a worse failure than a blurry edge (you apply
+    "emphasise the people" and get a photo where four of the five are
+    untouched). So only when there are discarded faces do we run the
+    older GrabCut once with those people as seeds and merge it in - a
+    frame with one or two people does not pay this cost at all (measured
+    100ms against 587ms).
+
+    With no model (the file is missing) it falls back to the inverse of
+    the background mask.
+    """
+    from .. import saliency
+
+    alpha = saliency.subject_alpha(detect_bgr)
+    if alpha is None:
+        background = _background_alpha(faces, detect_bgr, h, w, feather)
+        return None if background is None else 1.0 - background
+
+    if faces is not None and len(faces):
+        missed = []
+        for face in faces:
+            x, y, fw, fh = (int(face[0]), int(face[1]),
+                            int(face[2]), int(face[3]))
+            patch = alpha[max(0, y):y + fh, max(0, x):x + fw]
+            if patch.size and float(patch.mean()) < SUBJECT_MISSED:
+                missed.append(face)
+        if missed:
+            background = _background_alpha(np.array(missed), detect_bgr,
+                                           h, w, feather)
+            if background is not None:
+                alpha = np.maximum(alpha, 1.0 - background)
+
+    return _feather(np.clip(alpha, 0.0, 1.0).astype(np.float32), feather)
+
+
+_GRABCUT_SEED = 20250725
+"""The GrabCut random seed. The value itself means nothing; the point is
+that it is **fixed** (see _background_alpha below)."""
+
+
 def _background_alpha(faces: np.ndarray | None, detect_bgr: np.ndarray,
                       h: int, w: int, feather: int) -> np.ndarray | None:
-    """GrabCut으로 인물을 분리한 뒤 배경(인물 밖)을 돌려줍니다.
+    """Separate the people with GrabCut and return the background
+    (everything outside them).
 
-    속도를 위해 축소본에서 돌리고 결과 마스크만 원본 크기로 늘립니다. 얼굴이
-    있으면 얼굴+상체를 전경 시드로, 없으면 중앙 사각형을 시드로 씁니다.
+    For speed it runs on a shrunken copy and only the resulting mask is
+    stretched to the original size. With faces present, face + upper body
+    is the foreground seed; without, a central rectangle is the seed.
     """
     scale = min(1.0, 480.0 / max(h, w))
     sw, sh = max(1, round(w * scale)), max(1, round(h * scale))
@@ -494,7 +598,8 @@ def _background_alpha(faces: np.ndarray | None, detect_bgr: np.ndarray,
     if faces is not None:
         for face in faces:
             fx, fy, fw, fh = (v * scale for v in (face[0], face[1], face[2], face[3]))
-            # 얼굴은 확실한 전경, 그 아래 상체는 아마 전경
+            # The face is definite foreground, the upper body below it
+            # probable foreground
             bx0, by0 = int(fx - fw * 0.6), int(fy)
             bx1, by1 = int(fx + fw * 1.6), int(fy + fh * 4.5)
             cv2.rectangle(gc, (max(0, bx0), max(0, by0)),
@@ -505,11 +610,27 @@ def _background_alpha(faces: np.ndarray | None, detect_bgr: np.ndarray,
     if not seeded:
         cv2.rectangle(gc, (int(sw * 0.3), int(sh * 0.15)),
                       (int(sw * 0.7), int(sh * 0.95)), cv2.GC_PR_FGD, -1)
-    # 테두리는 확실한 배경
+    # The border is definite background
     gc[0, :] = gc[-1, :] = gc[:, 0] = gc[:, -1] = cv2.GC_BGD
 
     try:
         bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
+        # **The random seed is fixed.** GrabCut's GMM initialisation uses
+        # k-means(++), and those initial centres are drawn from OpenCV's
+        # **global** RNG. So the same input does not give the same answer
+        # - measured: running the same image four times changed 5.8% of
+        # the pixels (alpha up to 0.90), and as a result the background
+        # mask on screen and in the exported file differed by up to 30
+        # levels. Every other mask kind was identical bit for bit, so it
+        # is this one's problem alone.
+        #
+        # What you see is what you get is this app's core contract, so
+        # reproducibility matters more than randomness. The value can be
+        # any constant (it has nothing to do with whether the result is
+        # good or bad), and this is the only place in the app that uses
+        # OpenCV's randomness, so touching the global seed changes
+        # nothing elsewhere.
+        cv2.setRNGSeed(_GRABCUT_SEED)
         cv2.grabCut(small, gc, None, bgd, fgd, 3, cv2.GC_INIT_WITH_MASK)
     except cv2.error as exc:
         log.debug("GrabCut 실패: %s", exc)
@@ -525,7 +646,7 @@ def build_mask_alpha(
     faces: np.ndarray | None,
     main_face_box: tuple[float, float, float, float] | None = None,
 ) -> np.ndarray | None:
-    """마스크의 알파(float32 HxW, 0~1)를 만듭니다. 못 만들면 None."""
+    """The mask's alpha (float32 HxW, 0~1). None if it cannot be built."""
     h, w = shape[:2]
     try:
         if mask.kind is MaskType.RADIAL:
@@ -537,6 +658,9 @@ def build_mask_alpha(
 
         if mask.kind is MaskType.BACKGROUND:
             return _background_alpha(faces, detect_bgr, h, w, mask.feather)
+
+        if mask.kind is MaskType.SUBJECT:
+            return _subject_alpha(faces, detect_bgr, h, w, mask.feather)
 
         chosen = select_faces(faces, mask, detect_bgr, main_face_box)
         if not chosen:
@@ -555,11 +679,61 @@ def build_mask_alpha(
     return None
 
 
-# ---------------------------------------------------------------- 국소 조정
+def build_combined_alpha(
+    mask: Mask, shape: tuple[int, int], detect_bgr: np.ndarray,
+    faces: np.ndarray | None,
+    main_face_box: tuple[float, float, float, float] | None = None,
+) -> np.ndarray | None:
+    """The mask's **final** alpha - the inversion and the refine pieces
+    included.
+
+    The order matters: the parent's invert is applied first and the
+    pieces are laid on top of it. The other way round, "subtract the eyes
+    from the face, then invert the whole thing" becomes "invert the face,
+    then subtract the eyes", which disagrees with the order the user sees
+    in the list.
+
+    A piece's alpha reflects its own invert as well - "subtract the eyes"
+    and "subtract everything but the eyes" both have to be expressible
+    with a single piece.
+    """
+    alpha = build_mask_alpha(mask, shape, detect_bgr, faces, main_face_box)
+    if alpha is None:
+        return None
+    if mask.invert:
+        alpha = 1.0 - alpha
+
+    for piece in mask.refine:
+        if not piece.enabled:
+            continue
+        other = build_mask_alpha(piece, shape, detect_bgr, faces,
+                                 main_face_box)
+        if other is None:
+            # When a piece could not be built (a face piece on a frame
+            # with no face, and so on) we skip it quietly. Throw the
+            # parent away here too and you get "no face found, so the sky
+            # adjustment disappears wholesale".
+            continue
+        if piece.invert:
+            other = 1.0 - other
+        other = other * (piece.opacity / 100.0)
+
+        if piece.combine is MaskCombine.SUBTRACT:
+            alpha = alpha * (1.0 - other)
+        elif piece.combine is MaskCombine.INTERSECT:
+            alpha = alpha * other
+        else:
+            alpha = np.maximum(alpha, other)
+
+    return np.clip(alpha, 0.0, 1.0).astype(np.float32)
+
+
+# ------------------------------------------------------------ local adjustment
 
 
 def _local_white_balance(image: np.ndarray, temperature: int, tint: int) -> np.ndarray:
-    """국소 색온도(상대 이동)와 색조. 전역의 절대 Kelvin과 달리 단순 채널 게인."""
+    """Local temperature (a relative shift) and tint. Unlike the global
+    absolute Kelvin, this is a plain channel gain."""
     result = image.copy()
     if temperature:
         warm = temperature / 100.0 * 0.30
@@ -571,7 +745,8 @@ def _local_white_balance(image: np.ndarray, temperature: int, tint: int) -> np.n
 
 
 def _smooth(image: np.ndarray, amount: int) -> np.ndarray:
-    """피부 부드럽게 — 엣지를 보존하는 bilateral 블러를 비율만큼 섞습니다."""
+    """Skin smoothing - an edge-preserving bilateral blur mixed in by the
+    given proportion."""
     strength = amount / 100.0
     as_uint8 = np.clip(image, 0, 255).astype(np.uint8)
     d = int(5 + 4 * strength)
@@ -582,11 +757,13 @@ def _smooth(image: np.ndarray, amount: int) -> np.ndarray:
 
 def apply_local(image: np.ndarray, adjust: LocalAdjustments,
                 profiled: bool = True) -> np.ndarray:
-    """float BGR 이미지(마스크 bbox 잘린 조각)에 국소 조정을 적용합니다.
+    """Apply the local adjustment to a float BGR image (the piece cut out
+    at the mask bbox).
 
-    profiled는 이 조각이 놓인 공간입니다 — 전역 노출과 **같은 곡선**으로
-    되돌려야 국소 노출 +1EV와 전역 +1EV가 같은 양의 빛을 뜻합니다
-    (engine._baseline_transfer 참고).
+    profiled is the space this piece sits in - it has to be undone with
+    **the same curve** as the global exposure for a local +1EV and a
+    global +1EV to mean the same amount of light (see
+    engine._baseline_transfer).
     """
     result = image.astype(np.float32, copy=True)
 
@@ -595,8 +772,27 @@ def apply_local(image: np.ndarray, adjust: LocalAdjustments,
         highlights=adjust.highlights, shadows=adjust.shadows,
         whites=adjust.whites, blacks=adjust.blacks,
     )
+    # Tone and curve are both 256-slot tables, so they are merged into
+    # one and applied once - the global pipeline (engine.apply_settings)
+    # does the same, and interpolating twice slips in one more
+    # intermediate rounding, which changes the picture slightly.
+    lut = None
     if tone != BasicSettings():
-        result = _apply_lut(result, _tone_lut(tone, profiled))
+        lut = _tone_lut(tone, profiled)
+    if not adjust.curve.is_neutral():
+        curve = _curve_lut(adjust.curve)
+        lut = curve if lut is None else np.interp(lut, _IDENTITY, curve)
+    if lut is not None:
+        result = _apply_lut(result, lut.astype(np.float32))
+
+    # Per-channel curves go per channel - the same rule as the global one.
+    for channel, points in ((2, adjust.curve.points_red),
+                            (1, adjust.curve.points_green),
+                            (0, adjust.curve.points_blue)):
+        if points:
+            channel_lut = _spline_lut(curve_control_points(points))
+            result[:, :, channel] = _apply_lut(
+                result[:, :, channel][:, :, None], channel_lut)[:, :, 0]
 
     if adjust.temperature or adjust.tint:
         result = _local_white_balance(result, adjust.temperature, adjust.tint)
@@ -620,19 +816,22 @@ def apply_local(image: np.ndarray, adjust: LocalAdjustments,
     return result
 
 
-# ---------------------------------------------------------------- 진입점
+# ---------------------------------------------------------------- entry point
 
 
 def apply_masks(image: np.ndarray, masks, detect_bgr: np.ndarray | None = None,
                 main_face_box: tuple[float, float, float, float] | None = None,
                 profiled: bool = True) -> np.ndarray:
-    """전역 보정이 끝난 float 이미지에 마스크들을 순서대로 합성합니다.
+    """Composite the masks in order onto a float image whose global
+    adjustments are finished.
 
-    detect_bgr(얼굴 검출용 uint8)를 안 주면 image에서 만듭니다. 얼굴 검출은
-    얼굴 계열 마스크가 하나라도 있을 때만 한 번 수행해 재사용합니다.
+    If detect_bgr (uint8, for face detection) is not given, it is built
+    from image. Face detection is performed once, and only when there is
+    at least one face-family mask, then reused.
 
-    main_face_box는 분석이 고른 주 피사체의 정규화 좌표입니다(apply_settings 참고).
-    profiled는 국소 노출이 되돌릴 곡선을 고릅니다(apply_local 참고).
+    main_face_box is the normalised coordinate of the main subject the
+    analysis picked (see apply_settings). profiled picks the curve the
+    local exposure will undo with (see apply_local).
     """
     active = [m for m in masks if not m.is_neutral()]
     if not active:
@@ -641,18 +840,22 @@ def apply_masks(image: np.ndarray, masks, detect_bgr: np.ndarray | None = None,
     if detect_bgr is None:
         detect_bgr = np.clip(image, 0, 255).astype(np.uint8)
 
+    # The refine pieces have to be counted too - there are combinations
+    # like "subtract the face from the sky mask" where the parent is not
+    # face-family but the piece is. Miss it and faces is None, so that
+    # piece is quietly ignored.
     faces = None
-    if any(m.kind in _FACE_KINDS for m in active):
+    kinds = {m.kind for m in active}
+    kinds.update(piece.kind for m in active for piece in m.refine)
+    if kinds & _FACE_KINDS:
         faces = _detect_faces_full(detect_bgr)
 
     result = image
     for mask in active:
-        alpha = build_mask_alpha(mask, result.shape, detect_bgr, faces,
-                                 main_face_box)
+        alpha = build_combined_alpha(mask, result.shape, detect_bgr, faces,
+                                     main_face_box)
         if alpha is None:
             continue
-        if mask.invert:
-            alpha = 1.0 - alpha
         alpha = alpha * (mask.opacity / 100.0)
 
         ys, xs = np.where(alpha > 0.004)
@@ -669,32 +872,34 @@ def apply_masks(image: np.ndarray, masks, detect_bgr: np.ndarray | None = None,
     return result
 
 
-# ---------------------------------------------------------------- 브러시 인코딩
+# -------------------------------------------------------------- brush encoding
 
 
 def mask_overlay_alpha(
     mask: Mask, image_bgr: np.ndarray,
     main_face_box: tuple[float, float, float, float] | None = None,
 ) -> np.ndarray | None:
-    """UI 오버레이용 알파. 필요하면 얼굴을 검출해 build_mask_alpha에 넘깁니다.
+    """The alpha for the UI overlay. Detects faces and passes them along
+    if needed.
 
-    invert는 여기서 반영해, 사용자가 실제 영향받는 영역을 보게 합니다.
+    It uses **the same compositing as the render**
+    (build_combined_alpha) - the inversion and the refine pieces are
+    reflected here too. Let them diverge and the region painted red
+    differs from the region actually adjusted, and that makes the masks
+    impossible to trust.
     """
     faces = None
-    if mask.kind in _FACE_KINDS:
+    kinds = {mask.kind, *(piece.kind for piece in mask.refine)}
+    if kinds & _FACE_KINDS:
         detect = image_bgr if image_bgr.dtype == np.uint8 else np.clip(image_bgr, 0, 255).astype(np.uint8)
         faces = _detect_faces_full(detect)
-    alpha = build_mask_alpha(mask, image_bgr.shape, image_bgr, faces,
-                             main_face_box)
-    if alpha is None:
-        return None
-    if mask.invert:
-        alpha = 1.0 - alpha
-    return alpha
+    return build_combined_alpha(mask, image_bgr.shape, image_bgr, faces,
+                                main_face_box)
 
 
 def encode_brush(alpha_small: np.ndarray) -> str:
-    """축소된 알파(0~1 또는 0~255)를 base64 PNG로. 브러시 UI에서 씁니다."""
+    """A shrunken alpha (0~1 or 0~255) into a base64 PNG. Used by the
+    brush UI."""
     if alpha_small.dtype != np.uint8:
         alpha_small = np.clip(alpha_small * 255.0, 0, 255).astype(np.uint8)
     ok, buffer = cv2.imencode(".png", alpha_small)

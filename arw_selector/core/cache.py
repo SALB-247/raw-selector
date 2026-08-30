@@ -1,8 +1,9 @@
-"""분석 결과 캐시.
+"""Cache of the analysis results.
 
-4000장 분석은 몇 분이 걸립니다. 임계값을 조정하거나 GUI를 다시 열 때맙니다
-그걸 반복하면 사용할 수 없습니다. 파일이 안 바뀌었고 분석 파라미터도 같으면
-저장해둔 결과를 그대로 씁니다.
+Analysing 4000 frames takes minutes. Repeating that every time you adjust a
+threshold or reopen the GUI makes the tool unusable. If the file has not
+changed and the analysis parameters are the same, the stored result is used
+as it is.
 """
 
 from __future__ import annotations
@@ -26,10 +27,12 @@ CACHE_FILE_NAME = "analysis.sqlite"
 
 
 def resolve_cache_dir(folder: Path) -> Path:
-    """폴더의 캐시 디렉터리. 예전 이름으로 만들어진 것도 계속 씁니다.
+    """The folder's cache directory. One made under the old name keeps
+    being used.
 
-    제품명이 바뀌어도 이미 분석해 둔 폴더를 다시 분석하게 만들지 않기
-    위해서입니다. 새 이름이 없고 예전 이름이 있으면 그쪽을 그대로 씁니다.
+    This is so that a change of product name does not force a folder that
+    has already been analysed to be analysed again. If the new name is not
+    there and an old one is, that one is used as it is.
     """
     folder = Path(folder)
     current = folder / CACHE_DIR_NAME
@@ -42,41 +45,52 @@ def resolve_cache_dir(folder: Path) -> Path:
     return current
 
 SCHEMA_VERSION = 9
-"""스키마나 payload 구성이 바뀌면 올립니다. 기존 캐시는 버려집니다.
+"""Bumped whenever the schema or the payload layout changes. The existing
+cache is then thrown away.
 
-v2: 그룹핑용 dhash 추가. 예전 캐시는 dhash가 없어 그룹핑이 시각 정보만으로
-조용히 퇴화하므로, 다시 분석하게 만듭니다.
+v2: dhash added for grouping. Old caches have no dhash, so grouping quietly
+degrades to the visual signal alone - we make them analyse again.
 
-v3: 얼굴 박스 전체(faces)와 주 피사체 인덱스(main_face) 추가. 없으면 화면에
-얼굴을 하나도 못 그리고, 주 피사체 선정도 예전(면적 기준) 결과가 그대로
-남습니다. 초점 기준으로 다시 고르게 하려면 재분석이 필요합니다.
+v3: the full set of face boxes (faces) and the main subject index
+(main_face) added. Without them not one face can be drawn on screen, and
+the main subject pick stays the old (area-based) result. Re-analysis is
+needed to have it picked on focus instead.
 
-v4: roi·faces 좌표의 기준 크기(source_width/height)와 얼굴 검출 임계값 변경.
-기준 크기가 없으면 화면 쪽에서 "내장 프리뷰 가로 = 센서 가로"로 어림잡는데,
-파나소닉 S1R처럼 4700만 화소에 1920px 프리뷰만 넣는 바디에서 박스가 4.37배
-어긋났습니다. 임계값도 올려서 오검출(모자의 고양이 귀 등)을 걸러냅니다.
+v4: the reference size for the roi and faces coordinates
+(source_width/height), plus a change to the face detection threshold.
+Without the reference size the screen side guesses "embedded preview width
+= sensor width", and on a body like the Panasonic S1R that puts only a
+1920px preview into 47 megapixels the boxes were 4.37x off. The threshold
+was raised too, to filter out false detections (cat ears on a hat and the
+like).
 
-v5: 주 피사체 얼굴 선정 기준 교체. 선명도를 패치 분산으로 나눠 비교하던 것을
-정규화 없는 그래디언트 에너지로 바꾸고, 명암이 거의 없는 조각을 후보에서
-뺐습니다. **main_face는 캐시에 저장되는 값이라 버전을 올리지 않으면 예전
-결과가 그대로 보입니다** — 실제로 고친 뒤에도 화면이 그대로여서 한참 헤맸습니다.
+v5: the criterion for picking the main subject face was replaced. Comparing
+sharpness divided by patch variance became gradient energy with no
+normalisation, and patches with almost no contrast were dropped from the
+candidates. **main_face is a value stored in the cache, so without a
+version bump the old result keeps showing** - the screen really did stay
+the same after the fix and it took a long time to work out why.
 
-v6: 주 피사체의 눈 개폐(eyes_open) 추가. 없으면 -1(못 잼)로 남아 눈 감김
-감점이 영원히 걸리지 않습니다. 값이 캐시에 들어가는 종류라 재분석해야
-합니다.
+v6: eye open/closed for the main subject (eyes_open) added. Without it it
+stays -1 (could not measure) and the closed-eye penalty never applies at
+all. It is the kind of value that goes into the cache, so it has to be
+re-analysed.
 
-v7: 카메라 AF가 가리킨 얼굴(af_face) 추가 — AF↔주 피사체 불일치를 "불확실"
-신뢰도 신호로 씁니다. 없으면 -1로 남아 신호가 영원히 안 뜹니다. 점수는
-안 바뀌지만 캐시에 들어가는 값이라 재분석합니다.
+v7: the face the camera's AF pointed at (af_face) added - an AF <-> main
+subject mismatch is used as an "uncertain" confidence signal. Without it it
+stays -1 and the signal never appears. The score does not change, but it is
+a value that goes into the cache, so re-analyse.
 
-v8: 카메라가 직접 뽑은 JPEG에서도 AF 위치를 읽습니다(캐논·니콘). v7까지는
-JPEG이 af_face=-1로 굳어 있어서, 안 올리면 이미 분석해 둔 JPEG은 영원히
-신호가 안 뜹니다. 구형 DSLR의 다점 AFInfo2 처리도 같이 들어가, CR3의
-다점 컷이 있었다면 상자가 달라집니다.
+v8: the AF position is now read from JPEGs the camera produced itself
+(Canon, Nikon). Up to v7 JPEGs were frozen at af_face=-1, so without a bump
+JPEGs already analysed would never show the signal. Handling of multi-point
+AFInfo2 on older DSLRs went in at the same time, so if there were
+multi-point CR3 frames the boxes change.
 
-v9: 메타데이터에 환산 초점거리(focal_length_35mm)와 AF 영역 모드
-(af_area_mode) 추가 — 상세정보 패널 표시용. 안 올리면 예전 캐시가
-None으로 조용히 되살아나 패널에 그 두 줄만 영영 빕니다.
+v9: the 35mm-equivalent focal length (focal_length_35mm) and the AF area
+mode (af_area_mode) added to the metadata - for display in the details
+panel. Without a bump the old cache quietly comes back with None and just
+those two lines stay empty in the panel forever.
 """
 
 _SCHEMA = """
@@ -95,13 +109,14 @@ CREATE TABLE IF NOT EXISTS meta (
 
 
 def default_cache_path(folder: Path) -> Path:
-    """촬영 폴더 옆에 캐시를 둡니다. 폴더를 전체가 옮겨도 따라갑니다."""
+    """The cache sits next to the shooting folder. Move the whole folder and
+    it comes along."""
     return resolve_cache_dir(folder) / CACHE_FILE_NAME
 
 
 @dataclass(frozen=True)
 class CacheStats:
-    """캐시가 지금 얼마나 자리를 차지하고 있는지."""
+    """How much room the cache is taking up right now."""
 
     exists: bool = False
     analysis_entries: int = 0
@@ -114,8 +129,8 @@ class CacheStats:
     def total_bytes(self) -> int:
         return self.analysis_bytes + self.thumbnail_bytes
 
-    # 표시 단위는 전부 MiB로 통일합니다. 부분과 합계에서 단위가 갈리면
-    # 사용자가 보기에 숫자가 안 맞습니다.
+    # The display unit is MiB throughout. If the parts and the total use
+    # different units, the numbers do not add up as the user sees them.
     @staticmethod
     def _mb(value: int) -> float:
         return value / (1024 * 1024)
@@ -142,7 +157,8 @@ class CacheStats:
 
 
 def cache_stats(folder: Path) -> CacheStats:
-    """폴더의 캐시 상태를 조사합니다. 없거나 읽을 수 없으면 빈 값."""
+    """Inspects the folder's cache state. Empty values if it is missing or
+    unreadable."""
     cache_dir = resolve_cache_dir(folder)
     if not cache_dir.exists():
         return CacheStats()
@@ -152,7 +168,7 @@ def cache_stats(folder: Path) -> CacheStats:
     entries = 0
 
     if db_path.exists():
-        # WAL/SHM 파일도 캐시 용량에 포함됩니다
+        # the WAL/SHM files count towards the cache size too
         for suffix in ("", "-wal", "-shm"):
             candidate = Path(str(db_path) + suffix)
             if candidate.exists():
@@ -164,7 +180,7 @@ def cache_stats(folder: Path) -> CacheStats:
             with closing(sqlite3.connect(db_path)) as conn:
                 entries = conn.execute("SELECT COUNT(*) FROM analysis").fetchone()[0]
         except sqlite3.Error:
-            entries = 0  # 손상된 캐시 — 개수는 몰라도 삭제는 할 수 있습니다
+            entries = 0  # damaged cache - we cannot count it but we can delete it
 
     thumb_dir = cache_dir / "thumbs"
     thumbnail_count = 0
@@ -188,11 +204,10 @@ def cache_stats(folder: Path) -> CacheStats:
 
 
 def clear_cache(folder: Path, keep_logs: bool = True) -> CacheStats:
-    """캐시를 지웁니다. 지우기 직전 상태를 반환합니다.
+    """Clears the cache. Returns the state as it was just before clearing.
 
-    내보내기 로그는 기본적으로 남긴다 — 그게 사라지면 되돌리기를 할 수
-    없게 되는데, 사용자는 '캐시 삭제'가 되돌리기를 없앨 거라고 예상하지
-    않습니다.
+    Export logs are kept by default - if they go, undo becomes impossible,
+    and a user does not expect 'clear cache' to take undo away.
     """
     stats = cache_stats(folder)
     cache_dir = resolve_cache_dir(folder)
@@ -225,7 +240,7 @@ def clear_cache(folder: Path, keep_logs: bool = True) -> CacheStats:
             except OSError:
                 pass
 
-    # 안이 비었으면 폴더 자체도 치웁니다
+    # if the inside is empty, clear away the folder itself too
     try:
         if not any(cache_dir.iterdir()):
             cache_dir.rmdir()
@@ -235,19 +250,20 @@ def clear_cache(folder: Path, keep_logs: bool = True) -> CacheStats:
     return stats
 
 
-# ---------------------------------------------------------------- 직렬화
+# ------------------------------------------------------------ serialisation
 
 
 def _serialize(record: ImageRecord) -> str:
-    """캐시에 넣을 부분만 직렬화합니다.
+    """Serialises only the part that goes into the cache.
 
-    group_id / grade / score는 배치 전체를 봐야 정해지는 값이라 캐시하지
-    않습니다. 파일 하나만 보고 결정되는 focus와 metadata만 저장합니다.
+    group_id / grade / score are values that can only be settled by looking
+    at the whole batch, so they are not cached. Only focus and metadata,
+    which are decided from the one file alone, are stored.
     """
     metadata = None
     if record.metadata:
         metadata = asdict(record.metadata)
-        metadata.pop("path", None)  # 키가 곧 경롭니다
+        metadata.pop("path", None)  # the key is the path
         if record.metadata.capture_time:
             metadata["capture_time"] = record.metadata.capture_time.isoformat()
 
@@ -270,7 +286,8 @@ def _serialize(record: ImageRecord) -> str:
 
 
 def _deserialize(path: Path, payload: str) -> ImageRecord | None:
-    """캐시 손상은 캐시 미스로 취급합니다 — 배치를 죽이지 않습니다."""
+    """A damaged cache is treated as a cache miss - it does not kill the
+    batch."""
     try:
         data = json.loads(payload)
     except (json.JSONDecodeError, TypeError):
@@ -279,9 +296,10 @@ def _deserialize(path: Path, payload: str) -> ImageRecord | None:
     if not isinstance(data, dict):
         return None
 
-    # 페이로드가 조금이라도 어긋나면 (예전 버전이 남긴 필드 구성, 손상 등)
-    # 조용히 캐시 미스로 떨어뜨립니다. 다시 분석하면 그만이고, 무리하게 복원해서
-    # 틀린 값을 쓰는 것보다 훨씬 낫습니다.
+    # If the payload is off in any way (a field layout left by an older
+    # version, damage, and so on) it is quietly dropped to a cache miss.
+    # Analysing again is all it costs, and that is far better than forcing
+    # a restore and using wrong values.
     try:
         metadata = None
         if data.get("metadata"):
@@ -296,8 +314,9 @@ def _deserialize(path: Path, payload: str) -> ImageRecord | None:
             values["source"] = FocusSource(values["source"])
             if values.get("roi"):
                 values["roi"] = tuple(values["roi"])
-            # JSON은 튜플을 리스트로 되돌려 줍니다. 그대로 두면 저장 전후의
-            # FocusResult가 서로 달라져 비교와 테스트가 어긋납니다.
+            # JSON hands tuples back as lists. Left as they are, the
+            # FocusResult before and after storing differ from each other
+            # and comparisons and tests go out of step.
             if values.get("faces"):
                 values["faces"] = tuple(tuple(box) for box in values["faces"])
             if values.get("face_scores"):
@@ -316,11 +335,12 @@ def _deserialize(path: Path, payload: str) -> ImageRecord | None:
     )
 
 
-# ---------------------------------------------------------------- 캐시 본체
+# -------------------------------------------------------- the cache itself
 
 
 class AnalysisCache:
-    """파일 지문 + 파라미터 지문이 모두 맞을 때만 히트로 칩니다."""
+    """It counts as a hit only when the file fingerprint and the parameter
+    fingerprint both match."""
 
     def __init__(self, db_path: Path, params_key: str):
         self.db_path = Path(db_path)
@@ -337,11 +357,13 @@ class AnalysisCache:
     def open(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
-        # PRAGMA는 반드시 연결 직후, 트랜잭션이 열리기 전에 걸어야 합니다.
-        # 스키마 생성이나 INSERT 뒤로 밀면 sqlite가 "Safety level may not be
-        # changed inside a transaction"으로 거부합니다.
-        # 4000건 쓰기는 기본 동기화 모드에서 너무 느린데, 캐시는 유실돼도
-        # 재분석하면 그만이라 내구성을 조금 양보합니다.
+        # The PRAGMAs have to be set right after connecting, before any
+        # transaction opens. Push them behind the schema creation or an
+        # INSERT and sqlite refuses with "Safety level may not be changed
+        # inside a transaction".
+        # Writing 4000 entries is far too slow in the default synchronous
+        # mode, and losing the cache only costs a re-analysis, so we give
+        # up a little durability.
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA synchronous = NORMAL")
         self._conn.executescript(_SCHEMA)
@@ -381,14 +403,14 @@ class AnalysisCache:
         return stat.st_mtime, stat.st_size
 
     def get_many(self, paths: list[Path]) -> dict[Path, ImageRecord]:
-        """캐시에 있는 것만 골라 돌려줍니다. 없으면 빠집니다."""
+        """Returns only what is in the cache. Anything missing drops out."""
         if self._conn is None or not paths:
             return {}
 
         wanted = {str(p): p for p in paths}
         hits: dict[Path, ImageRecord] = {}
 
-        # SQLite 변수 개수 제한(기본 999)을 넘지 않게 나눠 조회합니다
+        # split the query so it stays under SQLite's variable limit (999)
         keys = list(wanted)
         for start in range(0, len(keys), 500):
             chunk = keys[start:start + 500]
@@ -403,7 +425,7 @@ class AnalysisCache:
                 path = wanted[path_str]
                 current = self.fingerprint(path)
                 if current is None or current[0] != mtime or current[1] != size:
-                    continue  # 파일이 바뀌었다 — 다시 분석해야 합니다
+                    continue  # the file changed - it has to be analysed again
                 record = _deserialize(path, payload)
                 if record is not None:
                     hits[path] = record
@@ -411,11 +433,13 @@ class AnalysisCache:
         return hits
 
     def count_ready(self, paths: list[Path]) -> int:
-        """이 경로들 중 캐시를 그대로 쓸 수 있는 장수.
+        """How many of these paths can use the cache as it is.
 
-        분석 시작 다이얼로그가 "몇 장은 즉시, 몇 장은 새로 분석"을 보여 주는
-        데 씁니다. get_many와 같은 판정(파라미터 지문 + 파일 지문)을 쓰되
-        payload를 역직렬화하지 않아 수천 장에서도 즉답입니다.
+        Used by the start-of-analysis dialog to show "this many instantly,
+        this many analysed afresh". It uses the same test as get_many (the
+        parameter fingerprint plus the file fingerprint) but does not
+        deserialise the payload, so it answers instantly even for thousands
+        of frames.
         """
         if self._conn is None or not paths:
             return 0

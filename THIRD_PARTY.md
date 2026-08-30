@@ -111,8 +111,26 @@ version 1. That cache is generated, not redistributed.
   - Verified 2026-07-25. Apache-2.0 and MIT both permit redistribution;
     keep this attribution with any release that ships the file.
 
-Both licences (MIT, Apache-2.0) permit redistribution, so no removal is
-required. Both models also fail soft anyway: if they are missing the app
-still builds and runs, it just loses face detection and the eye/mask
-features — and a missing model is silent, so `--selftest` checks for both
-explicitly.
+### Subject segmentation model — `arw_selector/core/models/u2netp.onnx`
+
+- 4.4 MB, U²-Net (the small `u2netp` variant), salient object detection
+- **Apache-2.0** (copyright Xuebin Qin et al.).
+  <https://github.com/xuebinqin/U-2-Net/blob/master/LICENSE>
+- The exact file OpenCV itself registers in
+  `samples/dnn/models.yml` for its segmentation sample, distributed as a
+  release asset of `danielgatis/rembg`
+  (sha1 `0a99236f0d5c1916a99a8c401b23e5ef32038606`, verified 2026-08-08).
+  Bundling the same weights the upstream toolchain points at.
+- **Note on the training data.** The U²-Net repository is Apache-2.0 and
+  makes no carve-out for the weights, but the training set (DUTS-TR) does
+  not carry an explicit licence grant of its own. Apache-2.0 over the
+  repository plus OpenCV's own redistribution-by-reference is the basis
+  for shipping it. If a stricter position is ever needed, PP-HumanSeg
+  (OpenCV Zoo, Apache-2.0 licence file sitting next to the weights) is a
+  drop-in alternative for the person-only case.
+
+All three licences (MIT, Apache-2.0) permit redistribution, so no removal
+is required. All three models also fail soft: if they are missing the app
+still builds and runs — it loses face detection, the eye/mask features, or
+falls back to GrabCut for the subject mask. A missing model is silent, so
+`--selftest` checks for all three explicitly.

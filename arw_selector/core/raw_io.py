@@ -1,8 +1,9 @@
-"""RAW 파일 입출력.
+"""RAW file input and output.
 
-4000장 배치를 실용적인 시간 안에 처리하려면 풀 디모자이크는 쓸 수 없습니다
-(장당 1~2초). 대신 RAW에 내장된 full-size JPEG 프리뷰를 꺼내 씁니다.
-A6700은 약 6000x4000 프리뷰를 넣어주므로 초점 판정에는 충분합니다.
+Getting a 4000-frame batch through in a practical amount of time rules out a
+full demosaic (1~2 seconds per frame). We pull out the full-size JPEG preview
+embedded in the RAW instead. The A6700 embeds roughly a 6000x4000 preview,
+which is plenty for focus scoring.
 """
 
 from __future__ import annotations
@@ -23,13 +24,13 @@ log = logging.getLogger(__name__)
 
 RAW_EXTENSIONS = {
     ".arw", ".srf", ".sr2",           # Sony
-    ".cr2", ".cr3", ".crw",           # Canon (CR3는 LibRaw 0.20 이상)
+    ".cr2", ".cr3", ".crw",           # Canon (CR3 needs LibRaw 0.20+)
     ".nef", ".nrw",                   # Nikon
     ".raf",                           # Fujifilm
     ".orf",                           # Olympus / OM System
     ".rw2",                           # Panasonic
     ".pef", ".ptx",                   # Pentax
-    ".dng",                           # Adobe 범용
+    ".dng",                           # Adobe, general purpose
     ".srw",                           # Samsung
     ".3fr", ".fff",                   # Hasselblad
     ".iiq",                           # Phase One
@@ -40,27 +41,30 @@ RAW_EXTENSIONS = {
     ".erf",                           # Epson
     ".mef",                           # Mamiya
     ".bay",                           # Casio
-    ".raw",                           # Panasonic/Leica 구형 및 범용
+    ".raw",                           # Panasonic/Leica legacy, general use
 }
-"""지원 확장자입니다.
+"""The supported extensions.
 
-LibRaw 0.22.1이 다루는 포맷들입니다. A6700(ARW)이 주 대상이지만 같은
-셀렉트 흐름이 다른 기종에도 그대로 적용됩니다.
+These are the formats LibRaw 0.22.1 handles. The A6700 (ARW) is the main
+target, but the same culling flow applies unchanged to other bodies.
 
-실제 파일로 확인한 것은 ARW(ILCE-6700)와 CR3(EOS R6 Mark II)입니다.
-나머지는 LibRaw 지원 목록에 근거하며, 열리지 않는 파일은 분석 단계에서
-오류로 기록되고 배치는 계속 진행됩니다.
+What we verified against real files is ARW (ILCE-6700) and CR3 (EOS R6
+Mark II). The remainder are based on LibRaw's supported list; a file that
+will not open is recorded as an error during analysis and the batch
+carries on.
 
-`.raw`는 제조사마다 다르게 쓰는 범용 확장자라 RAW가 아닌 파일이 걸릴 수
-있습니다. 그 경우 LibRaw가 열지 못하고 해당 장만 실패로 남습니다.
+`.raw` is a general-purpose extension every manufacturer uses differently, so
+a file that is not RAW at all can end up here. In that case LibRaw fails to
+open it and only that one frame is left as a failure.
 
-확장자 비교는 항상 lower()로 합니다. 카메라마다 대소문자가 제각각이고
-(.ARW/.arw, .NEF/.nef), 파일시스템이 구분하는지도 제각각이기 때문입니다 —
-맥의 기본 APFS는 대소문자를 **구분하지 않고**, 리눅스의 ext4는 구분하며,
-맥도 포맷할 때 구분하도록 고를 수 있습니다.
+Extension comparison always goes through lower(). Cameras differ on case
+(.ARW/.arw, .NEF/.nef), and so does whether the filesystem distinguishes it -
+the Mac's default APFS is **case-insensitive**, Linux's ext4 is
+case-sensitive, and a Mac can be formatted to be case-sensitive as well.
 """
 
-#: 작업 공간 이름 → LibRaw이 아는 출력 색공간 (develop/icc.py의 WORKING_SPACE).
+#: Working space name -> the output colour space LibRaw knows
+#: (WORKING_SPACE in develop/icc.py).
 _RAWPY_COLOR_SPACE = {
     "srgb": rawpy.ColorSpace.sRGB,
     "adobe_rgb": rawpy.ColorSpace.Adobe,
@@ -68,51 +72,56 @@ _RAWPY_COLOR_SPACE = {
 }
 
 JPEG_EXTENSIONS = {".jpg", ".jpeg"}
-"""바로 열 수 있는 압축 이미지. cv2로 디코드됩니다 — 실측 확인."""
+"""Compressed images that open directly. cv2 decodes them - measured."""
 
 HEIF_EXTENSIONS = {".hif", ".heic", ".heif"}
-"""HEIF 계열. 소니는 .HIF, 애플은 .HEIC로 씁니다.
+"""The HEIF family. Sony writes .HIF, Apple writes .HEIC.
 
-둘 다 ISO-BMFF 컨테이너(ftyp heix 등)라 cv2·PIL·rawpy 어느 것도 못 엽니다.
-`pillow-heif`(libheif)가 필수 의존인 이유입니다 — 실측으로 확인:
+Both are ISO-BMFF containers (ftyp heix and the like), so none of cv2, PIL or
+rawpy can open them. That is why `pillow-heif` (libheif) is a hard
+dependency - confirmed by measurement:
 
-    DSC02290.HIF (ftyp heix, 8.7MB) → 6192×4128, 얼굴 6개
-    같은 장면 ARW와 선명도 61.6 대 60.8
+    DSC02290.HIF (ftyp heix, 8.7MB) -> 6192x4128, 6 faces
+    sharpness 61.6 against 60.8 for the ARW of the same scene
 
-libheif는 LGPL-3입니다. 배포 조건은 THIRD_PARTY.md 를 보십시오.
+libheif is LGPL-3. See THIRD_PARTY.md for the distribution terms.
 """
 
 EDITABLE_IMAGE_EXTENSIONS = JPEG_EXTENSIONS | HEIF_EXTENSIONS
-"""RAW가 없을 때 대신 판정·보정할 수 있는 형식.
+"""Formats we can score and adjust in place of a RAW when there is none.
 
-JPEG만 찍는 사람들이 있습니다. 그런 파일도 셀렉트와 보정을 할 수 있어야
-합니다 — 다만 latitude가 다릅니다. 센서 데이터가 아니라 이미 현상되어
-8비트로 눌린 결과라, 날아간 하이라이트는 돌아오지 않고 큰 노출·색온도
-조정에서 계조가 끊깁니다. `is_editable_image()`로 구분해 화면에 알립니다.
+Some people only ever shoot JPEG. Those files have to be cullable and
+adjustable too - the latitude is simply different. They are not sensor data
+but an already developed result squeezed into 8 bits, so blown highlights do
+not come back and gradation breaks up under large exposure or colour
+temperature adjustments. `is_editable_image()` tells them apart and says so
+on screen.
 """
 
 RAW_FILE_FILTER = (
     "RAW 파일 (" + " ".join(f"*{e}" for e in sorted(RAW_EXTENSIONS)) + ")"
     ";;이미지 (" + " ".join(f"*{e}" for e in sorted(EDITABLE_IMAGE_EXTENSIONS)) + ")"
 )
-"""파일 대화상자용 필터 문자열."""
+"""Filter string for the file dialog."""
 
 SIDECAR_EXTENSIONS = {".jpg", ".jpeg", ".xmp", ".arw.xmp"}
-"""RAW와 짝지어 함께 옮겨야 하는 파일들."""
+"""Files that are paired with a RAW and have to move along with it."""
 
 SMALL_PREVIEW_EXTENSIONS = {".rw2"}
-"""내장 프리뷰가 센서보다 훨씬 작다고 **알려진** 형식.
+"""Formats **known** to embed a preview far smaller than the sensor.
 
-분석 시작 창이 옵션을 보일지, 시간을 얼마로 잡을지 정할 때만 씁니다 —
-파일을 열지 않고 세어야 하기 때문입니다. 실제 판단은 파일마다
-프리뷰/센서 비를 직접 재서 합니다(load_preview). 그래서 이 목록에 없는
-기종이 같은 사정이어도 옵션을 켜면 함께 구제되고, 목록에 있어도 프리뷰가
-충분히 크면 그냥 넘어갑니다.
+Used only to decide whether the analysis start dialog offers the option and
+what time estimate to quote - it has to count the files without opening
+them. The real decision is made per file, by measuring the preview/sensor
+ratio directly (load_preview). So a body that is not on this list but is in
+the same situation is rescued along with the rest once the option is on, and
+a body that is on the list is simply passed over if its preview is large
+enough.
 """
 
 
 def has_small_preview(path: Path) -> bool:
-    """이 파일이 '작은 프리뷰' 형식으로 알려져 있는가 (확장자만 봅니다)."""
+    """Is this file a known 'small preview' format (extension only)?"""
     return path.suffix.lower() in SMALL_PREVIEW_EXTENSIONS
 
 
@@ -121,59 +130,64 @@ def is_raw(path: Path) -> bool:
 
 
 def is_editable_image(path: Path) -> bool:
-    """RAW가 아니지만 직접 판정·보정할 수 있는 파일인지."""
+    """Whether this is not a RAW but can still be scored and adjusted."""
     return path.suffix.lower() in EDITABLE_IMAGE_EXTENSIONS
 
 
 @dataclass(frozen=True)
 class RawMetadata:
-    """RAW EXIF에서 뽑아낸, 그룹핑과 진단에 필요한 최소 정보."""
+    """The minimum pulled from RAW EXIF that grouping and diagnostics need."""
 
     path: Path
     capture_time: datetime | None = None
     camera_model: str | None = None
     camera_make: str | None = None
-    """제조사(EXIF Make). 렌즈 DB 조회에서 바디 이름을 만들 때 씁니다.
+    """Manufacturer (EXIF Make). Used to build the body name for lens DB
+    lookups.
 
-    카메라 EXIF의 Model에는 제조사가 안 들어갑니다("EOS R6 Mark II"). 반면
-    lensfun은 제조사를 붙여 씁니다("Canon EOS R6m2").
+    The camera's EXIF Model does not carry the manufacturer ("EOS R6 Mark
+    II"), whereas lensfun writes it with the manufacturer attached
+    ("Canon EOS R6m2").
     """
 
     lens_model: str | None = None
     iso: int | None = None
-    shutter_speed: float | None = None  # 초 단위
+    shutter_speed: float | None = None  # in seconds
     aperture: float | None = None
     focal_length: float | None = None
     focal_length_35mm: float | None = None
-    """환산 초점거리(35mm 기준). 상세정보 패널 표시용.
+    """Equivalent focal length (35mm basis). For the details panel.
 
-    소니·니콘은 EXIF FocalLengthIn35mmFilm에 바로 있지만 **캐논은 그 태그를
-    아예 쓰지 않아**(실측 305장 중 캐논 0장) FocalPlane 해상도 태그로 센서
-    크기를 역산해 환산계수를 곱합니다 — exiftool의 ScaleFactor35efl과 같은
-    방식, 실측 오차 ±0.3%(R6M3 1.002, R3 1.000, R5 0.998). RW2는 내장 JPEG
-    ExifIFD 0xA405에 평문입니다.
+    Sony and Nikon put it straight into EXIF FocalLengthIn35mmFilm, but
+    **Canon does not use that tag at all** (measured: 0 Canon frames out of
+    305), so we work the sensor size back out of the FocalPlane resolution
+    tags and multiply by the scale factor - the same method as exiftool's
+    ScaleFactor35efl, measured error ±0.3% (R6M3 1.002, R3 1.000, R5 0.998).
+    RW2 carries it in plain form in the embedded JPEG's ExifIFD 0xA405.
     """
 
     af_area_mode: str | None = None
-    """카메라가 기록한 AF 영역 모드(카메라 용어 그대로, 영문).
+    """The AF area mode the camera recorded (the camera's own wording, in
+    English).
 
-    maker_meta.af_area_mode가 채웁니다. 검증된 값만 이름이 붙고 모르는
-    값은 None — 조용히 틀린 이름보다 빈칸이 낫습니다. 렌즈명처럼 고유
-    명사에 가까워 번역하지 않습니다.
+    maker_meta.af_area_mode fills this in. Only verified values get a name;
+    an unknown value stays None - a blank beats a quietly wrong name. It is
+    close to a proper noun, much like a lens name, so we do not translate it.
     """
 
     orientation: int = 1  # EXIF Orientation (1~8)
 
     latitude: float | None = None
     longitude: float | None = None
-    """촬영 위치 (도 단위, 남/서는 음수). 없으면 None.
+    """Capture location (in degrees, south/west negative). None if absent.
 
-    바디에 GPS가 없어도 폰과 연동해 찍으면 들어옵니다. 실측(A6700 300장):
-    **한 장도 없었습니다** — 연동 없이 찍으면 아예 기록되지 않습니다.
+    Even a body without GPS picks this up when shot paired with a phone.
+    Measured (A6700, 300 frames): **not one frame had it** - shot without
+    the pairing, nothing is recorded at all.
 
-    이 값은 **읽기만** 합니다. 내보내는 파일에는 어떤 경우에도 쓰지 않습니다
-    (develop/metadata.py 참고) — 위치 정보는 실수로 흘러나갔을 때 가장
-    위험한 항목입니다.
+    This value is **read only**. It is never written to an exported file
+    under any circumstances (see develop/metadata.py) - location is the most
+    dangerous item there is to leak by accident.
     """
 
     @property
@@ -190,28 +204,31 @@ class RawMetadata:
 
 
 class PreviewError(RuntimeError):
-    """프리뷰를 어떤 경로로도 얻지 못했을 때."""
+    """Raised when no path at all produced a preview."""
 
 
 def iter_raw_files(folder: Path, recursive: bool = True) -> list[Path]:
-    """폴더에서 판정할 파일을 찾아 정렬된 리스트로 반환합니다.
+    """Find the files to score in a folder and return them as a sorted list.
 
-    RAW와, **RAW가 없는 자리의** JPEG·HEIF를 함께 돌려줍니다.
+    Returns the RAWs, plus JPEG/HEIF **where there is no RAW**.
 
-    같은 이름의 RAW와 JPEG이 나란히 있으면(카메라의 RAW+JPEG 기록) RAW만
-    씁니다. 둘 다 넣으면 같은 사진이 두 번 나와 장수와 keep 비율이 전부
-    두 배로 어긋납니다. RAW 쪽이 판정에도 보정에도 낫습니다.
+    When a RAW and a JPEG of the same name sit side by side (the camera's
+    RAW+JPEG recording), only the RAW is used. Take both and the same photo
+    appears twice, so the frame count and the keep ratio are both off by a
+    factor of two. The RAW is the better one for scoring and for adjustment
+    alike.
 
-    export가 만든 `_keep` / `_review` / `_reject` 폴더는 재스캔 시
-    원본을 중복 처리하게 되므로 제외합니다.
+    The `_keep` / `_review` / `_reject` folders export creates are excluded,
+    since on a rescan they would make us process the originals twice.
 
-    캐시 폴더(`.raw_selector_cache`)도 같은 이유로 제외합니다. 그 안의
-    `thumbs/*.jpg`는 이 함수가 JPEG도 돌려주기 시작한 뒤로 사진으로
-    잡혔습니다 — 한 번 분석한 폴더를 다시 열면 썸네일 수만큼 장수가
-    부풀고 장면 묶기와 keep 비율이 통째로 어긋납니다.
+    The cache folder (`.raw_selector_cache`) is excluded for the same reason.
+    Its `thumbs/*.jpg` started being picked up as photos once this function
+    began returning JPEGs too - reopening an already analysed folder inflated
+    the frame count by the number of thumbnails and threw scene grouping and
+    the keep ratio off completely.
     """
     from .appinfo import CACHE_DIR_NAME, LEGACY_CACHE_DIR_NAMES
-    from .types import OUTPUT_DIR_NAMES  # types가 raw_io를 쓰므로 지연 import
+    from .types import OUTPUT_DIR_NAMES  # types uses raw_io, so import late
 
     skip_dirs = OUTPUT_DIR_NAMES | {CACHE_DIR_NAME, *LEGACY_CACHE_DIR_NAMES}
     pattern = "**/*" if recursive else "*"
@@ -220,11 +237,13 @@ def iter_raw_files(folder: Path, recursive: bool = True) -> list[Path]:
     for path in folder.glob(pattern):
         if not path.is_file():
             continue
-        # 숨김 파일은 사진이 아닙니다. 특히 macOS가 exFAT·SMB·NTFS에
-        # 만드는 AppleDouble(`._DSC1234.JPG`)은 확장자가 .JPG라 그냥 두면
-        # 사진으로 잡힙니다 — 4KB짜리 리소스 포크가 장수를 두 배로 부풀리고
-        # 전부 실패로 떨어져 keep 비율이 반토막 납니다(실측 16.0%→8.0%).
-        # 이름이 `._`로 시작해 짝 판정(stem 비교)에도 안 걸립니다.
+        # Hidden files are not photos. In particular the AppleDouble files
+        # macOS creates on exFAT/SMB/NTFS (`._DSC1234.JPG`) carry a .JPG
+        # extension, so left alone they get picked up as photos - a 4KB
+        # resource fork doubles the frame count and every one of them fails,
+        # halving the keep ratio (measured 16.0% -> 8.0%). Their names start
+        # with `._`, so the pairing check (stem comparison) does not catch
+        # them either.
         if path.name.startswith("."):
             continue
         relative_parts = path.relative_to(folder).parts[:-1]
@@ -235,18 +254,18 @@ def iter_raw_files(folder: Path, recursive: bool = True) -> list[Path]:
         elif is_editable_image(path):
             others.append(path)
 
-    # 짝은 **같은 폴더의 같은 이름**으로만 봅니다. 이름만 같고 다른 폴더에
-    # 있는 파일은 다른 촬영일 수 있습니다.
+    # Pairing looks only at **the same name in the same folder**. A file
+    # with the same name in a different folder may be from another shoot.
     raw_keys = {(p.parent, p.stem.lower()) for p in raws}
     unpaired = [p for p in others if (p.parent, p.stem.lower()) not in raw_keys]
     return sorted(raws + unpaired)
 
 
-# ---------------------------------------------------------------- 방향 보정
+# ---------------------------------------------------------------- orientation
 
 
 def apply_orientation(image: np.ndarray, orientation: int) -> np.ndarray:
-    """EXIF Orientation(1~8)을 이미지에 적용합니다."""
+    """Apply EXIF Orientation (1~8) to the image."""
     if orientation <= 1 or orientation > 8:
         return image
     if orientation == 2:
@@ -265,19 +284,20 @@ def apply_orientation(image: np.ndarray, orientation: int) -> np.ndarray:
 
 
 def _jpeg_orientation(data: bytes) -> int:
-    """JPEG 바이트에서 EXIF Orientation만 읽습니다.
+    """Read only the EXIF Orientation out of JPEG bytes.
 
-    PIL의 open()은 지연 로딩이라 픽셀 디코딩 없이 EXIF만 읽고 끝납니다.
+    PIL's open() is lazy, so it reads the EXIF and stops without decoding
+    any pixels.
     """
     try:
         with Image.open(io.BytesIO(data)) as im:
             return int(im.getexif().get(0x0112, 1))
-    except Exception:  # noqa: BLE001 - 손상된 EXIF는 방향 미적용으로 넘깁니다
+    except Exception:  # noqa: BLE001 - broken EXIF means no orientation
         return 1
 
 
 def resize_long_edge(image: np.ndarray, target: int) -> np.ndarray:
-    """긴 변이 target이 되도록 축소합니다. 이미 작으면 그대로 반환."""
+    """Shrink so the long edge is target. Returns as-is if already smaller."""
     h, w = image.shape[:2]
     long_edge = max(h, w)
     if long_edge <= target:
@@ -291,11 +311,12 @@ def resize_long_edge(image: np.ndarray, target: int) -> np.ndarray:
 
 
 def imwrite_unicode(path: Path, image: np.ndarray, params: list | None = None) -> bool:
-    """cv2.imwrite의 유니코드 안전 대체.
+    """Unicode-safe replacement for cv2.imwrite.
 
-    Windows에서 cv2.imwrite는 한글·비ASCII 경로에 쓰면 조용히 실패합니다
-    (False 반환, 파일 안 생김). 카카오톡 받은 파일 폴더처럼 한글 경로가
-    흔해서, 메모리에서 인코딩한 뒤 파이썬 open으로 씁니다.
+    On Windows, cv2.imwrite fails silently when writing to a Hangul or other
+    non-ASCII path (returns False, no file appears). Hangul paths are common
+    - KakaoTalk's received-files folder, for one - so we encode in memory and
+    write with Python's open.
     """
     path = Path(path)
     ext = path.suffix if path.suffix else ".png"
@@ -312,7 +333,7 @@ def imwrite_unicode(path: Path, image: np.ndarray, params: list | None = None) -
 
 
 def imread_unicode(path: Path, flags: int = cv2.IMREAD_COLOR) -> "np.ndarray | None":
-    """cv2.imread의 유니코드 안전 대체. 실패하면 None."""
+    """Unicode-safe replacement for cv2.imread. None on failure."""
     try:
         data = np.frombuffer(Path(path).read_bytes(), dtype=np.uint8)
     except OSError:
@@ -322,19 +343,21 @@ def imread_unicode(path: Path, flags: int = cv2.IMREAD_COLOR) -> "np.ndarray | N
     return cv2.imdecode(data, flags)
 
 
-# ---------------------------------------------------------------- 비RAW 디코드
+# ---------------------------------------------------------------- non-RAW decode
 
 
 def _decode_heif(path: Path) -> np.ndarray | None:
-    """HEIF(.HIF/.HEIC)를 BGR로 디코드합니다. 못 읽으면 None.
+    """Decode HEIF (.HIF/.HEIC) to BGR. None if it cannot be read.
 
-    `pillow-heif`가 담고 있는 libheif가 실제로 푸는 부분입니다. 실측:
-    DSC02290.HIF(ftyp heix, 8.7MB) → 6192×4128, 얼굴 6개로 짝 ARW와 동일.
+    The libheif bundled inside `pillow-heif` is what actually unpacks it.
+    Measured: DSC02290.HIF (ftyp heix, 8.7MB) -> 6192x4128, 6 faces, the same
+    as its paired ARW.
 
-    라이브러리가 없는 경우까지 여기서 감쌉니다. 필수 의존이라 정상적으로는
-    없을 수 없지만, 없을 때 ImportError로 앱이 통째로 죽는 것보다 그 파일만
-    실패하는 편이 낫습니다. 다만 '파일이 깨졌다'와는 구분해서 말해야
-    합니다 — 배포본에서 빠진 경우 파일을 아무리 바꿔도 안 열립니다.
+    The missing-library case is wrapped here as well. It is a hard dependency
+    so it cannot normally be absent, but if it is, failing that one file
+    beats an ImportError killing the whole app. It does have to be worded
+    apart from 'the file is broken' - when it is missing from a build, no
+    amount of swapping files will get anything to open.
     """
     try:
         import pillow_heif  # noqa: PLC0415
@@ -346,26 +369,29 @@ def _decode_heif(path: Path) -> np.ndarray | None:
     try:
         heif = pillow_heif.read_heif(str(path))
         rgb = np.asarray(heif.to_pillow().convert("RGB"))
-    except Exception as exc:  # noqa: BLE001 - 어떤 실패든 한 장만 실패시킵니다
+    except Exception as exc:  # noqa: BLE001 - any failure fails one frame only
         log.debug("HEIF 디코드 실패 %s: %s", path.name, exc)
         return None
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 
 def _decode_heif_16(path: Path) -> np.ndarray | None:
-    """HEIF를 원래 비트 깊이로 디코드해 float32 BGR(0~255)로 돌려줍니다.
+    """Decode HEIF at its native bit depth, returning float32 BGR (0~255).
 
-    소니 HIF는 10비트인데 위의 8비트 경로(convert("RGB"))는 그것을 256단계로
-    누릅니다. 분석·썸네일에는 충분하지만 **보정의 출발점**으로는 관용도를
-    잃습니다 — 노출을 올리면 8비트 계조가 그대로 벌어져 띠가 집니다.
-    실측(DSC02290.HIF): 이 경로는 채널당 고유 레벨이 256 → 1,024로 늘어납니다.
+    Sony HIF is 10-bit, but the 8-bit path above (convert("RGB")) squeezes
+    that down to 256 steps. Enough for analysis and thumbnails, but as **the
+    starting point for adjustment** it loses latitude - raise the exposure
+    and the 8-bit gradation opens right up into banding. Measured
+    (DSC02290.HIF): this path takes the distinct levels per channel from
+    256 -> 1,024.
 
-    회전은 8비트 경로와 같습니다 — 컨테이너 변환(irot/imir)은 libheif가
-    디코드 때 적용하고, EXIF 방향은 호출부(load_demosaiced)가 8비트 경로와
-    같은 함수로 한 번 더 봅니다.
+    Rotation matches the 8-bit path - libheif applies the container
+    transforms (irot/imir) at decode time, and the caller (load_demosaiced)
+    checks EXIF orientation once more with the same function the 8-bit path
+    uses.
 
-    10비트를 못 받는 상황(구형 pillow-heif, 8비트 HEIC)이면 None — 호출부가
-    8비트 경로로 물러섭니다.
+    None when 10 bits cannot be had (older pillow-heif, 8-bit HEIC) - the
+    caller falls back to the 8-bit path.
     """
     try:
         import pillow_heif  # noqa: PLC0415
@@ -376,28 +402,30 @@ def _decode_heif_16(path: Path) -> np.ndarray | None:
         heif = pillow_heif.open_heif(str(path), convert_hdr_to_8bit=False)
         image = heif[0] if hasattr(heif, "__getitem__") else heif
         mode = str(getattr(image, "mode", ""))
-        if ";16" not in mode:          # 8비트 원본(아이폰 HEIC 등) — 이득 없음
+        if ";16" not in mode:          # 8-bit source (iPhone HEIC) - no gain
             return None
         array = np.asarray(image)
-    except Exception as exc:  # noqa: BLE001 - 실패는 8비트 폴백으로
+    except Exception as exc:  # noqa: BLE001 - failure falls back to 8-bit
         log.debug("HEIF 16비트 디코드 실패 %s: %s", path.name, exc)
         return None
 
     if array.ndim != 3 or array.dtype != np.uint16:
         return None
-    if array.shape[2] == 4:            # 알파는 보정 대상이 아닙니다
+    if array.shape[2] == 4:            # alpha is not something we adjust
         array = array[:, :, :3]
     if array.shape[2] != 3:
         return None
-    # RGB 16비트(0~65535) → float BGR 0~255. 소수점에 10비트 계조가 남습니다.
+    # RGB 16-bit (0~65535) -> float BGR 0~255. The 10-bit gradation survives
+    # in the fractional part.
     return (array[:, :, ::-1].astype(np.float32) / 257.0)
 
 
 def _tags_from_heif(path: Path) -> dict:
-    """HEIF 컨테이너 안의 EXIF 블록을 exifread로 읽습니다.
+    """Read the EXIF block inside a HEIF container with exifread.
 
-    블록은 `Exif\\0\\0` 6바이트 뒤에 평범한 TIFF가 이어지는 형태입니다.
-    그 앞머리를 떼고 넘기면 RAW와 똑같은 경로로 파싱됩니다.
+    The block is a 6-byte `Exif\\0\\0` followed by an ordinary TIFF. Strip
+    that header off and hand it over, and it parses through exactly the same
+    path as a RAW.
     """
     try:
         import pillow_heif  # noqa: PLC0415
@@ -419,11 +447,13 @@ def _tags_from_heif(path: Path) -> dict:
 
 
 def load_image_file(path: Path) -> np.ndarray:
-    """JPEG·HEIF를 방향 보정된 BGR로 읽습니다.
+    """Read a JPEG or HEIF as orientation-corrected BGR.
 
-    RAW가 아니라 **이미 현상된 결과**입니다. 되돌릴 수 없는 것들이 있습니다:
-    날아간 하이라이트는 데이터가 없어 살아나지 않고, 8비트라 큰 노출·색온도
-    조정에서 계조가 끊깁니다. 그래도 셀렉트와 가벼운 보정에는 충분합니다.
+    This is not a RAW but **an already developed result**. Some things
+    cannot be undone: blown highlights have no data left to bring back, and
+    being 8-bit, gradation breaks up under large exposure or colour
+    temperature adjustments. It is still enough for culling and for light
+    adjustment.
     """
     suffix = path.suffix.lower()
     if suffix in HEIF_EXTENSIONS:
@@ -431,17 +461,20 @@ def load_image_file(path: Path) -> np.ndarray:
         if image is None:
             raise PreviewError(f"HEIF를 열지 못했습니다: {path.name}")
     else:
-        # cv2.imdecode는 IMREAD_COLOR만 주면 EXIF 방향을 **자동으로 적용**합니다.
-        # 그대로 두면 아래 apply_orientation이 한 번 더 돌아 세로 컷이 180°
-        # 틀어집니다(실측 Z9 세로 JPEG: 저장 8256×5504 → cv2가 5504×8256으로
-        # 세워 놓은 것을 다시 눕혀 8256×5504). 얼굴이 거꾸로 서니 검출이
-        # 통째로 실패했습니다. 방향 처리는 apply_orientation 한 곳에만 둡니다.
+        # Given only IMREAD_COLOR, cv2.imdecode **applies EXIF orientation
+        # automatically**. Left that way, apply_orientation below runs a
+        # second time and a portrait frame ends up 180° off (measured on a
+        # Z9 portrait JPEG: stored 8256x5504 -> cv2 stood it up as 5504x8256,
+        # and we laid it back down to 8256x5504). Faces ended up upside
+        # down, so detection failed outright. Orientation is handled in
+        # exactly one place, apply_orientation.
         image = imread_unicode(
             path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
         if image is None:
             raise PreviewError(f"이미지를 열지 못했습니다: {path.name}")
 
-    # EXIF 방향은 JPEG에 흔합니다. 무시하면 세로 컷이 눕습니다.
+    # EXIF orientation is common in JPEG. Ignore it and portrait frames end
+    # up lying on their side.
     try:
         image = apply_orientation(image, _jpeg_orientation(path.read_bytes()))
     except OSError:
@@ -449,33 +482,36 @@ def load_image_file(path: Path) -> np.ndarray:
     return image
 
 
-# ---------------------------------------------------------------- 프리뷰 추출
+# ---------------------------------------------------------------- preview extraction
 
 
-#: 내장 프리뷰가 센서 긴 변의 이 비율보다 작으면 "작은 프리뷰"로 봅니다.
+#: An embedded preview smaller than this fraction of the sensor's long edge
+#: counts as a "small preview".
 #:
-#: 실측 — ARW(A6700) 99% · CR3 99% · CR2 99% · **RW2(DC-S5M2X) 32%**.
-#: 정상 기종과 파나소닉 사이가 크게 벌어져 있어 0.6은 어느 쪽에도 가깝지
-#: 않은 안전한 자리입니다. half 디모자이크 결과(50%)는 이 선 아래지만,
-#: 판정은 프리뷰에 대해서만 하므로 무한 재귀는 없습니다.
+#: Measured - ARW (A6700) 99%, CR3 99%, CR2 99%, **RW2 (DC-S5M2X) 32%**.
+#: The gap between the normal bodies and Panasonic is wide, so 0.6 sits
+#: safely close to neither. A half demosaic result (50%) falls below this
+#: line, but scoring only ever runs on the preview, so there is no infinite
+#: recursion.
 SMALL_PREVIEW_RATIO = 0.6
 
 
 def load_preview(path: Path, max_long_edge: int | None = None,
                  demosaic_small: bool = False) -> np.ndarray:
-    """프리뷰를 방향 보정된 BGR 이미지로 반환합니다.
+    """Return the preview as an orientation-corrected BGR image.
 
-    RAW라면:
-      1) 내장 JPEG 프리뷰 (가장 빠름, 정상 경로)
-      2) 내장 비트맵 썸네일
-      3) 최후의 수단으로 half-size 디모자이크 — 느리므로 경고를 남깁니다
+    For a RAW:
+      1) the embedded JPEG preview (fastest, the normal path)
+      2) the embedded bitmap thumbnail
+      3) a half-size demosaic as a last resort - slow, so it logs a warning
 
-    RAW가 아니면(JPEG·HEIF) 파일 자체가 프리뷰입니다.
+    For a non-RAW (JPEG/HEIF) the file itself is the preview.
 
-    demosaic_small을 켜면 **내장 프리뷰가 센서보다 훨씬 작을 때**(파나소닉
-    RW2) 그것을 버리고 half 디모자이크로 만듭니다. 선명도를 원본 해상도에서
-    잰다는 판정의 전제를 되살리는 대신 느립니다
-    (AnalyzeConfig.demosaic_small_preview 참고).
+    With demosaic_small on, **an embedded preview much smaller than the
+    sensor** (Panasonic RW2) is thrown away and rebuilt with a half
+    demosaic. That restores the scoring premise of measuring sharpness at
+    the original resolution, at the cost of speed (see
+    AnalyzeConfig.demosaic_small_preview).
     """
     if is_editable_image(path):
         image = load_image_file(path)
@@ -491,10 +527,12 @@ def load_preview(path: Path, max_long_edge: int | None = None,
                 thumb = None
 
             if thumb is not None and thumb.format == rawpy.ThumbFormat.JPEG:
-                # IMREAD_IGNORE_ORIENTATION 필수 — 안 주면 imdecode가 내장
-                # 프리뷰의 EXIF 방향을 이미 적용하고, 아래 apply_orientation이
-                # 한 번 더 돌려 세로 컷이 180° 틀어집니다(실측 DSC_0007.NEF
-                # orientation=8: 3712×5568로 잘 선 것을 다시 5568×3712로 눕힘).
+                # IMREAD_IGNORE_ORIENTATION is required - without it
+                # imdecode has already applied the embedded preview's EXIF
+                # orientation, and apply_orientation below turns it once
+                # more, leaving a portrait frame 180° off (measured on
+                # DSC_0007.NEF orientation=8: standing correctly at
+                # 3712x5568, laid back down to 5568x3712).
                 image = cv2.imdecode(
                     np.frombuffer(thumb.data, dtype=np.uint8),
                     cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION,
@@ -515,8 +553,9 @@ def load_preview(path: Path, max_long_edge: int | None = None,
                 )
                 image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
-            # 이 프리뷰가 센서에 비해 너무 작은가. **raw가 열려 있는 동안**
-            # 재야 센서 크기를 알 수 있습니다.
+            # Is this preview too small compared with the sensor? It has to
+            # be measured **while raw is still open** to know the sensor
+            # size at all.
             too_small = False
             if demosaic_small:
                 sensor_long = max(raw.sizes.width, raw.sizes.height)
@@ -525,17 +564,19 @@ def load_preview(path: Path, max_long_edge: int | None = None,
                              and preview_long < sensor_long * SMALL_PREVIEW_RATIO)
     except PreviewError:
         raise
-    except Exception as exc:  # noqa: BLE001 - 손상 파일을 배치 전체 실패로 만들지 않습니다
+    except Exception as exc:  # noqa: BLE001 - fail the file, not the batch
         raise PreviewError(f"{path.name}: {exc}") from exc
 
     if too_small:
-        # 파일을 다시 엽니다. 디모자이크 비용이 지배적이라(실측 15.9 →
-        # 79.9ms/장) 여는 비용은 묻힙니다. 보정창과 같은 베이스라인을 쓰므로
-        # 톤이 카메라 JPEG 프리뷰처럼 정상 범위에 들어옵니다 — 평평한 중립
-        # 현상으로 재면 같은 선명도 계수를 다른 대비 위에서 쓰게 됩니다.
+        # Reopen the file. The demosaic cost dominates (measured 15.9 ->
+        # 79.9ms per frame), so the cost of opening disappears into it. It
+        # uses the same baseline as the adjust window, so the tone lands in
+        # the normal range like a camera JPEG preview - measure off a flat
+        # neutral develop instead and the same sharpness coefficients would
+        # be applied on top of a different contrast.
         try:
             image = to_display(load_demosaiced(path, half_size=True))
-        except Exception as exc:  # noqa: BLE001 - 실패하면 원래 프리뷰를 씁니다
+        except Exception as exc:  # noqa: BLE001 - on failure use the preview
             log.warning("작은 프리뷰 디모자이크 실패, 내장 프리뷰 사용 %s: %s",
                         path.name, exc)
 
@@ -546,11 +587,12 @@ def load_preview(path: Path, max_long_edge: int | None = None,
 
 @dataclass(frozen=True)
 class WhiteBalance:
-    """RAW의 화이트밸런스 정보.
+    """White balance information from a RAW.
 
-    camera는 as-shot 배수, daylight는 카메라의 주광 보정 배수입니다. 둘을
-    함께 알면 임의의 목표 색온도에 대한 카메라 배수를 그 카메라의 보정을
-    기준으로 계산할 수 있습니다.
+    `camera` is the as-shot multipliers, `daylight` the camera's daylight
+    calibration multipliers. Knowing both lets us work out the camera
+    multipliers for any target colour temperature relative to that camera's
+    own calibration.
     """
 
     camera: tuple[float, ...]
@@ -559,21 +601,22 @@ class WhiteBalance:
 
     @property
     def engine_wb(self) -> tuple[tuple, tuple]:
-        """엔진 _apply_white_balance에 넘길 (camera, daylight) 튜플."""
+        """(camera, daylight) tuple for the engine's _apply_white_balance."""
         return (self.camera, self.daylight)
 
 
 def read_white_balance(path: Path) -> "WhiteBalance | None":
-    """RAW에서 화이트밸런스 배수를 읽고 as-shot 색온도를 추정합니다.
+    """Read WB multipliers from a RAW and estimate the as-shot kelvin.
 
-    디모자이크 없이 메타데이터만 읽으므로 빠릅니다. 실패하면 None을
-    돌려주어 호출부가 색온도 보정 없이 진행할 수 있게 합니다.
+    Fast, because it reads metadata only, with no demosaic. On failure it
+    returns None so the caller can carry on without any colour temperature
+    adjustment.
     """
     try:
         with rawpy.imread(str(path)) as raw:
             camera = tuple(float(x) for x in raw.camera_whitebalance)
             daylight = tuple(float(x) for x in raw.daylight_whitebalance)
-    except Exception:  # noqa: BLE001 - WB를 못 읽어도 보정 자체는 진행합니다
+    except Exception:  # noqa: BLE001 - adjustment goes on even without WB
         return _white_balance_without_libraw(path)
 
     if len(camera) < 3 or len(daylight) < 3 or daylight[1] == 0:
@@ -582,23 +625,25 @@ def read_white_balance(path: Path) -> "WhiteBalance | None":
 
 
 NIKON_DAYLIGHT_FALLBACK = (1.9578, 0.945, 1.1413)
-"""LibRaw이 니콘 Z 계열에 쓰는 daylight 배수.
+"""The daylight multipliers LibRaw uses for the Nikon Z line.
 
-daylight 값은 파일이 아니라 디코더 내부 상수라, LibRaw이 파일을 아예 못
-열면 가져올 데가 없습니다. 색온도 추정에는 기준선이 필요하므로 이 값을
-씁니다 — 없으면 색온도 슬라이더 자체가 동작하지 않습니다.
+The daylight values are a decoder-internal constant rather than something in
+the file, so when LibRaw cannot open the file at all there is nowhere to get
+them from. Colour temperature estimation needs a baseline, so we use these -
+without them the colour temperature slider does not work at all.
 """
 
 
 def _white_balance_without_libraw(path: Path) -> "WhiteBalance | None":
-    """LibRaw이 못 여는 파일에서 메타데이터만으로 WB를 건집니다.
+    """Salvage WB from metadata alone for files LibRaw cannot open.
 
-    니콘 고효율(HE/HE*) 압축 NEF가 여기 해당합니다. 화소는 못 풀어도
-    MakerNote는 평범한 TIFF라 읽힙니다. 이게 없으면 보정 창에서 색온도
-    조절이 통째로 죽습니다.
+    Nikon High Efficiency (HE/HE*) compressed NEF lands here. The pixels
+    cannot be unpacked, but the MakerNote is ordinary TIFF and reads fine.
+    Without this, the colour temperature control in the adjust window dies
+    completely.
 
-    LibRaw이 여는 니콘 파일로 대조했을 때 camera_whitebalance와 값이
-    일치했습니다.
+    Cross-checked against Nikon files LibRaw does open, the values matched
+    camera_whitebalance.
     """
     if path.suffix.lower() != ".nef":
         return None
@@ -620,17 +665,19 @@ def _white_balance_without_libraw(path: Path) -> "WhiteBalance | None":
 
 
 def _estimate_as_shot_kelvin(camera: tuple, daylight: tuple) -> int:
-    """as-shot 배수가 어느 색온도의 카메라 배수와 가장 가까운지 찾습니다.
+    """Find which colour temperature's camera multipliers the as-shot
+    multipliers come closest to.
 
-    카메라의 daylight 보정을 기준으로 삼기 때문에 흑체색 직접 비교보다
-    안정적입니다 (직접 비교는 포화된 R 채널에 휘둘립니다).
+    Anchoring on the camera's daylight calibration is more stable than
+    comparing blackbody colours directly (a direct comparison gets pushed
+    around by a saturated R channel).
     """
     from .develop.engine import NEUTRAL_KELVIN, _kelvin_to_rgb
 
     day = np.array(daylight[:3], dtype=np.float64)
     cam = np.array(camera[:3], dtype=np.float64)
     if cam[1] == 0:
-        return NEUTRAL_KELVIN  # 카메라 G 배수가 0이면 정규화 불가 — 중립으로
+        return NEUTRAL_KELVIN  # G multiplier 0: cannot normalise - go neutral
     cam = cam / cam[1]
     ref = _kelvin_to_rgb(NEUTRAL_KELVIN)
     best_t, best_err = NEUTRAL_KELVIN, float("inf")
@@ -651,38 +698,46 @@ def load_demosaiced(
     calibration=None,
     highlight_recovery: bool = False,
 ) -> np.ndarray:
-    """RAW를 실제로 디모자이크해 방향 보정된 BGR 이미지로 반환합니다.
+    """Actually demosaic a RAW into an orientation-corrected BGR image.
 
-    내장 JPEG 프리뷰가 아니라 센서 데이터를 직접 현상하므로 느리지만
-    (24MP 기준 1~2초) 색·계조·디테일이 정확합니다. 보정 화면과 내보내기의
-    베이스라인입니다.
+    It develops the sensor data directly rather than using the embedded JPEG
+    preview, so it is slow (1~2 seconds at 24MP) but the colour, gradation
+    and detail are accurate. This is the baseline for the adjust screen and
+    for export.
 
-    target_kelvin이 주어지면 그 절대 색온도로 화이트밸런스를 맞춰
-    디모자이크합니다. 카메라의 daylight 보정을 기준으로 배수를 계산하므로
-    프리뷰의 근사와 달리 실제 색온도 변환입니다. 없으면 as-shot(카메라 WB).
+    Given target_kelvin, it demosaics with the white balance set to that
+    absolute colour temperature. The multipliers are computed relative to
+    the camera's daylight calibration, so unlike the preview's approximation
+    this is a real colour temperature conversion. Without it, as-shot
+    (camera WB).
 
-    apply_profile이 True면 기본 카메라 프로파일(표준)을 얹어 자연스러운
-    출발점을 만듭니다. 중립 디모자이크는 평탄해서 그대로 쓰면 밋밋합니다.
+    With apply_profile True, the default camera profile (standard) is laid
+    on top to give a natural starting point. A neutral demosaic is flat, and
+    used as-is it looks lifeless.
 
-    calibration은 이 PC에서 잰 기종 보정입니다. None이면 파일의 기종으로
-    찾아 적용하고, False를 주면 보정 없이 순수 현상만 합니다(보정값을
-    측정할 때 자기 자신을 되먹이지 않으려면 필요합니다).
+    calibration is the per-body calibration measured on this PC. None looks
+    it up from the file's body and applies it; passing False develops purely,
+    with no calibration at all (needed so that measuring the calibration
+    values does not feed back into itself).
 
-    highlight_recovery를 켜면 포화한 하이라이트를 남은 채널로 재구성합니다
-    (BasicSettings.highlight_recovery 참고). RAW에만 걸립니다.
+    With highlight_recovery on, saturated highlights are rebuilt from the
+    channels that are left (see BasicSettings.highlight_recovery). RAW only.
 
-    **RAW가 아니면(JPEG·HEIF) 디모자이크할 것이 없습니다.** 파일을 그대로
-    float BGR로 올려 보정 파이프라인의 출발점으로 씁니다. 색온도·프로파일·
-    기종 보정은 센서 데이터가 있어야 성립하므로 적용하지 않습니다 — 이미
-    카메라가 한 번 적용해 구워 넣은 결과이기 때문입니다. HEIF만은 원래
-    비트 깊이(10비트)로 받습니다 — 8비트로 누르면 보정 관용도를 잃습니다.
+    **For a non-RAW (JPEG/HEIF) there is nothing to demosaic.** The file is
+    lifted straight to float BGR and used as the starting point of the
+    adjustment pipeline. Colour temperature, profile and body calibration
+    all need sensor data to make sense, so none of them are applied - the
+    camera has already applied its own and baked the result in. HEIF alone
+    is taken at its native bit depth (10-bit) - squeezed to 8 bits it loses
+    adjustment latitude.
     """
     if is_editable_image(path):
         image = None
         if path.suffix.lower() in HEIF_EXTENSIONS:  # noqa: SIM102
-            # 보정 출발점만 원래 비트 깊이로 받습니다. 분석·썸네일 경로
-            # (load_preview → load_image_file)는 8비트 그대로입니다 —
-            # 판정과 캐시를 건드리지 않기 위해서입니다.
+            # Only the adjustment starting point is taken at the native bit
+            # depth. The analysis and thumbnail path (load_preview ->
+            # load_image_file) stays 8-bit - so as not to disturb scoring
+            # and the cache.
             image = _decode_heif_16(path)
             if image is not None:
                 try:
@@ -693,18 +748,21 @@ def load_demosaiced(
         if image is None:
             image = load_image_file(path).astype(np.float32)
 
-        # **Adobe RGB 원본은 작업 공간(sRGB)으로 옮겨 놓습니다.**
+        # **An Adobe RGB original is moved into the working space (sRGB).**
         #
-        # 그냥 두면 두 가지가 어긋납니다. 화면(Qt)은 어떤 값이든 sRGB로
-        # 그리므로 미리보기가 채도 빠진 색으로 보이고, 노출은 sRGB 곡선으로
-        # 되돌리는데 실제 인코딩은 순수 감마 2.2라 빛의 양이 어긋납니다.
+        # Left alone, two things go wrong. The screen (Qt) draws whatever it
+        # is given as sRGB, so the preview looks desaturated; and exposure
+        # linearises back through the sRGB curve while the actual encoding
+        # is pure gamma 2.2, so the amount of light comes out wrong.
         #
-        # 파이프라인에 공간을 하나 더 들고 다니는 대신 들어올 때 한 번
-        # 바꿉니다 — 미리보기·노출·내보내기가 전부 한 공간에서 맞습니다.
-        # 내보내기에서 다시 Adobe RGB를 고르면 그때 되돌아갑니다.
+        # Rather than carry a second space through the pipeline, we convert
+        # once on the way in - preview, exposure and export then all agree
+        # in one space. Choosing Adobe RGB again at export converts back at
+        # that point.
         #
-        # 분석 경로(load_preview)는 건드리지 않습니다. 판정은 밝기 위주라
-        # 이득이 작은 반면 캐시를 통째로 갈아야 합니다.
+        # The analysis path (load_preview) is left alone. Scoring is mostly
+        # about brightness so the gain is small, while it would mean
+        # rebuilding the whole cache.
         from .develop.icc import WORKING_SPACE, to_working
         from .maker_meta import colour_space
 
@@ -718,31 +776,38 @@ def load_demosaiced(
         return image
 
     with rawpy.imread(str(path)) as raw:
-        # 14비트 센서를 8비트로 바로 떨구면 계조가 뭉갭니다. 16비트로 받아
-        # float 0~255로 정규화해 정밀도를 유지합니다 (파일 비트뎁스 무관).
+        # Dropping a 14-bit sensor straight to 8 bits crushes the gradation.
+        # We take 16 bits and normalise to float 0~255 to keep the precision
+        # (regardless of the file's bit depth).
         params = dict(no_auto_bright=True, output_bps=16, half_size=half_size)
 
-        # 작업 공간도 여기서 정해집니다. 카메라→작업공간 변환은 LibRaw 안에서
-        # 일어나므로, 좁게 받으면 우리 코드가 화소를 보기도 전에 잘립니다
-        # (develop/icc.py의 WORKING_SPACE 참고).
+        # The working space is decided here too. The camera -> working space
+        # conversion happens inside LibRaw, so taking it narrow clips the
+        # pixels before our code ever sees them (see WORKING_SPACE in
+        # develop/icc.py).
         from .develop.icc import WORKING_SPACE
 
         if WORKING_SPACE != "srgb":
             params["output_color"] = _RAWPY_COLOR_SPACE[WORKING_SPACE]
 
-        # 하이라이트 복원(blend) — 포화한 채널을 남은 채널로 재구성합니다.
-        # LibRaw 기본(0)은 화이트 레벨에서 그냥 자릅니다. blend는 WB 게인만큼
-        # 헤드룸을 확보하느라 **전체를 1~1.5스톱 어둡게** 냅니다(실측: 선형
-        # 균일 배율, 파일당 상수 ±0.1%). 노출 슬라이더가 정확한 역연산이라
-        # 되올리는 것은 사용자 몫입니다 — 몰래 되올리면 헤드룸이 도로 잘려
-        # 옵션이 무의미해집니다. BasicSettings.highlight_recovery 참고.
+        # Highlight recovery (blend) - rebuilds a saturated channel from the
+        # channels that are left. LibRaw's default (0) simply clips at the
+        # white level. blend reserves headroom equal to the WB gain, so it
+        # comes out **1~1.5 stops darker overall** (measured: a linear
+        # uniform factor, constant per file to within ±0.1%). The exposure
+        # slider is the exact inverse, so bringing it back up is the user's
+        # call - doing it silently would clip the headroom straight back off
+        # and make the option pointless. See
+        # BasicSettings.highlight_recovery.
         if highlight_recovery:
             params["highlight_mode"] = 2
 
-        # LibRaw이 모르는 최신 기종은 블랙 페데스탈을 못 잡아(예: EOS R6
-        # Mark III는 [0,38,113,78]로 읽힘) 페데스탈이 안 빠져 전체가 뜨고
-        # 채널별 오프셋 차이로 마젠타가 낍니다. 센서 데이터에서 직접 추정해
-        # 바로잡습니다. 지원 기종은 건드리지 않습니다.
+        # A recent body LibRaw does not know cannot find the black pedestal
+        # (the EOS R6 Mark III, for instance, reads as [0,38,113,78]), so
+        # the pedestal is never subtracted, the whole frame lifts, and the
+        # per-channel offset difference casts it magenta. We estimate it
+        # from the sensor data directly and correct it. Supported bodies are
+        # left alone.
         black_override = _repair_black_level(raw)
         if black_override is not None:
             params["user_black"] = black_override
@@ -750,17 +815,23 @@ def load_demosaiced(
         if target_kelvin and target_kelvin > 0:
             from .develop.engine import NEUTRAL_KELVIN, _kelvin_to_rgb
 
-            # **카메라 실측 배수에 앵커합니다.** 모델 절대값(daylight ×
-            # K(5500)/K(target))은 카메라의 as-shot 배수를 통째로 버리는데,
-            # 켈빈 모델에는 틴트(초록-마젠타) 축이 없어 그 성분이 함께
-            # 사라집니다. 실측(DSC06598, 이자카야 LED): 추정 켈빈에서 모델
-            # 배수가 실측과 R 8.2% 어긋나, 슬라이더를 as-shot 표시 위치로
-            # 확정하는 순간 녹황색이 돌았습니다(화소 18.8%가 5레벨 초과).
+            # **Anchor on the camera's measured multipliers.** The model's
+            # absolute values (daylight x K(5500)/K(target)) throw the
+            # camera's as-shot multipliers away entirely, and since the
+            # kelvin model has no tint (green-magenta) axis, that component
+            # disappears along with them. Measured (DSC06598, izakaya LED):
+            # at the estimated kelvin the model multipliers were off from
+            # the measured ones by 8.2% in R, so the moment the slider was
+            # committed at its as-shot displayed position, a yellow-green
+            # cast appeared (18.8% of pixels off by more than 5 levels).
             #
-            # 카메라 배수에서 출발해 모델의 **상대 변화**만 겁니다. 목표가
-            # as-shot 추정치면 정확히 카메라 배수가 되어(실측 0.00레벨)
-            # 틴트가 보존됩니다. engine._wb_gain의 미리보기 게인과 같은
-            # 앵커여야 합니다 — 갈리면 슬라이더를 놓는 순간 색이 튑니다.
+            # We start from the camera multipliers and apply only the
+            # model's **relative change**. When the target is the as-shot
+            # estimate this lands exactly on the camera multipliers
+            # (measured 0.00 levels) and the tint is preserved. It has to be
+            # the same anchor as the preview gain in engine._wb_gain - if
+            # the two diverge, the colour jumps the moment the slider is
+            # released.
             camera = np.array(raw.camera_whitebalance[:3], dtype=np.float64)
             daylight = np.array(raw.daylight_whitebalance[:3], dtype=np.float64)
             if camera[1] > 0 and daylight[1] > 0:
@@ -768,20 +839,23 @@ def load_demosaiced(
                 mult = camera * (_kelvin_to_rgb(est)
                                  / _kelvin_to_rgb(target_kelvin))
             else:
-                # 배수를 못 읽는 파일 — 예전 일반 근사로 물러섭니다
+                # a file whose multipliers we cannot read - fall back to the
+                # old general approximation
                 mult = daylight * (_kelvin_to_rgb(NEUTRAL_KELVIN)
                                    / _kelvin_to_rgb(target_kelvin))
             params["user_wb"] = [float(mult[0]), float(mult[1]), float(mult[2]), float(mult[1])]
         else:
             params["use_camera_wb"] = True
         rgb = raw.postprocess(**params)
-    # postprocess는 카메라 flip을 이미 반영합니다. 16비트(0~65535)를
-    # float 0~255로 옮깁니다 — 소수점까지 남아 계조가 살아 있습니다.
+    # postprocess has already applied the camera flip. We move 16-bit
+    # (0~65535) to float 0~255 - the fraction survives, so the gradation
+    # stays intact.
     image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR).astype(np.float32) / 257.0
 
-    # 이 PC에서 잰 기종 보정이 있으면 먼저 적용합니다. 프로파일(색 연출)보다
-    # 앞이어야 합니다 — 보정은 "기준을 맞추는" 것이고 프로파일은 그 위에
-    # 얹는 연출이라, 순서가 바뀌면 연출까지 함께 비틀립니다.
+    # If there is a body calibration measured on this PC, apply it first. It
+    # has to come before the profile (the colour look) - calibration is
+    # "matching the reference", the profile is a look laid on top of that,
+    # so reversing the order twists the look along with it.
     if calibration is not False:
         image = _apply_calibration(image, path, calibration)
 
@@ -793,7 +867,7 @@ def load_demosaiced(
 
 
 def _apply_calibration(image, path: Path, calibration):
-    """저장된 기종 보정을 적용합니다. 없으면 그대로 돌려줍니다."""
+    """Apply the stored body calibration. Returns the image as-is if none."""
     from .develop import calibration as calib
 
     try:
@@ -802,16 +876,17 @@ def _apply_calibration(image, path: Path, calibration):
             key = calib.camera_key(metadata.camera_make, metadata.camera_model)
             calibration = calib.load(key)
         return calib.apply(image, calibration)
-    except Exception:  # noqa: BLE001 - 보정 실패가 현상을 막으면 안 됩니다
+    except Exception:  # noqa: BLE001 - a failure here must not stop develop
         log.debug("기종 보정 적용 실패: %s", path.name, exc_info=True)
         return image
 
 
 def _channel_floors(raw) -> list[float] | None:
-    """베이어 위치별로 센서 바닥을 직접 잽니다.
+    """Measure the sensor floor directly, per Bayer position.
 
-    LibRaw이 보고하는 채널별 블랙이 진짜인지 판별하는 기준입니다. 실제
-    오프셋이라면 센서에서 잰 채널별 바닥에도 같은 차이가 보여야 합니다.
+    This is the yardstick for deciding whether the per-channel black LibRaw
+    reports is genuine. If it is a real offset, the same difference has to
+    show up in the per-channel floor measured off the sensor.
     """
     try:
         colors = raw.raw_colors_visible
@@ -826,7 +901,8 @@ def _channel_floors(raw) -> list[float] | None:
         values = image[colors == index]
         if values.size < 256:
             return None
-        # 가장 어두운 0.1%의 중앙값. 평균이 아니라 중앙값이라 핫픽셀에 안 흔들립니다.
+        # Median of the darkest 0.1%. A median rather than a mean, so hot
+        # pixels do not shift it.
         count = max(64, values.size // 1000)
         darkest = np.partition(values, count)[:count]
         floors.append(float(np.median(darkest)))
@@ -834,22 +910,27 @@ def _channel_floors(raw) -> list[float] | None:
 
 
 def _repair_black_level(raw) -> int | None:
-    """LibRaw이 블랙 페데스탈을 놓친 기종을 바로잡고 쓸 값을 돌려줍니다.
+    """Correct bodies where LibRaw missed the black pedestal and return the
+    value to use.
 
-    지원 기종은 black_level_per_channel이 센서 바닥과 맞습니다(예: [2048]×4).
-    LibRaw이 모르는 기종은 페데스탈을 통째로 놓쳐 아주 낮은 값이 나오는데
-    (실측: EOS R6 Mark III는 [0,38,113,78], 실제 바닥은 ~2000) 그대로 두면
-    페데스탈이 안 빠져 이미지가 뜹니다.
+    On a supported body, black_level_per_channel matches the sensor floor
+    (e.g. [2048]x4). On a body LibRaw does not know, the pedestal is missed
+    entirely and very low values come out (measured: the EOS R6 Mark III
+    reads [0,38,113,78] where the real floor is ~2000); left alone, the
+    pedestal is never subtracted and the image lifts.
 
-    그런데 user_black은 LibRaw의 **전역** 블랙만 바꿉니다. 채널별 cblack은
-    그 위에 그대로 더 빠지므로, 위 예에서 파랑만 113을 더 잃습니다. 그래서
-    페데스탈만 채워 넣으면 이번엔 파랑이 깎여 노란-초록으로 뜹니다
-    (실측: R6 Mark III에서 카메라 JPEG 대비 B 0.750 → 0.468).
+    But user_black only changes LibRaw's **global** black. The per-channel
+    cblack is still subtracted on top of it, so in the example above blue
+    alone loses another 113. Filling in the pedestal by itself therefore
+    shaves blue down and the image lifts yellow-green instead (measured: on
+    the R6 Mark III, B 0.750 -> 0.468 against the camera JPEG).
 
-    센서에서 잰 채널별 바닥과 견줘 그 채널 차이가 허수로 판명되면, 미리
-    화소에 그만큼 더해 두어 결과적으로 균일하게 빠지게 합니다. 실제 오프셋인
-    기종은 건드리지 않습니다 — 정상 기종에 이 보정을 걸면 오히려 크게
-    틀어집니다(실측: R6 Mark II 오차 0.109 → 0.785).
+    We compare against the per-channel floor measured off the sensor, and if
+    that channel difference turns out to be imaginary, we add it back into
+    the pixels beforehand so the subtraction ends up uniform. Bodies where
+    it is a real offset are left alone - applying this correction to a
+    normal body throws it off badly instead (measured: R6 Mark II error
+    0.109 -> 0.785).
     """
     try:
         black = list(raw.black_level_per_channel)
@@ -860,16 +941,17 @@ def _repair_black_level(raw) -> int | None:
         return None
 
     floor = float(np.percentile(sample, 0.5))
-    # 보고된 블랙이 센서 바닥보다 크게 낮다 = 페데스탈을 놓쳤다.
-    # 이 조건이 아니면 지원 기종이므로 아무것도 하지 않습니다.
+    # Reported black far below the sensor floor = the pedestal was missed.
+    # Anything else is a supported body, so we do nothing.
     if max(black) >= floor * 0.5:
         return None
 
     reported_spread = max(black) - min(black)
     if reported_spread <= 32:
-        # 채널이 균일하면 LibRaw이 제대로 읽은 것으로 봅니다. 밝은 장면은
-        # 진짜 검정이 없어 센서 바닥이 높게 나오므로, 이 조건이 없으면
-        # 블랙이 정말 0인 카메라의 밝은 사진을 잘못 눌러 버립니다.
+        # Uniform channels mean we take LibRaw as having read it correctly.
+        # A bright scene has no true black, so the sensor floor measures
+        # high; without this condition we would wrongly crush a bright photo
+        # from a camera whose black really is 0.
         return None
 
     measured = _channel_floors(raw)
@@ -877,14 +959,15 @@ def _repair_black_level(raw) -> int | None:
         return int(floor)
     measured_spread = max(measured) - min(measured)
 
-    # 보고된 채널 차이가 실측보다 훨씬 크면 그 값은 허수입니다.
-    # 여유(32)는 노이즈로 생기는 실측 편차를 넘기기 위한 것입니다.
+    # A reported channel spread much larger than the measured one is
+    # imaginary. The margin (32) is there to clear the measurement spread
+    # that noise produces.
     if reported_spread <= measured_spread + 32:
-        return int(floor)  # 진짜 채널 오프셋 — 그대로 두고 페데스탈만 채웁니다
+        return int(floor)  # real channel offset - fill the pedestal only
 
     low = min(black)
     try:
-        image = raw.raw_image  # 쓰기 가능한 뷰 — postprocess가 이 값을 씁니다
+        image = raw.raw_image  # writable view - postprocess uses these values
         colors = raw.raw_colors
         white = int(raw.white_level)
         for index in range(4):
@@ -892,30 +975,35 @@ def _repair_black_level(raw) -> int | None:
             if extra <= 0:
                 continue
             mask = colors == index
-            # 포화 근처에 더하면 흰색이 넘칩니다. 화이트 레벨에서 자릅니다.
+            # Adding near saturation overflows white. Clamp at the white
+            # level.
             image[mask] = np.minimum(
                 image[mask].astype(np.int32) + extra, white
             ).astype(image.dtype)
-    except Exception:  # noqa: BLE001 - 보정 실패가 현상을 막으면 안 됩니다
+    except Exception:  # noqa: BLE001 - a failure here must not stop develop
         return int(floor)
 
-    # 화소에 (cblack[c] - low)를 더했으므로, 전역 블랙은 그만큼 낮춰야
-    # 채널마다 정확히 floor가 빠집니다.
+    # We added (cblack[c] - low) to the pixels, so the global black has to
+    # come down by the same amount for exactly floor to be subtracted from
+    # every channel.
     return int(floor) - low
 
 
 def to_display(image: np.ndarray) -> np.ndarray:
-    """작업 공간의 float 0~255를 화면용 8비트 sRGB로 (마지막 단계에서만).
+    """Working-space float 0~255 to 8-bit sRGB for display (last step only).
 
-    **화면은 무엇을 주든 sRGB로 그립니다.** 작업 공간이 그보다 넓으므로
-    여기서 옮겨야 합니다 — 안 옮기면 채도가 빠져 보입니다.
+    **The screen draws whatever it is given as sRGB.** The working space is
+    wider than that, so the conversion has to happen here - skip it and
+    everything looks desaturated.
 
-    uint8은 이미 화면용입니다(내장 JPEG 프리뷰·썸네일). 분석 경로가 그
-    값을 쓰므로 건드리면 판정과 캐시가 함께 움직입니다.
+    uint8 is already display-ready (embedded JPEG previews and thumbnails).
+    The analysis path uses those values, so touching this moves scoring and
+    the cache with it.
 
-    **입력은 float 0~255이거나 uint8입니다.** uint16(16비트 내보내기 결과)을
-    주면 255에서 잘려 못 쓰게 됩니다 — 그쪽은 화면용이 아니라 저장용이라
-    icc.working_to로 직접 옮깁니다(engine.export_image).
+    **The input is either float 0~255 or uint8.** Pass uint16 (the result of
+    a 16-bit export) and it clips at 255 and is ruined - that side is for
+    saving rather than for display, and converts directly through
+    icc.working_to (engine.export_image).
     """
     if image.dtype == np.uint8:
         return image
@@ -928,11 +1016,11 @@ def to_display(image: np.ndarray) -> np.ndarray:
 
 
 def _flip_to_orientation(flip: int) -> int:
-    """LibRaw의 flip 값을 EXIF Orientation으로 변환합니다."""
+    """Convert LibRaw's flip value to an EXIF Orientation."""
     return {0: 1, 3: 3, 5: 8, 6: 6}.get(flip, 1)
 
 
-# ---------------------------------------------------------------- 메타데이터
+# ---------------------------------------------------------------- metadata
 
 
 def _ratio_to_float(tag) -> float | None:
@@ -944,14 +1032,15 @@ def _ratio_to_float(tag) -> float | None:
 
 
 def _element_to_float(value) -> float | None:
-    """태그 **값 하나**를 실수로. `_ratio_to_float`은 태그 객체를 받습니다.
+    """**One tag value** to float. `_ratio_to_float` takes a tag object.
 
-    둘을 헷갈리면 조용히 None이 됩니다 — 실제로 GPS 파서에 `_ratio_to_float`을
-    원소마다 부르는 실수를 했고, 예외를 삼키는 코드라 아무 경고 없이 위치가
-    통째로 사라졌습니다. 니콘 Z9 실파일로 돌려 보고서야 알았습니다.
+    Confusing the two silently yields None - we actually did make the
+    mistake of calling `_ratio_to_float` per element in the GPS parser, and
+    since the code swallows exceptions, the location vanished entirely with
+    no warning at all. It only came to light running a real Nikon Z9 file.
 
-    EXIF의 도/분/초는 한 배열 안에 정수와 분수가 섞여 옵니다
-    (예: `[44, 382467/10000, 0]`).
+    EXIF's degrees/minutes/seconds arrive with integers and fractions mixed
+    in the one array (e.g. `[44, 382467/10000, 0]`).
     """
     if value is None:
         return None
@@ -973,11 +1062,12 @@ def _int_tag(tag) -> int | None:
 
 
 def _tags_from_preview(path: Path) -> dict:
-    """내장 프리뷰 JPEG에서 EXIF를 읽습니다.
+    """Read EXIF out of the embedded preview JPEG.
 
-    CR3처럼 TIFF 기반이 아닌 컨테이너(ISO BMFF)는 exifread가 원본을 파싱하지
-    못합니다. 다행히 프리뷰 JPEG에는 EXIF가 그대로 들어 있어서 카메라·ISO·
-    셔터·조리개·초점거리를 건질 수 있습니다.
+    exifread cannot parse the original of a container that is not TIFF-based
+    (ISO BMFF), such as CR3. Fortunately the preview JPEG carries the EXIF
+    intact, so camera, ISO, shutter, aperture and focal length can all be
+    salvaged.
     """
     try:
         with rawpy.imread(str(path)) as raw:
@@ -991,21 +1081,23 @@ def _tags_from_preview(path: Path) -> dict:
 
 
 _LENS_TAGS = (
-    "EXIF LensModel",        # 표준 (Sony, Canon, Nikon 최신, Fujifilm …)
-    "Image LensModel",       # 서브 IFD를 독립 TIFF로 읽었을 때 (CR3의 CMT2)
+    "EXIF LensModel",        # standard (Sony, Canon, newer Nikon, Fujifilm...)
+    "Image LensModel",       # sub-IFD read as a standalone TIFF (CR3's CMT2)
     "MakerNote LensModel",
-    "MakerNote Lens",        # Pentax, Minolta 는 여기에 읽을 수 있는 이름을 씁니다
-    "MakerNote LensType",    # Canon, Pentax — 숫자 ID일 때도 있어 뒤로 미룹니다
+    "MakerNote Lens",        # Pentax and Minolta put a readable name here
+    "MakerNote LensType",    # Canon, Pentax - sometimes a numeric ID, so last
 )
 
 def _focal_35mm_from_tags(tags, focal: "float | None") -> "float | None":
-    """환산 초점거리. ①표준 태그 → ②FocalPlane 역산(캐논) 순서.
+    """Equivalent focal length. Order: (1) the standard tag, (2) working it
+    back out of FocalPlane (Canon).
 
-    캐논은 FocalLengthIn35mmFilm을 아예 안 씁니다(실측 305장 중 0장).
-    대신 FocalPlane 해상도와 출력 화소 수로 센서 실측 크기를 역산해
-    대각선 비율(43.27mm 기준)로 환산합니다 — exiftool ScaleFactor35efl과
-    같은 방식이고 실측 오차 ±0.3%입니다. 역산값이 물리적으로 말이 안 되면
-    (센서 폭 2~60mm 밖) 계산을 버립니다.
+    Canon does not use FocalLengthIn35mmFilm at all (measured: 0 of 305
+    frames). Instead we work the real sensor size back out of the FocalPlane
+    resolution and the output pixel count, and convert by the diagonal ratio
+    (43.27mm basis) - the same method as exiftool's ScaleFactor35efl, with a
+    measured error of ±0.3%. If the derived value makes no physical sense
+    (sensor width outside 2~60mm) the calculation is discarded.
     """
     tag = tags.get("EXIF FocalLengthIn35mmFilm")
     if tag:
@@ -1044,10 +1136,11 @@ _LENS_PLACEHOLDERS = {"unknown", "n/a", "na", "----", "none", "manual lens"}
 
 
 def _lens_from_tags(tags) -> str | None:
-    """여러 제조사 표기를 훑어 렌즈 이름을 찾습니다.
+    """Sweep the various manufacturer spellings to find the lens name.
 
-    표준 EXIF LensModel만 보면 MakerNote에만 렌즈를 쓰는 기종(펜탁스, 미놀타
-    등)에서 렌즈가 통째로 비어 자동 광학 보정이 동작하지 않습니다.
+    Look only at the standard EXIF LensModel and the lens comes out entirely
+    empty on bodies that write it only in the MakerNote (Pentax, Minolta and
+    the like), so automatic optical correction does nothing.
     """
     for key in _LENS_TAGS:
         if key not in tags:
@@ -1055,8 +1148,9 @@ def _lens_from_tags(tags) -> str | None:
         value = str(tags[key]).strip()
         if not value or value.lower() in _LENS_PLACEHOLDERS:
             continue
-        # LensType 등은 "61182" 같은 숫자 ID로 나오기도 합니다. 이름이 아니면
-        # DB 조회에 쓸 수 없으므로 건너뜁니다.
+        # LensType and friends sometimes come out as a numeric ID like
+        # "61182". If it is not a name we cannot use it for a DB lookup, so
+        # we skip it.
         if not any(ch.isalpha() for ch in value):
             continue
         return value
@@ -1064,10 +1158,11 @@ def _lens_from_tags(tags) -> str | None:
 
 
 def read_metadata(path: Path) -> RawMetadata:
-    """RAW의 EXIF를 읽습니다. 실패해도 예외 없이 빈 메타데이터를 돌려줍니다.
+    """Read a RAW's EXIF. On failure it returns empty metadata, not an
+    exception.
 
-    A6700은 최대 11fps 연사이므로 서브초 단위까지 읽어야 연사 그룹을
-    시간순으로 올바르게 정렬할 수 있습니다.
+    The A6700 bursts at up to 11fps, so we have to read down to the subsecond
+    to order a burst group correctly in time.
     """
     try:
         with path.open("rb") as fh:
@@ -1077,27 +1172,30 @@ def read_metadata(path: Path) -> RawMetadata:
         tags = {}
 
     if not tags:
-        # CR3는 TIFF가 아니라 ISO BMFF라 exifread가 통째로 실패합니다.
-        # 전용 파서로 moov/uuid 안의 CMT 박스를 읽습니다 (렌즈·촬영시각 포함).
+        # CR3 is ISO BMFF rather than TIFF, so exifread fails outright. A
+        # dedicated parser reads the CMT boxes inside moov/uuid (lens and
+        # capture time included).
         from .cr3 import is_cr3, read_exif_tags
 
         if is_cr3(path):
             tags = read_exif_tags(path)
 
     if not tags and path.suffix.lower() in HEIF_EXTENSIONS:
-        # HEIF도 ISO BMFF라 exifread가 못 엽니다. 컨테이너 안에 EXIF가 통째로
-        # (Exif\0\0 + TIFF) 들어 있으므로 그 블록만 꺼내 다시 읽힙니다.
-        # 촬영시각이 없으면 장면 묶기가 화면 변화에만 의존하게 됩니다.
+        # HEIF is ISO BMFF too, so exifread cannot open it. The container
+        # holds the EXIF whole (Exif\0\0 + TIFF), so we pull just that block
+        # out and read it again. Without a capture time, scene grouping is
+        # left relying on visual change alone.
         tags = _tags_from_heif(path)
 
     if not tags:
-        # 그래도 못 읽으면 프리뷰 JPEG의 빈약한 EXIF라도 씁니다
+        # Failing even that, we use the preview JPEG's thin EXIF
         tags = _tags_from_preview(path)
     if not tags:
         return RawMetadata(path=path)
 
     capture_time = None
-    # 프리뷰 EXIF에는 DateTimeOriginal이 빠져 있는 경우가 있어 대안을 함께 봅니다
+    # Preview EXIF sometimes lacks DateTimeOriginal, so we check the
+    # alternatives alongside it
     dt_tag = (
         tags.get("EXIF DateTimeOriginal")
         or tags.get("Image DateTime")
@@ -1142,10 +1240,12 @@ def read_metadata(path: Path) -> RawMetadata:
     if path.suffix.lower() == ".rw2" and (
             metadata.iso is None or not metadata.lens_model
             or metadata.focal_length_35mm is None):
-        # RW2는 TIFF 매직이 85라 exifread가 파일째 거부합니다. 위에서 온
-        # 값들은 내장 프리뷰 EXIF 폴백인데 거기엔 ISO·렌즈가 없습니다.
-        # 정작 IFD0 0x0017(ISO)과 내장 JPEG의 MakerNote 0x0051(렌즈)에
-        # 평문으로 있어서, 그 둘만 직접 읽어 채웁니다 (RESEARCH_METADATA.md).
+        # RW2's TIFF magic is 85, so exifread rejects the whole file. The
+        # values above came from the embedded preview EXIF fallback, and
+        # that has no ISO or lens. They are in fact sitting there in plain
+        # form in IFD0 0x0017 (ISO) and the embedded JPEG's MakerNote 0x0051
+        # (lens), so we read just those two directly and fill them in
+        # (RESEARCH_METADATA.md).
         from dataclasses import replace as _replace
 
         from .maker_meta import rw2_extras
@@ -1165,11 +1265,12 @@ def read_metadata(path: Path) -> RawMetadata:
 
 
 def _gps_degrees(tags: dict, value_key: str, ref_key: str) -> float | None:
-    """EXIF의 도/분/초 3원소를 부호 있는 십진 도로.
+    """EXIF's three degree/minute/second elements to signed decimal degrees.
 
-    EXIF는 위도를 '35도 41분 12.3초' + 'N' 형태로 나눠 담습니다. 남반구·
-    서반구는 ref가 S/W이고 값 자체는 양수라, ref를 안 보면 지구 반대편이
-    됩니다.
+    EXIF splits latitude into '35 degrees 41 minutes 12.3 seconds' + 'N'.
+    In the southern and western hemispheres the ref is S/W while the value
+    itself stays positive, so ignore the ref and you land on the opposite
+    side of the planet.
     """
     value = tags.get(value_key)
     if value is None:

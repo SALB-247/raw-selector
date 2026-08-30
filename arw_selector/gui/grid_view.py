@@ -1,8 +1,8 @@
-"""썸네일 격자.
+"""The thumbnail grid.
 
-4000장을 QListWidget에 아이템으로 밀어 넣으면 메모리와 시작 시간이 감당이
-안 됩니다. 모델/델리게이트로 만들고 썸네일은 화면에 보이는 것만 비동기로
-읽어 옵니다.
+Pushing 4000 photos into a QListWidget as items puts the memory and the
+start-up time out of reach. It is built as a model/delegate instead, and only
+the thumbnails visible on screen are read in, asynchronously.
 """
 
 from __future__ import annotations
@@ -41,36 +41,39 @@ GRADE_LABELS = {
     Grade.REVIEW: "REVIEW",
     Grade.REJECT: "REJECT",
 }
-"""등급을 글자로도 적습니다. 색만으로는 색각 이상이 있으면 구분이 안 됩니다."""
+"""The grade is written out in words too. Colour alone cannot be told apart
+by someone with a colour vision deficiency."""
 
 RECORD_ROLE = Qt.UserRole + 1
 
 
 THUMBNAIL_CACHE_BYTES = 128 * 1024 * 1024
-"""화면에 올린 썸네일을 붙들고 있을 최대 용량.
+"""The most memory the thumbnails put on screen may hold on to.
 
-예전에는 상한이 없어서, 스크롤하며 지나간 썸네일이 전부 램에 남았습니다.
-3000장 폴더에서 수백 MB가 되고 8GB PC에서는 그만큼 다른 곳이 좁아집니다.
-버려도 디스크 썸네일 캐시에서 곧바로 다시 읽으므로(수십 KB JPEG) 스크롤
-체감은 거의 그대롭니다.
+There used to be no ceiling, so every thumbnail scrolled past stayed in RAM.
+On a 3000-photo folder that comes to several hundred MB, and on an 8GB PC
+everything else gets that much tighter. Throwing one away costs little, as it
+is read straight back from the disk thumbnail cache (a JPEG of a few tens of
+KB), so scrolling feels much the same.
 """
 
 MIN_CACHED_THUMBNAILS = 60
-"""용량과 무관하게 최소한 유지할 장수. 한 화면분은 남아 있어야 합니다."""
+"""The fewest kept regardless of size. One screenful has to stay behind."""
 
 
 class RecordListModel(QAbstractListModel):
     def __init__(self, cache_dir: Path, parent=None):
         super().__init__(parent)
         self._records: list[ImageRecord] = []
-        # 최근에 쓴 것이 뒤로 가는 LRU. 넘치면 앞에서부터 버립니다.
+        # An LRU where the most recently used goes to the back. On overflow
+        # they are thrown away from the front.
         self._pixmaps: "OrderedDict[str, QPixmap]" = OrderedDict()
         self._pixmap_bytes = 0
         self._requested: set[str] = set()
         self.cache_dir = cache_dir
 
         self._pool = QThreadPool()
-        # 썸네일 읽기로 코어를 다 먹으면 UI가 버벅입니다
+        # Eating every core on thumbnail reads makes the UI stutter
         self._pool.setMaxThreadCount(max(2, QThreadPool.globalInstance().maxThreadCount() // 2))
         self._signals = ThumbnailSignals()
         self._signals.loaded.connect(self._on_thumbnail)
@@ -79,8 +82,9 @@ class RecordListModel(QAbstractListModel):
         self.beginResetModel()
         self._records = records
         if cache_dir is not None and cache_dir != self.cache_dir:
-            # 다른 폴더로 갈아탔으면 이전 썸네일은 다시 볼 일이 없습니다.
-            # 예전에는 이걸 안 비워서 폴더를 옮길수록 램이 쌓였습니다.
+            # Once you have switched to another folder there is no reason to
+            # look at the old thumbnails again. This used not to be cleared,
+            # so RAM piled up the more folders you moved through.
             self._pixmaps.clear()
             self._pixmap_bytes = 0
         if cache_dir is not None:
@@ -89,11 +93,12 @@ class RecordListModel(QAbstractListModel):
         self.endResetModel()
 
     def shutdown(self) -> None:
-        """썸네일 작업을 세웁니다.
+        """Stops the thumbnail work.
 
-        QRunnable은 끝나면서 시그널을 쏘는데, 그 시점에 모델이 이미
-        지워져 있으면 없는 객체의 슬롯을 부릅니다. 큐에 쌓인 것은 버리고
-        도는 것만 기다린 뒤, 신호선을 끊어 둡니다.
+        A QRunnable fires a signal as it finishes, and if the model has
+        already been destroyed by then it calls a slot on an object that is
+        not there. What is queued up is thrown away, only what is running is
+        waited for, and then the signal line is cut.
         """
         from .workers import silent_disconnect
 
@@ -108,10 +113,11 @@ class RecordListModel(QAbstractListModel):
         return max(0, pixmap.width() * pixmap.height() * max(1, pixmap.depth()) // 8)
 
     def _trim_cache(self) -> None:
-        """용량을 넘으면 오래된 것부터 버립니다.
+        """Throws away the oldest first once the size limit is passed.
 
-        버린 항목은 _requested에서도 빼야 합니다. 안 그러면 다시 화면에
-        들어와도 '이미 요청함'으로 걸러져 영영 안 그려집니다.
+        A thrown-away entry has to come out of _requested as well. Otherwise,
+        even when it comes back on screen it is filtered out as "already
+        requested" and never gets drawn again.
         """
         while (
             self._pixmap_bytes > THUMBNAIL_CACHE_BYTES
@@ -140,7 +146,7 @@ class RecordListModel(QAbstractListModel):
             key = str(record.path)
             pixmap = self._pixmaps.get(key)
             if pixmap is not None:
-                self._pixmaps.move_to_end(key)  # 최근에 쓴 것으로 표시
+                self._pixmaps.move_to_end(key)  # mark as most recently used
                 return pixmap
             self._request_thumbnail(record.path)
             return None
@@ -173,7 +179,8 @@ class RecordListModel(QAbstractListModel):
         self._pool.start(ThumbnailTask(path, self.cache_dir, self._signals))
 
     def _on_thumbnail(self, path_str: str, image) -> None:
-        # 워커는 QImage를 넘긴다. QPixmap 변환은 GUI 스레드인 여기서 합니다.
+        # The worker hands over a QImage. The conversion to QPixmap is done
+        # here, on the GUI thread.
         pixmap = QPixmap.fromImage(image) if image is not None and not image.isNull() else QPixmap()
         previous = self._pixmaps.pop(path_str, None)
         if previous is not None:
@@ -189,13 +196,14 @@ class RecordListModel(QAbstractListModel):
 
 
 class ThumbnailDelegate(QStyledItemDelegate):
-    """썸네일 + 등급 색 테두리 + 점수 배지를 그립니다."""
+    """Draws the thumbnail + the grade colour border + the score badge."""
 
     PADDING = 16
-    """썸네일 좌우에 두는 여백. 격자 칸 폭 계산이 이 값에 기댑니다."""
+    """The margin left and right of the thumbnail. Working out the grid cell
+    width leans on this value."""
 
     LABEL_HEIGHT = 34
-    """파일명·점수를 적을 아래 공간."""
+    """The space below, for writing the file name and the score."""
 
     def __init__(self, thumb_size: int = 180, parent=None):
         super().__init__(parent)
@@ -217,9 +225,11 @@ class ThumbnailDelegate(QStyledItemDelegate):
         grade_color = GRADE_COLORS.get(record.final_grade, QColor(120, 120, 120))
         selected = bool(option.state & QStyle.State_Selected)
 
-        # 선택은 등급과 다른 신호입니다. 예전에는 반투명 파란 사각형이라
-        # 등급 테두리와 섞여 무엇이 선택된 건지 헷갈렸습니다. 카드 전체를
-        # 밝은 판으로 깔고 굵은 테두리를 둘러 확실히 구분합니다.
+        # Selection is a different signal from the grade. It used to be a
+        # translucent blue rectangle, which mixed with the grade border and
+        # left you unsure what was selected. The whole card is laid on a
+        # bright panel and ringed with a thick border to tell them apart for
+        # certain.
         if selected:
             painter.setBrush(QColor(58, 74, 100))
             painter.setPen(QPen(QColor(140, 180, 255), 2))
@@ -242,13 +252,14 @@ class ThumbnailDelegate(QStyledItemDelegate):
             painter.setPen(QColor(90, 90, 98))
             painter.drawText(image_rect, Qt.AlignCenter, "…")
 
-        # 등급 — 얇은 테두리만으로는 3000장을 훑을 때 눈에 안 들어옵니다.
-        # 위쪽에 꽉 찬 색 띠를 깔고 글자를 얹어 색맹이어도 읽히게 합니다.
+        # Grade - a thin border alone does not register while sweeping
+        # through 3000 photos. A solid colour band is laid across the top
+        # with the text on it, so it reads even with colour blindness.
         band = QRect(image_rect.left(), image_rect.top(), image_rect.width(), 18)
         painter.setBrush(grade_color)
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(band, 4, 4)
-        painter.drawRect(band.adjusted(0, 8, 0, 0))  # 아래쪽 모서리는 각지게
+        painter.drawRect(band.adjusted(0, 8, 0, 0))  # bottom corners square
 
         font = QFont(painter.font())
         font.setPointSize(8)
@@ -257,11 +268,11 @@ class ThumbnailDelegate(QStyledItemDelegate):
         painter.setPen(QColor(20, 20, 24))
         label = GRADE_LABELS.get(record.final_grade, "")
         if record.manual_grade is not None:
-            label += " ✋"   # 사람이 직접 바꾼 등급
+            label += " ✋"   # a grade a person changed by hand
         painter.drawText(band.adjusted(6, 0, -6, 0), Qt.AlignVCenter | Qt.AlignLeft,
                          label)
 
-        # 점수는 정렬의 기준이라 크게 보여야 합니다
+        # The score is what the ordering is based on, so it has to show large
         painter.drawText(band.adjusted(6, 0, -6, 0),
                          Qt.AlignVCenter | Qt.AlignRight, f"{record.score:.0f}")
 
@@ -292,16 +303,20 @@ class ThumbnailGrid(QListView):
         self.setViewMode(QListView.IconMode)
         self.setResizeMode(QListView.Adjust)
         self.setMovement(QListView.Static)
-        self.setUniformItemSizes(True)  # 4000장 레이아웃 계산을 크게 줄입니다
+        self.setUniformItemSizes(True)  # far less layout maths for 4000 photos
         self.setSelectionMode(QListView.ExtendedSelection)
-        # spacing 대신 gridSize로 칸을 직접 잡습니다. 자투리 없이 한 줄에
-        # N개를 채우려면 칸 폭을 우리가 정해야 합니다 (_apply_thumb_size).
+        # The cells are set directly with gridSize instead of spacing. To fill
+        # a row with N of them and no remainder, we have to decide the cell
+        # width ourselves (_apply_thumb_size).
         self.setSpacing(0)
-        # **세로 스크롤바를 항상 켜 둡니다.** 껐다 켰다 하게 두면 무한 진동이
-        # 생깁니다: 스크롤바가 사라짐 → 뷰포트가 넓어짐 → 열이 하나 늘어남 →
-        # 칸이 작아져 전체 높이가 줄어듦 → 스크롤바가 필요 없어짐… 이 고리가
-        # 돌면서 격자가 2열↔3열로 계속 떨립니다(실제 리포트, 최대 크기에서 재현).
-        # 항상 켜 두면 뷰포트 폭이 내용과 무관해져 고리 자체가 끊깁니다.
+        # **The vertical scrollbar is kept on at all times.** Letting it come
+        # and go produces an endless oscillation: the scrollbar disappears ->
+        # the viewport widens -> one more column fits -> the cells shrink and
+        # the total height drops -> the scrollbar is not needed... round that
+        # loop goes, with the grid juddering between 2 and 3 columns (an
+        # actual report, reproduced at the maximum size). Kept on, the
+        # viewport width stops depending on the content and the loop itself
+        # is broken.
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self._desired_thumb = self.delegate.thumb_size
         self._resize_pending = False
@@ -322,36 +337,42 @@ class ThumbnailGrid(QListView):
         return [i.data(RECORD_ROLE) for i in self.selectedIndexes()]
 
     def set_thumb_size(self, size: int) -> None:
-        """사용자가 고른 **희망** 크기. 실제 크기는 여기서 한 줄에 딱 맞게 맞춥니다."""
+        """The **desired** size the user picked. The real size is fitted here
+        so that a row comes out exact."""
         self._desired_thumb = max(40, int(size))
         self._apply_thumb_size()
 
     CELL_GAP = 3
-    """칸 사이 여백 (픽셀). 격자를 gridSize로 직접 잡으므로 spacing 대신 씁니다."""
+    """The gap between cells (pixels). The grid is set directly with gridSize,
+    so this is used instead of spacing."""
 
     def _apply_thumb_size(self) -> None:
-        """희망 크기에 가장 가까우면서 **오른쪽에 여백이 남지 않는** 크기로.
+        """To the size closest to the desired one that **leaves no margin on
+        the right**.
 
-        예전에는 슬라이더 값을 그대로 썼습니다. 그러면 뷰포트 폭이 칸 폭의
-        배수가 아닐 때 오른쪽에 한 칸이 안 되는 자투리가 남습니다 — 폭이
-        1200px이고 칸이 200px이면 딱 맞지만, 칸이 190px이면 6칸 1140px에
-        60px이 그냥 버려집니다.
+        The slider value used to be used as-is. That leaves a remainder of
+        less than one cell on the right whenever the viewport width is not a
+        multiple of the cell width - at a width of 1200px and a cell of 200px
+        it comes out exact, but at a cell of 190px, 6 cells make 1140px and
+        60px is simply thrown away.
 
-        열 개수를 먼저 정하고 그 개수로 폭을 나누면 자투리가 열 개수 미만
-        (최대 몇 픽셀)으로 줄어듭니다.
+        Deciding the column count first and dividing the width by that count
+        brings the remainder below the column count (a few pixels at most).
 
-        **뷰포트 폭이 바뀔 때마다 다시 부릅니다.** 우측에 판정 기준이나
-        대기열 패널이 나타나면 격자 폭이 달라지는데, 그때 다시 안 맞추면
-        패널을 열 때마다 자투리가 생깁니다.
+        **This is called again every time the viewport width changes.** When
+        the scoring criteria or the queue panel appears on the right the grid
+        width changes, and without re-fitting then, a remainder appears every
+        time a panel is opened.
         """
         width = self.viewport().width()
         if width <= 0:
             return
 
         desired_cell = self._desired_thumb + self.delegate.PADDING + self.CELL_GAP * 2
-        # **내림이 아니라 반올림**입니다. 내림으로 열 수를 정하면 남는 폭이
-        # 전부 칸 크기로 들어가, 300px을 요청했는데 378px이 나오는 식으로
-        # 슬라이더가 헛돕니다. 반올림하면 실제 크기가 요청에 가장 가깝습니다.
+        # **Rounding, not flooring.** Deciding the column count by flooring
+        # pours all the leftover width into the cell size, so you ask for
+        # 300px and get 378px - the slider spins for nothing. Rounding puts
+        # the real size closest to what was asked for.
         columns = max(1, round(width / max(1, desired_cell)))
         cell = max(1, width // columns)
         thumb = max(40, cell - self.delegate.PADDING - self.CELL_GAP * 2)
@@ -364,7 +385,7 @@ class ThumbnailGrid(QListView):
         self.model_.layoutChanged.emit()
 
     def columns(self) -> int:
-        """지금 한 줄에 들어가는 칸 수. 테스트와 진단용."""
+        """How many cells fit in a row right now. For tests and diagnostics."""
         cell = self.gridSize().width()
         if cell <= 0:
             return 0
@@ -372,33 +393,39 @@ class ThumbnailGrid(QListView):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        # **여기서 바로 계산하면 안 됩니다.** resizeEvent 시점의
-        # viewport().width()는 아직 예전 값입니다. 그대로 쓰면 넓었을 때의
-        # 열 수가 그대로 남아, 우측에 판정 기준·대기열 패널을 열면 격자가
-        # 좁아졌는데도 한 열만 남고 오른쪽이 텅 빕니다(실제 리포트).
+        # **The calculation must not happen right here.** At resizeEvent time
+        # viewport().width() is still the old value. Used as-is, the column
+        # count from when it was wide stays put, so opening the scoring
+        # criteria or the queue panel on the right leaves only one column
+        # even though the grid has narrowed, and the right side is empty (an
+        # actual report).
         #
-        # 이벤트 루프를 한 바퀴 돌린 뒤에 재면 갱신된 폭이 나옵니다.
+        # Measured after one turn of the event loop, the updated width comes
+        # out.
         self._schedule_thumb_size()
 
     def eventFilter(self, watched, event):
-        """**뷰포트**의 크기 변화를 직접 듣습니다.
+        """Listens directly for the **viewport's** size changes.
 
-        위젯의 resizeEvent 시점에는 viewport().width()가 아직 예전 값입니다.
-        칸 폭은 뷰포트 기준으로 계산하므로, 위젯 쪽만 듣고 있으면 넓었을 때의
-        열 수가 그대로 남습니다 — 우측에 판정 기준·대기열을 함께 열면 격자가
-        절반 이하로 좁아지는데도 열이 안 줄어 오른쪽이 텅 빕니다.
+        At the widget's resizeEvent time viewport().width() is still the old
+        value. The cell width is calculated against the viewport, so listening
+        only on the widget side leaves the column count from when it was wide
+        in place - open the scoring criteria and the queue on the right
+        together and the grid narrows to less than half, yet the columns do
+        not reduce and the right side is left empty.
 
-        뷰포트 리사이즈는 폭이 확정된 뒤에 옵니다.
+        The viewport resize arrives after the width has settled.
         """
         if watched is self.viewport() and event.type() == QEvent.Resize:
             self._schedule_thumb_size()
         return super().eventFilter(watched, event)
 
     def _schedule_thumb_size(self) -> None:
-        """다음 이벤트 루프에서 한 번만 다시 맞춥니다.
+        """Re-fits just once, on the next turn of the event loop.
 
-        연속으로 리사이즈될 때(창을 끄는 중) 매 픽셀마다 격자를 다시 짜지
-        않도록 예약을 하나로 묶습니다.
+        While resizes come one after another (dragging the window) the
+        bookings are folded into one, so the grid is not rebuilt for every
+        pixel.
         """
         if self._resize_pending:
             return
@@ -411,5 +438,5 @@ class ThumbnailGrid(QListView):
         QTimer.singleShot(0, run)
 
     def refresh(self) -> None:
-        """등급이 바뀌었을 때 다시 그립니다."""
+        """Redraws when a grade has changed."""
         self.viewport().update()

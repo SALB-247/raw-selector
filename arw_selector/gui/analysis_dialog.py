@@ -1,11 +1,13 @@
-"""분석 시작 다이얼로그 — 무엇을 몇 장 분석하는지 보여 주고 옵션을 고릅니다.
+"""Start-analysis dialog - shows what and how many, and picks the options.
 
-분석 버튼을 눌렀을 때만 뜹니다. 폴더를 열 때의 자동 분석은 지금처럼 바로
-시작합니다 — 가장 흔한 흐름에 클릭을 하나 얹지 않기 위해서입니다. 이 창은
-"다시 분석"의 자리이므로 캐시를 무시하는 선택지가 여기에 있습니다.
+It only comes up when the analyse button is pressed. The automatic analysis
+on opening a folder still starts straight away, as it does now - so as not
+to lay one more click on the most common flow. This window is the place for
+"analyse again", which is why the option to ignore the cache lives here.
 
-옵션이 늘 때 툴바가 아니라 이 창이 받도록 만들었습니다(정밀 분석 묶음).
-설정값은 세션의 AnalyzeConfig에 반영되어 다음 분석에도 유지됩니다.
+It was built so that when options grow it is this window, not the toolbar,
+that takes them (the precision group). The values are written back to the
+session's AnalyzeConfig and carry over to the next analysis.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from .i18n import format_duration, tr
 
 @dataclass(frozen=True)
 class AnalysisOptions:
-    """다이얼로그가 돌려주는 선택."""
+    """The choices the dialog hands back."""
 
     use_cache: bool
     noise_compensation: bool
@@ -39,7 +41,8 @@ class AnalysisOptions:
 
 
 class AnalysisStartDialog(QDialog):
-    """사진 수·캐시 상태를 먼저 보여 주고, 캐시·정밀 옵션을 고르게 합니다."""
+    """Shows the photo count and cache state first, then lets you pick the
+    cache and precision options."""
 
     def __init__(self, photo_count: int, cached_count: int,
                  analyze: AnalyzeConfig, parent=None,
@@ -67,7 +70,7 @@ class AnalysisStartDialog(QDialog):
         self.cache_label = QLabel(cache_text)
         layout.addWidget(self.cache_label)
 
-        # ---------------- 캐시
+        # ---------------- Cache
         self.use_cache = QCheckBox(tr("Use cached results"))
         self.use_cache.setChecked(cached_count > 0)
         self.use_cache.setEnabled(cached_count > 0)
@@ -75,13 +78,14 @@ class AnalysisStartDialog(QDialog):
             self.use_cache.setToolTip(
                 tr("Unchecked: ignore the cache and re-analyse every photo."))
         else:
-            # 비활성이어도 "왜 못 누르는지"는 보여야 합니다 — 잠긴 컨트롤에
-            # 이유가 없으면 사용자가 버그로 읽습니다 (JPEG 잠금에서 배운 것).
+            # Even when disabled it has to show "why it cannot be pressed" -
+            # a locked control with no reason reads to the user as a bug
+            # (learnt from the JPEG lock).
             self.use_cache.setToolTip(
                 tr("No usable cache for these photos and settings."))
         layout.addWidget(self.use_cache)
 
-        # ---------------- 정밀 분석
+        # ---------------- Precise analysis
         precise = QGroupBox(tr("Precision"))
         box = QVBoxLayout(precise)
 
@@ -111,8 +115,8 @@ class AnalysisStartDialog(QDialog):
             "Faces and eyes always take priority."))
         box.addWidget(self.af_hint)
 
-        # 작은 프리뷰(파나소닉 RW2)가 섞여 있을 때만 나옵니다. 해당 파일이
-        # 없는 폴더에 선택지를 늘리지 않습니다.
+        # Only appears when small previews (Panasonic RW2) are mixed in. It
+        # does not add a choice to a folder that has none of those files.
         self.demosaic_small = QCheckBox(
             tr("Develop small-preview RAW for analysis ({count} photos)")
             .format(count=small_preview_count))
@@ -137,8 +141,9 @@ class AnalysisStartDialog(QDialog):
         buttons = QDialogButtonBox()
         self.start_button = buttons.addButton(
             tr("Start analysis"), QDialogButtonBox.AcceptRole)
-        # 표준 Cancel 버튼은 Qt 내장 번역이 있어야 한국어가 되는데, 그 카탈로그를
-        # 안 싣습니다. 우리 tr()로 라벨을 직접 답니다.
+        # The standard Cancel button only turns Korean with Qt's built-in
+        # translation, and we do not ship that catalogue. The label is
+        # attached directly with our own tr().
         buttons.addButton(tr("Cancel"), QDialogButtonBox.RejectRole)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -151,11 +156,12 @@ class AnalysisStartDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _refresh_estimate(self) -> None:
-        """옵션에 따라 몇 장을 새로 분석하고 얼마나 걸릴지 갱신합니다.
+        """Refreshes how many get analysed fresh, and how long it takes.
 
-        작은 프리뷰 옵션이 있는 폴더에서는 **두 경우의 시간을 나란히**
-        보여 줍니다. "5배 느려집니다"는 판단에 쓸 수 없는 말입니다 —
-        1분이 5분이 되는 것과 20초가 100초가 되는 것은 다른 결정입니다.
+        In a folder that has the small-preview option, it shows **both times
+        side by side**. "5x slower" is not something you can decide on -
+        1 minute becoming 5 minutes and 20 seconds becoming 100 seconds are
+        different decisions.
         """
         reused = self._cached_count if self.use_cache.isChecked() else 0
         pending = max(0, self._photo_count - reused)
@@ -164,8 +170,9 @@ class AnalysisStartDialog(QDialog):
                 tr("Everything is cached — results will appear instantly."))
             return
 
-        # 캐시에서 재사용하는 만큼은 어느 쪽에서 왔는지 모릅니다. 비율이
-        # 같다고 보고 남은 장수에 비례 배분합니다.
+        # There is no telling which side the ones reused from cache came
+        # from. Assume the ratio is the same and split the remaining count
+        # in proportion.
         share = (self._small_preview_count / self._photo_count
                  if self._photo_count else 0.0)
         heavy = round(pending * share)
@@ -199,7 +206,7 @@ class AnalysisStartDialog(QDialog):
     @staticmethod
     def ask(photo_count: int, cached_count: int, analyze: AnalyzeConfig,
             parent=None, small_preview_count: int = 0) -> AnalysisOptions | None:
-        """다이얼로그를 띄우고, 취소면 None."""
+        """Puts the dialog up; None on cancel."""
         dialog = AnalysisStartDialog(photo_count, cached_count, analyze, parent,
                                      small_preview_count)
         dialog.setModal(True)

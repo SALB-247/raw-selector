@@ -28,8 +28,9 @@ class ShotDetails(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        # 채점표 오른쪽 여백에 앉습니다 — 폭을 스스로 최소로 유지해야
-        # 근거 문구 열(stretch 1)이 남는 공간을 가져갑니다.
+        # It sits in the margin to the right of the score card - it has to
+        # keep its own width minimal so the reason-text column (stretch 1)
+        # takes the space that is left.
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(0, 0, 0, 0)
@@ -54,8 +55,8 @@ class ShotDetails(QWidget):
 
         body = (metadata.camera_model or "").strip()
         make = (metadata.camera_make or "").strip()
-        # 소니는 Model에 제조사가 없고("ILCE-6700"), 캐논은 이미 들어
-        # 있습니다("Canon EOS R5") — 중복으로 붙이지 않습니다.
+        # Sony has no maker in Model ("ILCE-6700"), Canon already has it in
+        # there ("Canon EOS R5") - do not attach it twice.
         if body and make and not body.upper().startswith(make.split()[0].upper()):
             body = f"{make} {body}"
         if body:
@@ -66,9 +67,11 @@ class ShotDetails(QWidget):
 
         if metadata.focal_length:
             text = f"{metadata.focal_length:g} mm"
-            # 풀프레임은 환산이 곧 실초점이라 표기가 소음입니다. 캐논은
-            # 역산이라 ±0.3% 오차(400→399)가 나므로, 2% 넘게 다를 때만
-            # 환산을 보여 줍니다 — 크롭 바디(1.5×)는 확실히 걸립니다.
+            # On full frame the equivalent is the real focal length, so
+            # printing it is noise. Canon works it out backwards, giving a
+            # ±0.3% error (400 -> 399), so the equivalent is only shown when
+            # they differ by more than 2% - a crop body (1.5x) is caught
+            # for certain.
             equiv = metadata.focal_length_35mm
             if equiv and abs(equiv - metadata.focal_length) > 0.02 * equiv:
                 text += " · " + tr("{eq:g} mm equiv.").format(eq=equiv)
@@ -90,8 +93,9 @@ class ShotDetails(QWidget):
         if metadata.has_location:
             ns = "N" if metadata.latitude >= 0 else "S"
             ew = "E" if metadata.longitude >= 0 else "W"
-            # 소수 3자리(≈110m) — 장소 폴더 이름(4자리)보다도 덜 정밀합니다.
-            # 위치는 화면 표시까지만이고 내보내는 파일에는 절대 안 씁니다.
+            # 3 decimal places (~110m) - less precise even than the place
+            # folder name (4 places). Location goes no further than the
+            # screen and is never written into an exported file.
             rows.append((tr("Location"),
                          f"{abs(metadata.latitude):.3f}{ns} "
                          f"{abs(metadata.longitude):.3f}{ew}"))

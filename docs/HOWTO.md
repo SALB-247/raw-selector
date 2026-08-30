@@ -174,6 +174,14 @@ opens the "Clear cache" dialog. It lists the analysis entries, thumbnails,
 total size, and the estimated time to rebuild; confirm with **Yes** to clear.
 Undo records for past exports are kept.
 
+The cache is keyed on the analysis options as well as the file, because a
+result measured with different options is not the same result. Those options
+are remembered between runs — while they were not, turning one on and
+analysing a folder meant that the next time you opened the program the
+options fell back to their defaults, the key no longer matched, and a full
+cache counted as nothing: the folder asked to be analysed again from
+scratch.
+
 ## Reviewing and culling
 
 ### Filtering and sorting
@@ -309,10 +317,30 @@ The footer holds the grade buttons **keep (1)**, **review (2)**, **reject
 The develop panel sits on the right (hidden in Preview mode; resizable via the
 splitter). At the top is the develop-preset bar — see
 [Develop presets](#develop-presets). A vertical strip of section icons jumps
-to each section; every section header is collapsible, has an eye button
-(**Toggle this section's edits on and off (values kept)**) and a ● marker when
-modified. Every slider row has its own reset button, and double-clicking a
-slider resets it. **Reset all** at the bottom of the panel clears every edit.
+to each section.
+
+Every section header is collapsible and carries an eye button that switches
+that section's edits on and off while keeping its values, so you can see the
+photo with and without one part of your work. The header tells you where each
+section stands:
+
+- **(off)** — the section is not applying anything. A photo you have not
+  edited opens with every section off, which is what makes the marks worth
+  reading.
+- **●** — the section holds values. Open a photo you edited before and
+  exactly the sections that hold values come up switched on.
+- **● (off)** — it has values, but you have switched them off for now.
+
+Touching any control in a section that is off switches it back on, so a
+slider you move always takes effect.
+
+Sections above the **On the exported file** divider adjust the photograph.
+The three below it — the capture-info strip, the watermark and the EXIF
+metadata — put something onto the file that leaves, rather than changing the
+picture.
+
+Every slider row has its own reset button, and double-clicking a slider
+resets it. **Reset all** at the bottom of the panel clears every edit.
 
 #### Match camera JPEG
 
@@ -359,19 +387,61 @@ double-click an empty area to reset. Below it are the parametric sliders
 
 #### Detail
 
-Sharpening and noise reduction: **Sharpening**, **Radius**, the **Noise
-method** combo (**Standard (non-local means)**, **High quality (non-local
-means, slow)**, **Fast (bilateral filter)**, **Legacy (reproduces old
-versions)**), **Noise reduction**, **Passes** (1–4, NL-means only), **Detail
-preservation**, **Color noise reduction**, **Color noise radius**, **Shadow
-color noise**, **Destripe** (removes LED-lighting banding), and **Face
-priority** (weights noise reduction toward faces).
+![Detail section with Fine tuning folded away](screenshots/develop-detail.png)
+
+Three sliders are in the open — **Sharpening**, **Noise reduction**, and
+**Color noise reduction** — plus **Destripe**, which takes out the horizontal
+banding LED lighting leaves.
+
+Everything that shapes *how* those three work sits under **Fine tuning**,
+folded away: **Sharpen radius**, the **Noise method** combo (**Standard
+(non-local means)**, **High quality (non-local means, slow)**, **Fast
+(bilateral filter)**, **Legacy (reproduces old versions)**), **Passes** (1–4,
+NL-means only), **Detail preservation**, **Color noise radius**, **Shadow
+color noise**, and **Face priority** (weights noise reduction toward faces).
+The defaults there are measured ones; open the fold when a particular photo
+needs it, not every time.
+
+**Shadow color noise** is on by default and does the work where colour
+blotching is worst. Measured on the shadows of five high-ISO files, colour
+noise left at the middle of the **Color noise reduction** slider drops from
+46% to 15% with it on, and the top of the slider reaches 9%. Bright areas
+keep their colour throughout — the top of the slider spends colour in the
+dark instead, which is why the strength is gated to the shadows at all.
+
+![Shadow colour noise at ISO 1600: none, gated off, gated on](screenshots/shadow-colour-noise.png)
+
+*The edge of a plate against a dark table, shadows lifted +0.6 EV and shown
+at 3× actual pixels. Left: the red and green speckle colour noise leaves in
+the shadows. Middle: the slider at 50 with the shadow gate off. Right: the
+default. The lit side of the frame looks the same in all three — the gate
+spends the strength on the dark side instead, where measured blotching falls
+a further 33% (0.81 → 0.54). This is the one picture in the manual taken from
+a real photograph; the rest are drawn, because a photograph of a real place
+carries faces, number plates and signs into a public repository.*
 
 Several gentle passes cost far less detail than one strong pass for the same
-amount of noise removed, so raising **Noise reduction** above 70 moves
-**Passes** up to 2 for you. The slider visibly moves rather than changing
-anything behind your back, so you can put it back to 1; if you have already
-chosen 3 or 4 passes it is left alone.
+amount of noise removed, so **Passes** starts at **2**, and pushing **Noise
+reduction** past 70 nudges it to 3. The slider visibly moves rather than
+changing anything behind your back, so you can put it back; if you had
+already chosen 3 or 4 it is left alone. A photo saved under an earlier
+version keeps the pass count it was saved with and renders exactly as it did.
+
+The cost is time, not detail. Time is proportional to the pass count: about
+0.9 seconds per pass at 32MP, and on a 50MP frame the noise stage measured
+6.3 seconds at one pass against 8.4 at two. How much of that you notice in an
+export depends on the machine.
+
+**"High quality (non-local means, slow)" is not the one to reach for first.**
+The name describes a wider search window (a 7×7 patch over 21 pixels against
+Standard's 5×5 over 11), not a better result. Its old headline figure was
+measured with the two methods removing an *equal* amount of noise — but you
+set a slider, not a removal target, and at the same slider value it runs
+about 2.7× slower, removes a similar amount, and gives up *more* detail than
+**Standard**: across four files at ISO 800–12800, edge retention of 50–99%
+against Standard's 73–100%, with a blotchier residual. It earns its place on
+a frame where you want the last of the fine grain gone and there is little
+detail to lose; it is not a free upgrade.
 
 #### Local adjustments (masks)
 
@@ -385,6 +455,12 @@ chosen 3 or 4 passes it is left alone.
   (bokeh)**
 - Light & sky: **Bluer sky**, **Spotlight (darken surroundings)**, **Brighten
   area (radial)**, **Darken area (radial)**
+- Subject: **Keep the main subject**, **Emphasize the subject (precise)** —
+  a trained segmentation model, so the edge follows hair far more finely than
+  the colour-spread background masks do. On a stage shot with several people
+  the model tends to pick the one that stands out; the others that were
+  detected are filled back in by the older method, so you do not get a photo
+  where four of five people were left alone.
 - Manual: **Brush (paint by hand)**
 
 Masks stack in a list with per-mask enable checkboxes, a **Show region**
@@ -395,7 +471,22 @@ number spin — plus a face-count readout. Every mask has **Range** (%),
 **Strength** (%), **Feather** (%), and **Invert region**, and its own
 adjustment sliders: **Exposure**, **Contrast**, **Highlights**, **Shadows**,
 **Temperature**, **Saturation**, **Texture**, **Clarity**, **Skin
-smoothing**, and **Sharpening**. Radial and linear masks show drag handles on
+smoothing**, and **Sharpening**.
+
+**Building a region from several pieces.** A mask is not limited to one
+shape. Under the mask you can add pieces that **Add** (both areas),
+**Subtract** (take one out of the other — the face without the eyes), or
+**Intersect** (only where both overlap — the top half of the background
+only). Each piece carries its own feather, range and invert, and can be
+unticked to take it out for a moment. The red **Show region** overlay draws
+the finished region, so what you see is always what gets adjusted.
+
+**Tone curve (advanced).** Below the mask sliders is a folded **Tone
+curve ▸**. Open it and you get the same editor as the global curve —
+luminance, R, G and B — applied to that mask's area alone. It is there for
+gradation the sliders cannot reach: pressing down a sky, cooling a background
+on its own. A mask that already carries a curve opens the fold for you, so a
+picture never changes somewhere you cannot see. Radial and linear masks show drag handles on
 the image — drag the centre to move, an edge point to resize, an outer point
 to rotate.
 
@@ -417,6 +508,8 @@ Per-colour adjustment over eight bands. Pick the channel (**Hue**,
 
 #### Color grading
 
+![Color grading wheels](screenshots/develop-grade.png)
+
 Three colour wheels — **Midtones**, **Shadows**, **Highlights** — each with a
 **Luminance** slider and a zone reset; drag a wheel to set hue and
 saturation, double-click it to reset. **Blending** and **Balance** control how
@@ -424,7 +517,7 @@ the zones mix.
 
 #### Effects
 
-Film-style finishing: **Grain**, **Grain size**, **Vignetting**, and
+Film-style finishing: **Grain**, **Grain size**, **Correct vignetting**, and
 **Vignette midpoint**.
 
 #### Optics
@@ -513,7 +606,12 @@ queue panel:
   saved develop preset. A preset's crop and masks never overwrite the row's
   own.
 - **Selected rows:** a bulk preset combo plus **Apply** sets many rows at
-  once.
+  once, and a watermark combo plus **Stamp** puts one watermark on every
+  selected row. Watermarks are stored separately from the colour work (so the
+  same logo can ride on several looks), which used to mean there was no way
+  to apply one in bulk — a hundred photos meant opening the develop window a
+  hundred times. Stamping leaves each row's develop settings, crop and masks
+  alone; picking **(no edit)** takes the watermark back off.
 - **Remove selected** deletes rows; **Clear** empties the queue after a
   confirmation.
 - **Save** / **Load** store the queue as a JSON file; loading merges into the
@@ -552,6 +650,12 @@ asks for a destination folder, then opens the "Export options" dialog.
   wider space loses shadow steps.
 - **Filename** group — a **Pattern** field with click-to-insert token buttons
   **{name}**, **{index}**, **{grade}**, **{date}**, **{time}**, **{score}**.
+  **{date}** and **{time}** are the time the shutter fired. If the analysis
+  did not record one — a photo that came from an older cache, or one that was
+  never analysed in this session — the file's EXIF is read directly rather
+  than quietly falling back to today's date; failing that, the file's
+  modification time (which is the capture time for a card straight off the
+  camera), and only then the clock.
 
 A live one-line summary shows what will be exported, with an example
 filename. **Export** starts; **Cancel** backs out.

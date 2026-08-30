@@ -1,8 +1,10 @@
-"""프리셋 저장소.
+"""Preset store.
 
-판정 기준과 보정 설정 양쪽이 같은 구조를 씁니다. 사용자 홈의 설정 폴더에
-YAML로 저장하므로 다른 촬영, 다른 세션에서도 그대로 불러 쓸 수 있고
-파일을 직접 열어 편집하거나 남에게 넘길 수도 있습니다.
+The scoring criteria and the adjustment settings both use the same
+structure. They are saved as YAML in a settings folder under the user's
+home, so they can be loaded on another shoot or in another session as they
+are, and the file can be opened and edited by hand or handed to someone
+else.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-from .appinfo import (  # noqa: F401 (재수출)
+from .appinfo import (  # noqa: F401 (re-export)
     APP_DIR_NAME,
     LEGACY_APP_DIR_NAMES,
     _config_root,
@@ -35,35 +37,41 @@ _SAFE_NAME = re.compile(r"[^\w가-힣 _-]+")
 
 
 def user_config_dir() -> Path:
-    """플랫폼별 설정 폴더.
+    """The per-platform settings folder.
 
-    프리셋·렌즈 프로필은 실행 파일 옆 data/ 에 둡니다. 앱 폴더를 통째로
-    옮기면 함께 따라가야 자연스럽기 때문입니다. 쓰기가 막힌 위치에
-    설치했을 때만 사용자 폴더로 물러납니다(appinfo.data_dir 참고).
+    Presets and lens profiles live in data/ next to the executable, because
+    it is natural for them to come along when the whole app folder is
+    moved. Only when it is installed somewhere that cannot be written to
+    does it fall back to the user folder (see appinfo.data_dir).
     """
     return data_dir()
 
 
 def migrate_legacy_config() -> Path | None:
-    """예전 위치에 저장된 프리셋을 지금 쓰는 데이터 폴더로 복사합니다.
+    """Copies presets saved at an old location into the data folder in use
+    now.
 
-    두 번의 이사를 모두 흡수합니다:
-      1) %APPDATA%/arw_selector   (예전 제품명)
-      2) %APPDATA%/raw_selector   (제품명은 같지만 AppData에 두던 시절)
-    지금은 실행 파일 옆 data/ 가 기본이라, 위 둘 중 먼저 발견되는 것을
-    가져옵니다. 이걸 빠뜨리면 사용자가 만든 프리셋이 통째로 사라진 것처럼
-    보입니다.
+    It absorbs both moves:
+      1) %APPDATA%/arw_selector   (the old product name)
+      2) %APPDATA%/raw_selector   (same product name, back when it lived
+                                   in AppData)
+    The default now is data/ next to the executable, so whichever of the
+    two is found first is brought over. Leave this out and the presets the
+    user made look as though they have vanished wholesale.
 
-    옮기지 않고 **복사**합니다. 이 툴의 기본 원칙(되돌릴 수 없는 일은 하지
-    않는다)에 맞추고, 예전 버전을 다시 실행해도 그대로 동작하게 두기
-    위해서입니다. 대상에 이미 프리셋이 있으면 건드리지 않습니다.
+    It **copies** rather than moves. That fits this tool's basic principle
+    (do nothing that cannot be undone) and leaves an older version working
+    as before if it is run again. If the target already has presets, it is
+    not touched.
 
-    돌려주는 값은 실제로 복사해 온 예전 폴더 경로 (없었으면 None).
+    The return value is the path of the old folder actually copied from
+    (None if there was not one).
     """
     import shutil
 
     target = user_config_dir()
-    # 이미 프리셋이 하나라도 있으면 사용자의 현재 작업물이므로 덮지 않습니다
+    # if even one preset is already there it is the user's current work,
+    # so we do not overwrite it
     for subdir in (SELECT_PRESET_DIR, DEVELOP_PRESET_DIR):
         existing = target / subdir
         if existing.is_dir() and any(existing.glob("*.yaml")):
@@ -91,10 +99,10 @@ def migrate_legacy_config() -> Path | None:
 
 
 def safe_filename(name: str) -> str:
-    """프리셋 이름을 파일명으로 쓸 수 있게 정리합니다.
+    """Cleans a preset name up so it can be used as a filename.
 
-    사용자가 이름에 슬래시나 '..'을 넣어도 지정한 폴더 밖으로 나가지
-    않아야 합니다.
+    Even if the user puts a slash or '..' in the name, it must not escape
+    the folder it was given.
     """
     cleaned = _SAFE_NAME.sub("", name).strip()
     cleaned = cleaned.replace("..", "").strip(". ")
@@ -113,7 +121,7 @@ class PresetInfo:
 
 
 class PresetStore:
-    """한 종류의 프리셋을 다루는 저장소."""
+    """A store that handles one kind of preset."""
 
     def __init__(self, subdirectory: str, root: Path | None = None):
         self.directory = (root or user_config_dir()) / subdirectory
@@ -122,11 +130,12 @@ class PresetStore:
         self.directory.mkdir(parents=True, exist_ok=True)
 
     def list(self) -> list[PresetInfo]:
-        """이름 순으로 반환합니다.
+        """Returns them in name order.
 
-        stat이 잠깐 실패해도(백신이 방금 저장한 파일을 스캔하며 순간적으로
-        잠그는 경우) 프리셋을 목록에서 빼지 않습니다. 그렇지 않으면 방금
-        저장한 프리셋이 화면에서 사라진 것처럼 보입니다.
+        Even if stat fails for a moment (antivirus briefly locking a file
+        it has just scanned after saving), the preset is not dropped from
+        the list. Otherwise a preset that has just been saved looks as
+        though it has disappeared from the screen.
         """
         if not self.directory.exists():
             return []
@@ -160,13 +169,14 @@ class PresetStore:
         return path
 
     def load(self, name_or_path: str | Path) -> dict[str, Any]:
-        """프리셋 내용을 돌려줍니다.
+        """Returns the contents of the preset.
 
-        손상된 파일은 **OSError 아니면 ValueError**로 던집니다. 화면 쪽은
-        전부 그 둘만 잡아 경고창을 띄우는데(gui/preset_bar.py 등), YAML
-        파서가 내는 `yaml.YAMLError`는 ValueError가 아니라서 그 그물을
-        빠져나갑니다. 그러면 Qt 슬롯 밖으로 새어나가 사용자에게는 경고창
-        대신 앱이 사라지는 것으로 보입니다. 여기서 바꿔 둡니다.
+        A damaged file is raised as **either OSError or ValueError**. The
+        screen side catches only those two and shows a warning dialog
+        (gui/preset_bar.py and others), but the `yaml.YAMLError` the YAML
+        parser raises is not a ValueError, so it slips through that net. It
+        then escapes past the Qt slot and, instead of a warning dialog, the
+        user sees the app disappear. We convert it here.
         """
         path = (
             Path(name_or_path)
@@ -194,30 +204,32 @@ class PresetStore:
 
 
 def select_presets(root: Path | None = None) -> PresetStore:
-    """판정 기준 프리셋."""
+    """Scoring criteria presets."""
     return PresetStore(SELECT_PRESET_DIR, root)
 
 
 def develop_presets(root: Path | None = None) -> PresetStore:
-    """보정 프리셋."""
+    """Adjustment presets."""
     return PresetStore(DEVELOP_PRESET_DIR, root)
 
 
 def watermark_presets(root: Path | None = None) -> PresetStore:
-    """워터마크 프리셋.
+    """Watermark presets.
 
-    보정과 따로 두는 이유: 같은 워터마크를 여러 색감에 얹거나 같은 색감에
-    다른 워터마크를 얹는 일이 흔합니다. 한 덩어리로 묶으면 조합마다 프리셋을
-    만들어야 합니다(DevelopSettings.for_preset 참고).
+    Why they are kept apart from the adjustments: putting the same
+    watermark on several looks, or a different watermark on the same look,
+    is common. Bundled into one lump you would have to make a preset for
+    every combination (see DevelopSettings.for_preset).
     """
     return PresetStore(WATERMARK_PRESET_DIR, root)
 
 
 def default_develop_profiles() -> dict[str, dict]:
-    """기본으로 제공하는 카메라 프로파일 프리셋.
+    """The camera profile presets shipped by default.
 
-    디모자이크 베이스라인(표준)에 얹는 '룩'입니다. 색온도는 컷마다 달라야
-    하므로 넣지 않아, 어떤 사진에도 그대로 적용할 수 있습니다.
+    They are 'looks' laid on top of the demosaic baseline (the standard
+    profile). Colour temperature has to differ per frame so it is not
+    included, which means they can be applied to any photo as they are.
     """
     from .develop import (
         BasicSettings,
@@ -232,7 +244,7 @@ def default_develop_profiles() -> dict[str, dict]:
         return HSLSettings(bands=dict(bands))
 
     profiles = {
-        # 표준 = 베이스라인 그대로 (룩 초기화용)
+        # standard = the baseline as it is (for resetting the look)
         "표준": DevelopSettings(),
         "인물": DevelopSettings(
             basic=BasicSettings(contrast=-8, clarity=-12, vibrance=10, saturation=-3),
@@ -263,11 +275,13 @@ def default_develop_profiles() -> dict[str, dict]:
 
 
 def install_default_profiles(root: Path | None = None) -> int:
-    """기본 프로파일 프리셋을 한 번 설치합니다. 설치한 개수를 반환.
+    """Installs the default profile presets once. Returns how many were
+    installed.
 
-    이미 설치했으면(마커 존재) 건너뜁니다. 사용자가 지운 프리셋을 매번
-    되살리지 않도록 마커로 한 번만 씁니다. 같은 이름을 사용자가 이미
-    쓰고 있으면 덮어쓰지 않습니다.
+    If they were installed already (the marker exists) it is skipped. The
+    marker makes it a one-time write so that presets the user deleted are
+    not brought back every time. If the user is already using the same
+    name, it is not overwritten.
     """
     store = develop_presets(root)
     store.ensure_dir()
@@ -284,11 +298,12 @@ def install_default_profiles(root: Path | None = None) -> int:
 
 
 def default_select_presets() -> dict[str, dict]:
-    """기본으로 제공하는 판정(셀렉트) 프리셋.
+    """The scoring (culling) presets shipped by default.
 
-    코드 기본값(ScoreConfig·GroupConfig) 그대로입니다. 개인 촬영 맥락이 담긴
-    프리셋을 배포본에 담지 않으려고, 배포에는 이 일반값만 코드에서 만들어
-    넣습니다 — 보정 프리셋과 같은 방식입니다.
+    They are the code defaults (ScoreConfig, GroupConfig) as they are. So
+    that presets carrying a personal shooting context do not end up in the
+    build, only these generic values are generated from code and put in -
+    the same approach as the adjustment presets.
     """
     from dataclasses import asdict
 
@@ -303,11 +318,13 @@ def default_select_presets() -> dict[str, dict]:
 
 
 def install_default_select_presets(root: Path | None = None) -> int:
-    """기본 판정 프리셋을 한 번 설치합니다. 설치한 개수를 반환.
+    """Installs the default scoring presets once. Returns how many were
+    installed.
 
-    install_default_profiles와 같은 규칙입니다(마커로 한 번만, 사용자 것은
-    덮지 않음). 예전에는 판정 프리셋에 기본값이 없어, 개인 프리셋을 배포에
-    담지 않으면 배포본에 판정 프리셋이 아예 없었습니다.
+    Same rule as install_default_profiles (a marker makes it one-time, the
+    user's own are not overwritten). There used to be no defaults for the
+    scoring presets, so once personal presets were kept out of the build,
+    the build had no scoring presets at all.
     """
     store = select_presets(root)
     store.ensure_dir()

@@ -1,9 +1,9 @@
-"""이미지 하단에 촬영 정보 띠를 붙입니다.
+"""Attaches an info strip with the shooting data to the bottom of the image.
 
-EXIF는 파일 안에 숨어 있어서 SNS에 올리면 대부분 사라집니다. 화면에 보이는
-글자로 박아 두면 어디로 가든 남습니다.
+EXIF hides inside the file, so most of it is gone once you post to social.
+Burnt in as letters visible on screen, it survives wherever it goes.
 
-띠는 이미지 아래에 덧붙이는 방식이라 사진 영역을 가리지 않습니다.
+The strip is appended below the image, so it does not cover the photo area.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ __all__ = ["STRIP_FIELDS", "ExifStripSettings", "apply_exif_strip", "build_lines
 def build_lines(
     metadata: RawMetadata | None, source: Path, settings: ExifStripSettings
 ) -> tuple[str, str]:
-    """(왼쪽 텍스트, 오른쪽 텍스트)를 만듭니다."""
+    """Builds (left text, right text)."""
     parts: list[str] = []
 
     if "filename" in settings.include:
@@ -56,7 +56,8 @@ def build_lines(
 
 
 def _measure_text(text: str, scale: float, thickness: int) -> int:
-    """그렸을 때의 픽셀 폭. 한글은 PIL 경로라 따로 잽니다."""
+    """The pixel width once drawn. Hangul goes through the PIL path, so it
+    is measured separately."""
     if not text:
         return 0
 
@@ -72,7 +73,7 @@ def _measure_text(text: str, scale: float, thickness: int) -> int:
                 return box[2] - box[0]
             except Exception:  # noqa: BLE001
                 pass
-        # 폰트를 못 찾으면 그리지도 못하므로 폭 0으로 봅니다
+        # with no font found it cannot be drawn either, so width is 0
         return 0
 
     (width, _), _ = cv2.getTextSize(text, _FONT, scale, thickness)
@@ -80,7 +81,7 @@ def _measure_text(text: str, scale: float, thickness: int) -> int:
 
 
 def _korean_font(size: int):
-    """시스템 한글 폰트를 찾습니다. 없으면 None."""
+    """Finds a system Hangul font. None if there is not one."""
     try:
         from PIL import ImageFont
     except ImportError:
@@ -102,10 +103,12 @@ def _korean_font(size: int):
 def _fit_texts(
     left: str, right: str, available: int, scale: float, thickness: int
 ) -> tuple[str, float]:
-    """좌우 텍스트가 폭 안에 들어가도록 크기와 내용을 조정합니다.
+    """Adjusts the size and the content so the left and right texts fit
+    within the width.
 
-    그리면 긴 촬영 정보가 오른쪽 문구를 덮어써서 글자가 겹칩니다.
-    먼저 글자를 줄이고, 그래도 넘치면 왼쪽 텍스트를 잘라냅니다.
+    Drawn as they are, long shooting data overwrites the right-hand text
+    and the letters overlap. First the letters are shrunk, and if it still
+    overflows the left text is cut down.
     """
     right_width = _measure_text(right, scale, thickness)
     gap = int(available * 0.03)
@@ -114,7 +117,7 @@ def _fit_texts(
     if _measure_text(left, scale, thickness) <= room:
         return left, scale
 
-    # 1단계: 글자 크기를 줄여 본다 (원래의 65%까지)
+    # step 1: try shrinking the letters (down to 65% of the original)
     shrunk = scale
     for _ in range(8):
         shrunk *= 0.94
@@ -125,7 +128,7 @@ def _fit_texts(
         if _measure_text(left, shrunk, thickness) <= room:
             return left, shrunk
 
-    # 2단계: 그래도 넘치면 뒤에서부터 항목을 덜어냅니다
+    # step 2: if it still overflows, drop items from the back
     parts = left.split("  ·  ")
     while len(parts) > 1:
         parts.pop()
@@ -140,7 +143,7 @@ def _draw_text(
     canvas: np.ndarray, text: str, x: int, baseline: int, scale: float,
     color: tuple[int, int, int], thickness: int, right_align: bool = False,
 ) -> None:
-    """한글이 섞이면 PIL로, 아니면 OpenCV로 그립니다."""
+    """Drawn with PIL if Hangul is mixed in, otherwise with OpenCV."""
     if not text:
         return
 
@@ -158,7 +161,8 @@ def _draw_text_pil(
     canvas: np.ndarray, text: str, x: int, baseline: int, scale: float,
     color: tuple[int, int, int], right_align: bool,
 ) -> None:
-    """OpenCV 기본 폰트는 한글을 빈 사각형으로 그립니다. 시스템 폰트를 씁니다."""
+    """OpenCV's default font draws Hangul as empty rectangles. We use a
+    system font."""
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
@@ -184,21 +188,24 @@ def apply_exif_strip(
     metadata: RawMetadata | None,
     settings: ExifStripSettings,
 ) -> np.ndarray:
-    """이미지 아래에 정보 띠를 덧붙인 새 이미지를 반환합니다."""
+    """Returns a new image with the info strip appended below it."""
     if not settings.is_active():
         return image
 
     try:
         height, width = image.shape[:2]
-        # **띠 두께는 가로를 기준으로 잡습니다.** 글자는 가로로 흐르는데
-        # 두께(=글자 크기)를 세로에 비례시키면, 세로 사진일수록 띠가 두꺼워져
-        # 글자가 커지고 정작 담기는 정보는 줄어듭니다 — 실측: 933x1400에서
-        # 띠 84px에 글자가 커져 `16mm·f/4.5·1/30s·ISO`가 통째로 잘렸고,
-        # 500x1400에서는 기종명 하나만 남았습니다.
+        # **The strip thickness is taken from the width.** The letters run
+        # horizontally, and making the thickness (= the letter size)
+        # proportional to the height makes the strip thicker the more
+        # portrait the photo is, so the letters grow while the information
+        # actually carried shrinks - measured: at 933x1400 an 84px strip
+        # grew the letters and `16mm·f/4.5·1/30s·ISO` was cut wholesale,
+        # and at 500x1400 only the body name was left.
         #
-        # height_percent의 뜻은 지키되 기준을 "이 가로에서 3:2였다면의 세로"로
-        # 둡니다. 3:2 가로 사진은 지금과 완전히 같고(1400px에서 55px), 세로·
-        # 좁은 크롭만 정상으로 돌아옵니다.
+        # The meaning of height_percent is kept, but the reference becomes
+        # "the height it would have at this width if it were 3:2". A 3:2
+        # landscape photo is exactly as before (55px at 1400px), and only
+        # portrait and narrow crops come back to normal.
         reference = width * 2.0 / 3.0
         strip_height = max(24, int(reference * settings.height_percent / 100.0))
 
@@ -213,7 +220,7 @@ def apply_exif_strip(
         margin = int(width * 0.02)
         baseline = int(strip_height * 0.62)
 
-        # 좌우가 겹치지 않게 맞춥니다
+        # fit them so the left and right do not overlap
         left_text, scale = _fit_texts(
             left_text, right_text, width - margin * 2, scale, thickness
         )
@@ -225,14 +232,15 @@ def apply_exif_strip(
             foreground, thickness, right_align=True,
         )
 
-        # 사진과 띠 사이 얇은 구분선
+        # a thin divider between the photo and the strip
         line_color = (60, 60, 64) if settings.dark_background else (200, 200, 203)
         cv2.line(strip, (0, 0), (width, 0), line_color, 1)
 
-        # 띠는 8비트로 그리지만(글자·배경이라 계조가 필요 없습니다) 사진의
-        # dtype에 맞춰 붙입니다. 16비트로 내보낼 때 그대로 vstack하면 띠
-        # 값(0~255)이 0~65535 눈금에서 거의 검게 나옵니다.
+        # The strip is drawn in 8 bits (it is letters and background, so it
+        # needs no tonal range) but attached in the photo's dtype. Exported
+        # at 16 bits, vstacking it as it is puts the strip's values (0~255)
+        # on a 0~65535 scale where they come out almost black.
         return np.vstack([image, strip.astype(image.dtype)])
-    except Exception as exc:  # noqa: BLE001 - 띠 실패로 내보내기를 막지 않습니다
+    except Exception as exc:  # noqa: BLE001 - a failed strip must not block the export
         log.warning("EXIF 띠 생성 실패: %s", exc)
         return image

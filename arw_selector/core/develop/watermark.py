@@ -1,8 +1,8 @@
-"""워터마크 합성.
+"""Watermark compositing.
 
-텍스트와 이미지 둘 다 지원합니다. 크기는 항상 이미지 긴 변 대비 비율로
-정하므로, 미리보기(1400px)에서 맞춘 위치와 크기가 원본(6192px)에서도
-같은 비율로 나옵니다.
+Both text and images are supported. The size is always set as a proportion
+of the image's long edge, so the position and size set in the preview
+(1400px) come out at the same proportion on the original (6192px).
 """
 
 from __future__ import annotations
@@ -30,7 +30,8 @@ _font_cache: list[tuple[str, str]] | None = None
 
 
 def available_fonts() -> list[tuple[str, str]]:
-    """설치된 글꼴 (표시이름, 파일경로) 목록. 한 번만 훑고 캐시합니다."""
+    """The installed fonts as (display name, file path). Swept once and
+    cached."""
     global _font_cache
     if _font_cache is not None:
         return _font_cache
@@ -57,16 +58,16 @@ def _anchor(
     item_shape: tuple[int, int],
     margin: int,
 ) -> tuple[int, int]:
-    """워터마크 좌상단 좌표를 구합니다.
+    """Works out the top-left coordinate of the watermark.
 
-    3×3 정렬로 대략 자리를 잡고, offset으로 미세조정합니다. offset은 이미지
-    크기 대비 %라서 해상도가 달라도 같은 위치에 옵니다.
+    A 3x3 alignment places it roughly, and offset fine-tunes it. offset is
+    a % of the image size, so it lands in the same place at any resolution.
     """
     height, width = image_shape
     item_height, item_width = item_shape
     horizontal, vertical = settings.position.anchor
 
-    # 정렬 비율로 여백 안쪽에서 위치를 잡습니다
+    # position it inside the margin using the alignment ratio
     available_width = max(0, width - item_width - margin * 2)
     available_height = max(0, height - item_height - margin * 2)
     x = margin + available_width * horizontal
@@ -81,7 +82,7 @@ def _anchor(
 def _rotate_layer(
     overlay: np.ndarray, alpha: np.ndarray, degrees: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    """워터마크를 회전합니다. 잘리지 않도록 캔버스를 넓힙니다."""
+    """Rotates the watermark. The canvas is widened so nothing is cut."""
     if not degrees:
         return overlay, alpha
 
@@ -106,7 +107,8 @@ def _rotate_layer(
 def _blend(
     base: np.ndarray, overlay: np.ndarray, alpha: np.ndarray, x: int, y: int
 ) -> np.ndarray:
-    """알파 채널로 합성합니다. 이미지 밖으로 나가는 부분은 잘라냅니다."""
+    """Composites with the alpha channel. Anything past the image edge is
+    cut."""
     height, width = base.shape[:2]
     item_height, item_width = overlay.shape[:2]
 
@@ -118,10 +120,11 @@ def _blend(
     overlay_crop = overlay[y0 - y:y1 - y, x0 - x:x1 - x].astype(np.float32)
     alpha_crop = alpha[y0 - y:y1 - y, x0 - x:x1 - x].astype(np.float32)[:, :, None]
 
-    # **받은 dtype을 그대로 돌려줍니다.** 16비트로 내보낼 때는 사진이
-    # float 0~255로 들어오는데, 여기서 uint8로 떨구면 워터마크를 켰다는
-    # 이유만으로 계조가 죽습니다. 오버레이 화소값은 어느 쪽이든 0~255
-    # 눈금이라 합성식은 같습니다.
+    # **The dtype we were given is returned as it is.** Exporting at 16
+    # bits, the photo comes in as float 0~255, and dropping it to uint8
+    # here would kill the tonal range for no reason other than the
+    # watermark being on. The overlay's pixel values are on a 0~255 scale
+    # either way, so the compositing formula is the same.
     region = base[y0:y1, x0:x1].astype(np.float32)
     blended = np.clip(
         region * (1.0 - alpha_crop) + overlay_crop * alpha_crop, 0, 255)
@@ -132,17 +135,19 @@ def _blend(
 def _render_text(
     text: str, settings: WatermarkSettings, image_shape: tuple[int, int]
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """텍스트를 렌더링해 (BGR, 알파)를 반환합니다.
+    """Renders the text and returns (BGR, alpha).
 
-    OpenCV 기본 폰트는 한글을 그리지 못한다(빈 사각형이 됩니다). 한글이
-    섞여 있으면 PIL로 시스템 폰트를 찾아 그립니다.
+    OpenCV's default font cannot draw Hangul (it becomes empty rectangles).
+    If Hangul is mixed in, PIL is used to find a system font and draw with
+    it.
     """
     height, width = image_shape
     long_edge = max(height, width)
     target_height = max(12, int(long_edge * settings.scale / 100.0))
 
-    # 글꼴을 고른 경우와 한글이 섞인 경우는 PIL로 그립니다. OpenCV 기본 폰트는
-    # 글꼴 지정을 지원하지 않고 한글도 빈 사각형이 됩니다.
+    # A chosen font, or Hangul mixed in, is drawn with PIL. OpenCV's
+    # default font does not support choosing a font, and Hangul comes out
+    # as empty rectangles.
     if settings.font_path or any(ord(ch) > 0x2000 for ch in text):
         rendered = _render_text_pil(
             text, target_height, settings.color, settings.font_path
@@ -165,7 +170,7 @@ def _render_text(
     origin = (pad, pad + text_height)
 
     if settings.shadow:
-        # 밝은 배경에서도 읽히도록 어두운 외곽선을 먼저 깝니다
+        # lay a dark outline down first so it reads on a light background
         cv2.putText(mask, text, origin, _FONT, scale, 255, thickness + 2, cv2.LINE_AA)
         layer[:] = (0, 0, 0)
         shadow_alpha = mask.astype(np.float32) / 255.0 * 0.5
@@ -194,16 +199,17 @@ def _render_text_pil(
     text: str, target_height: int, color: tuple[int, int, int],
     font_path: str = "",
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """텍스트를 시스템 글꼴로 그립니다. font_path를 주면 그 글꼴을 씁니다."""
+    """Draws the text with a system font. Given a font_path, that font is
+    used."""
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
         return None
 
     candidates = [
-        # 사용자가 고른 글꼴을 가장 먼저 시도합니다
+        # the font the user chose is tried first of all
         *( [font_path] if font_path else [] ),
-        "C:/Windows/Fonts/malgun.ttf",           # Windows 맑은 고딕
+        "C:/Windows/Fonts/malgun.ttf",           # Windows Malgun Gothic
         "/System/Library/Fonts/AppleSDGothicNeo.ttc",  # macOS
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
     ]
@@ -225,7 +231,7 @@ def _render_text_pil(
 
     layer = Image.new("RGB", size, (0, 0, 0))
     mask = Image.new("L", size, 0)
-    # PIL은 RGB, OpenCV는 BGR이라 뒤집어 줍니다
+    # PIL is RGB and OpenCV is BGR, so we reverse it
     ImageDraw.Draw(layer).text(
         (pad - box[0], pad - box[1]), text, font=font, fill=tuple(reversed(color))
     )
@@ -240,8 +246,9 @@ def _render_text_pil(
 def _render_image(
     path: Path, settings: WatermarkSettings, image_shape: tuple[int, int]
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """PNG 등 워터마크 이미지를 읽어 크기를 맞춥니다. 알파가 있으면 씁니다."""
-    # cv2.imread는 한글 경로에 실패하므로 유니코드 안전 헬퍼를 씁니다.
+    """Reads a watermark image (PNG and so on) and fits its size. Alpha is
+    used if there is any."""
+    # cv2.imread fails on Hangul paths, so we use the unicode-safe helper.
     from ..raw_io import imread_unicode
 
     logo = imread_unicode(path, cv2.IMREAD_UNCHANGED)
@@ -266,7 +273,8 @@ def _render_image(
 
 
 def apply_watermark(image: np.ndarray, settings: WatermarkSettings) -> np.ndarray:
-    """워터마크를 얹습니다. 실패해도 원본을 그대로 돌려줍니다."""
+    """Lays the watermark on. On failure the original is returned as it
+    is."""
     if not settings.is_active():
         return image
 
@@ -290,6 +298,6 @@ def apply_watermark(image: np.ndarray, settings: WatermarkSettings) -> np.ndarra
         margin = int(max(image.shape[:2]) * settings.margin / 100.0)
         x, y = _anchor(settings, image.shape[:2], overlay.shape[:2], margin)
         return _blend(image.copy(), overlay, alpha, x, y)
-    except Exception as exc:  # noqa: BLE001 - 워터마크 실패로 내보내기를 막지 않습니다
+    except Exception as exc:  # noqa: BLE001 - a failed watermark must not block the export
         log.warning("워터마크 합성 실패: %s", exc)
         return image

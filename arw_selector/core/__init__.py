@@ -1,1 +1,1 @@
-"""플랫폼/UI 독립적인 코어 로직. Qt에 의존하지 않습니다."""
+"""Core logic, independent of platform and UI. It does not depend on Qt."""

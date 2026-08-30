@@ -1,4 +1,4 @@
-"""GUI 진입점."""
+"""GUI entry point."""
 
 from __future__ import annotations
 
@@ -8,10 +8,11 @@ import sys
 
 
 def _show_crash_dialog(exc_type, exc_value, exc_traceback, report_path) -> None:
-    """처리되지 않은 예외를 사용자에게 알립니다.
+    """Tells the user about an unhandled exception.
 
-    GUI는 콘솔이 없어 두면 아무 설명 없이 멈춘 것처럼 보입니다.
-    로그 위치를 알려 주어야 문제를 전달할 수 있습니다.
+    A GUI has no console, so left alone it looks like it stopped with no
+    explanation at all. Only by saying where the log is can the problem be
+    passed on.
     """
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
@@ -35,21 +36,22 @@ def _show_crash_dialog(exc_type, exc_value, exc_traceback, report_path) -> None:
             exc_type, exc_value, exc_traceback
         )))
         box.exec()
-    except Exception:  # noqa: BLE001 - 알림 실패가 또 다른 크래시가 되면 안 됩니다
+    except Exception:  # noqa: BLE001 - a failed notice must not crash again
         pass
 
 
 def _install_qt_message_handler() -> None:
-    """Qt가 내는 경고와 치명적 오류를 로그에 남깁니다.
+    """Puts the warnings and fatal errors Qt raises into the log.
 
-    Qt는 잘못된 사용을 만나면 qFatal()로 프로세스를 즉사시킵니다. 그건
-    Windows의 fail-fast(0xc0000409)라서 시그널을 거치지 않고, faulthandler도
-    파이썬 예외 훅도 아무것도 남기지 못합니다 — 실제로 Full Render 중
-    "실행 중인 QThread 파괴"로 죽었을 때 로그가 통째로 비어 있었고 이벤트
-    뷰어에만 흔적이 있었습니다.
+    When Qt meets a misuse it kills the process outright with qFatal(). That
+    is a Windows fail-fast (0xc0000409), so it never goes through a signal
+    and neither faulthandler nor the Python exception hook leaves anything
+    behind - when it really did die during Full Render on "destroying a
+    running QThread", the log was empty from end to end and the only trace
+    was in the Event Viewer.
 
-    메시지 핸들러는 죽기 직전에 불리므로, 여기서 flush까지 해 두면 원인이
-    한 줄로 남습니다.
+    The message handler is called right before it dies, so flushing here too
+    leaves the cause behind as one line.
     """
     import logging as _logging
 
@@ -71,7 +73,7 @@ def _install_qt_message_handler() -> None:
             where = f" ({context.file}:{context.line})"
         log.log(level, "%s%s", message, where)
         if mode == QtMsgType.QtFatalMsg:
-            # 다음 순간 프로세스가 사라집니다. 버퍼를 비워 둡니다.
+            # The process vanishes the next moment. Empty the buffers.
             for h in _logging.getLogger().handlers:
                 try:
                     h.flush()
@@ -82,8 +84,8 @@ def _install_qt_message_handler() -> None:
 
 
 def main() -> int:
-    # 분석은 ProcessPoolExecutor를 사용합니다. PyInstaller/Nuitka로 묶었을 때
-    # 자식 프로세스가 GUI를 다시 띄우는 것을 막습니다.
+    # Analysis uses ProcessPoolExecutor. This stops the child processes from
+    # bringing the GUI up again when bundled with PyInstaller/Nuitka.
     multiprocessing.freeze_support()
 
     from ..core.logging_setup import install_excepthook, setup_logging
@@ -92,13 +94,14 @@ def main() -> int:
     install_excepthook(_show_crash_dialog)
     try:
         _install_qt_message_handler()
-    except Exception:  # noqa: BLE001 - 계측 실패가 앱을 막으면 안 됩니다
+    except Exception:  # noqa: BLE001 - instrumentation must not block the app
         logging.getLogger(__name__).warning("Qt 메시지 핸들러 설치 실패", exc_info=True)
     logging.getLogger(__name__).info("로그 파일: %s", log_path)
 
-    # 제품명이 바뀌기 전(ARW Selector)에 저장해 둔 프리셋을 새 설정 폴더로
-    # 옮겨 옵니다. 이걸 빠뜨리면 사용자가 만든 프리셋이 통째로 사라진 것처럼
-    # 보입니다. 원본은 지우지 않습니다.
+    # Brings presets saved before the product was renamed (ARW Selector)
+    # over to the new settings folder. Leave this out and the presets the
+    # user made look as though they vanished wholesale. The originals are
+    # not deleted.
     try:
         from ..core.presets import migrate_legacy_config
 
@@ -108,7 +111,8 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).warning("설정 마이그레이션 실패", exc_info=True)
 
-    # 기본 프리셋(보정·판정)을 한 번 설치합니다 (실패해도 앱은 뜹니다).
+    # Installs the default presets (develop/scoring) once (the app still
+    # comes up if it fails).
     try:
         from ..core.presets import (
             install_default_profiles,

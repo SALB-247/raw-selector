@@ -1,11 +1,14 @@
-"""국소 보정 원클릭 프리셋.
+"""One-click presets for local adjustments.
 
-마스크 영역 정의 + 그 영역 조정을 한 벌로 묶은 레시피입니다. 사용자가 버튼
-하나로 마스크를 추가하고, 이후 세기·위치를 다듬을 수 있습니다. 인물 리터치가
-1순위지만(눈가주름) 배경·조명 계열도 함께 제공합니다.
+A recipe that ties the mask region definition and the adjustment for that
+region into one set. The user adds a mask with one button and can then
+refine the strength and the position. Portrait retouching is the first
+priority (eye wrinkles), but background and lighting families are provided
+alongside.
 
-얼굴/눈/배경 프리셋은 적용 시점의 이미지에서 영역을 재검출하므로, 얼굴이
-없으면 마스크가 만들어지지 않습니다(호출부에서 안내).
+The face/eye/background presets re-detect the region on the image as it is
+at the moment they are applied, so with no face no mask is made (the caller
+explains this).
 """
 
 from __future__ import annotations
@@ -19,12 +22,13 @@ from .settings import LocalAdjustments, Mask, MaskType
 class MaskPreset:
     key: str
     label: str
-    group: str          # 목록 묶음: 인물 / 배경 / 조명·하늘
+    group: str          # list group: portrait / background / light and sky
     description: str
     template: Mask
 
     def build(self) -> Mask:
-        """새 Mask 인스턴스. params dict는 매번 복사해 공유를 피합니다."""
+        """A new Mask instance. The params dict is copied every time to
+        avoid sharing."""
         return replace(self.template, params=dict(self.template.params), label=self.label)
 
 
@@ -35,7 +39,7 @@ def _mask(kind, adjust, *, feather=50, params=None, invert=False, opacity=100) -
     )
 
 
-# 인물 ---------------------------------------------------------------------
+# portrait -----------------------------------------------------------------
 _PORTRAIT = [
     MaskPreset(
         "under_eye", "언더아이 리터치", "인물",
@@ -74,7 +78,7 @@ _PORTRAIT = [
     ),
 ]
 
-# 배경 ---------------------------------------------------------------------
+# background ---------------------------------------------------------------
 _BACKGROUND = [
     MaskPreset(
         "subject_pop", "인물 강조 (배경 어둡게)", "배경",
@@ -82,6 +86,20 @@ _BACKGROUND = [
         _mask(MaskType.BACKGROUND,
               LocalAdjustments(exposure=-0.55, saturation=-18, contrast=-6),
               feather=50),
+    ),
+    MaskPreset(
+        "subject_lift", "주 피사체 살리기", "배경",
+        "인식한 피사체만 밝히고 또렷하게. 경계가 고와 머리카락까지 살립니다.",
+        _mask(MaskType.SUBJECT,
+              LocalAdjustments(exposure=0.3, clarity=14, saturation=6),
+              feather=25),
+    ),
+    MaskPreset(
+        "subject_pop_ai", "인물 강조 (정밀)", "배경",
+        "위 '인물 강조'와 같은 효과를 인식 모델로 — 경계가 더 정확합니다.",
+        _mask(MaskType.SUBJECT,
+              LocalAdjustments(exposure=-0.55, saturation=-18, contrast=-6),
+              invert=True, feather=25),
     ),
     MaskPreset(
         "bg_blur", "배경 흐리게 (아웃포커스)", "배경",
@@ -92,14 +110,20 @@ _BACKGROUND = [
     ),
 ]
 
-# 조명·하늘 ----------------------------------------------------------------
+# light and sky -------------------------------------------------------------
 _LIGHT = [
     MaskPreset(
         "sky_boost", "하늘 파랗게", "조명·하늘",
         "위쪽 선형 마스크로 하늘을 더 파랗고 진하게.",
+        # The linear alpha is 0 at (x0,y0) and 1 at (x1,y1). The sky has to
+        # be 1 at the **top**, so the start point is at the bottom (0.45)
+        # and the end point is right at the top (0.0). It used to be
+        # written the other way round, so the sky_boost preset turned the
+        # bottom 55% blue (measured: alpha 0.00 at the top, 1.00 at the
+        # bottom).
         _mask(MaskType.LINEAR,
               LocalAdjustments(temperature=-28, saturation=22, clarity=12),
-              params={"x0": 0.5, "y0": 0.0, "x1": 0.5, "y1": 0.45}),
+              params={"x0": 0.5, "y0": 0.45, "x1": 0.5, "y1": 0.0}),
     ),
     MaskPreset(
         "spotlight", "스포트라이트 (주변 어둡게)", "조명·하늘",

@@ -1,8 +1,9 @@
-"""배치 분석 파이프라인.
+"""The batch analysis pipeline.
 
-4000장을 코어 수만큼 나눠 병렬로 처리합니다. 워커 함수와 인자는 전부
-모듈 최상위 + picklable이어야 합니다 — macOS의 ProcessPoolExecutor는
-spawn 방식이라 fork처럼 부모 상태를 물려받지 못합니다.
+4000 frames are split across the core count and processed in parallel. The
+worker function and its arguments all have to be module top-level and
+picklable - macOS's ProcessPoolExecutor uses spawn, so it cannot inherit
+the parent's state the way fork does.
 """
 
 from __future__ import annotations
@@ -47,21 +48,23 @@ class Progress:
 
     @property
     def eta_seconds(self) -> float | None:
-        """남은 예상 시간. 초반 몇 장으로는 추정이 튀므로 5장 이후부터."""
+        """The estimated time remaining. The estimate jumps around over the
+        first few frames, so only from 5 frames on."""
         if self.done < 5 or self.done >= self.total:
             return None
         return self.elapsed / self.done * (self.total - self.done)
 
 
-# ---------------------------------------------------------------- 워커
+# ---------------------------------------------------------------- worker
 
 
 def analyze_file(
     path: Path, config: AnalyzeConfig, cache_dir: Path | None = None
 ) -> ImageRecord:
-    """한 장을 분석합니다. 예외를 던지지 않고 record.error에 담아 돌려줍니다.
+    """Analyses one frame. Throws no exception; puts it in record.error and
+    returns.
 
-    4000장 중 한 장이 손상됐다고 배치 전체가 중단되면 안 됩니다.
+    One damaged frame out of 4000 must not stop the whole batch.
     """
     try:
         metadata = read_metadata(path)
@@ -73,11 +76,14 @@ def analyze_file(
         preview = load_preview(
             path, demosaic_small=config.demosaic_small_preview)
 
-        # 카메라 AF 위치. 프리뷰는 EXIF 방향이 이미 적용된 상태라, maker_meta가
-        # 방향까지 반영해 프리뷰 좌표로 돌려줍니다. **항상** 읽습니다 —
-        # af_face(AF↔주 피사체 불일치 신뢰도 신호)는 옵션이 아니라 기본
-        # 신호라서입니다. ROI로 쓰는 것(af_roi_hint)만 선택입니다.
-        # 메타를 못 읽는 파일(read_metadata 실패)은 방향도 모르므로 건너뜁니다.
+        # The camera AF position. The preview already has the EXIF
+        # orientation applied, so maker_meta applies the orientation too
+        # and hands it back in preview coordinates. It is read **always** -
+        # because af_face (the AF <-> main subject mismatch confidence
+        # signal) is not an option but a basic signal. Only using it as an
+        # ROI (af_roi_hint) is optional. A file whose metadata cannot be
+        # read (read_metadata failed) has an unknown orientation too, so it
+        # is skipped.
         af_box = None
         if metadata is not None:
             from .maker_meta import af_preview_box
@@ -86,9 +92,10 @@ def analyze_file(
                 path, metadata.orientation, preview.shape[1], preview.shape[0]
             )
 
-        # 축소본을 여기서 한 번 만들어 셋이 나눠 씁니다. 예전에는 셋이
-        # 제각각 6192×4128에서 줄였습니다 — 얼굴 검출용으로 어차피 만드는
-        # 것을 지문과 썸네일이 재사용하면 장당 53ms가 사라집니다(맥 실측).
+        # The reduced copy is made once here and shared by all three.
+        # Previously the three each reduced from 6192x4128 on their own -
+        # having the fingerprint and the thumbnail reuse what is made for
+        # face detection anyway removes 53ms per frame (measured on a Mac).
         reduced = focus_module.reduce_for_detection(
             preview, config.detect_long_edge)
 
@@ -103,12 +110,13 @@ def analyze_file(
             noise_compensation=config.noise_compensation,
             reduced=reduced,
         )
-        # 프리뷰가 메모리에 올라와 있는 지금 장면 지문과 썸네일을 같이 뜹니다.
-        # 나중에 구하려면 4000장을 전부 다시 디코딩해야 합니다.
+        # While the preview is up in memory, the scene fingerprint and the
+        # thumbnail are taken at the same time. Getting them later would
+        # mean decoding all 4000 frames again.
         scene_hash = dhash(reduced)
         if cache_dir is not None:
-            # 경로 해시로 이름을 짓습니다. stem을 쓰면 하위 폴더의 동명 파일이
-            # 서로의 썸네일을 덮어씁니다.
+            # Named by a hash of the path. Use the stem and same-named
+            # files in subfolders overwrite each other's thumbnails.
             write_thumbnail(reduced, thumbnail_path(Path(cache_dir), path))
 
         return ImageRecord(path=path, metadata=metadata, focus=result, dhash=scene_hash)
@@ -120,96 +128,112 @@ def analyze_file(
 
 
 def _init_worker() -> None:
-    """워커 프로세스에서 새는 로그를 막습니다.
+    """Stops logs leaking out of the worker processes.
 
-    spawn으로 뜨는 워커는 부모의 로깅 설정을 물려받지 못합니다(핸들러 0개).
-    그 상태에서 exifread가 CR3·HEIF마다 뱉는 warning은 logging의 최후 수단
-    핸들러를 타고 stderr로 그대로 새어 나갑니다.
+    A worker started by spawn does not inherit the parent's logging setup
+    (0 handlers). In that state, the warning exifread emits for every CR3
+    and HEIF rides logging's last-resort handler and leaks straight out to
+    stderr.
 
-    여기서 파일 핸들러를 붙이지는 않습니다 — 여러 프로세스가 같은 회전
-    로그를 함께 쓰면 회전 시점에 서로의 파일을 덮어씁니다. 워커의 실패는
-    ImageRecord.error에 담겨 부모로 돌아오고, 부모가 로그에 남깁니다.
+    No file handler is attached here - if several processes write to the
+    same rotating log together, they overwrite each other's files at the
+    moment of rotation. A worker's failure is carried back to the parent in
+    ImageRecord.error, and the parent writes it to the log.
     """
     logging.getLogger("exifread").setLevel(logging.ERROR)
 
 
 def _worker(payload: tuple[str, AnalyzeConfig, str | None]) -> ImageRecord:
-    """ProcessPoolExecutor 진입점. 최상위 함수여야 pickle이 됩니다."""
+    """The ProcessPoolExecutor entry point. It has to be a top-level
+    function to be pickled."""
     path_str, config, cache_dir = payload
     return analyze_file(Path(path_str), config, Path(cache_dir) if cache_dir else None)
 
 
-#: 워커 하나가 쓰는 최대 메모리(MB). 워커 수 산정의 분모입니다.
+#: The maximum memory one worker uses (MB). The denominator when working
+#: out the worker count.
 #:
-#: 맥(M1 Pro) 실측 — 워커 프로세스의 ru_maxrss 최고 수위, 30~100장 배치
+#: Measured on a Mac (M1 Pro) - the high-water ru_maxrss of the worker
+#: process, on batches of 30~100 frames
 #: (tools/research/research_worker_memory.py):
 #:
 #:   NEF Z50II 20.7MP    385MB   ARW A6700 25.6MP    448MB
 #:   CR3 R6M3  32.3MP    525MB   JPEG 45MP         1,347MB
 #:   HIF(HEIF) 25.6MP  1,225MB
 #:
-#: RAW는 프리뷰 화소에 비례합니다(≈65MB + 15MB/MP — 파이썬·OpenCV·rawpy를
-#: 올린 바닥 65MB 위에 프리뷰 BGR과 측정용 float 사본이 얹힙니다). JPEG은
-#: 원본을 통째로 디코드한 뒤 EXIF 방향을 읽으려 파일을 한 번 더 읽고 회전
-#: 사본까지 떠서 화소당 두 배, HEIF은 libheif 디코더 때문에 세 배입니다.
+#: RAW is proportional to the preview pixels (~65MB + 15MB/MP - on top of
+#: the 65MB floor of loading Python, OpenCV and rawpy sit the preview BGR
+#: and a float copy for the measurements). JPEG decodes the original whole
+#: and then reads the file once more to get the EXIF orientation, and takes
+#: a rotated copy as well, so it is double per pixel; HEIF is triple
+#: because of the libheif decoder.
 #:
-#: 350은 가장 싼 경로(NEF 385MB)에도 못 미쳤습니다. 8GB 맥에서 HEIF 폴더를
-#: 열면 워커 4개가 4.3GB를 잡아(실측 4,261MB) 스왑이 걸립니다 — 총 RSS는
-#: 워커 수에 선형입니다(ARW 1/4/8워커 448 / 1,748 / 3,268MB).
+#: 350 did not even reach the cheapest path (NEF 385MB). Open a HEIF folder
+#: on an 8GB Mac and 4 workers take 4.3GB (measured 4,261MB) and swapping
+#: starts - the total RSS is linear in the worker count (ARW at 1/4/8
+#: workers: 448 / 1,748 / 3,268MB).
 #:
-#: **포맷별로 가르지 않고 하나로 씁니다.** 예전에는 RAW 전용 배치에 550을
-#: 따로 물렸는데, 배치에 JPEG이 한 장만 섞여도 최악값으로 넘어가는 데다
-#: 값 자체가 실측과 크게 어긋나 있었습니다(맥 JPEG 실측 402~546MB,
-#: 윈도 134~196MB에 1,300을 물림). 가르는 값어치보다 어긋나는 손해가
-#: 컸습니다 — 16GB 맥의 JPEG 배치가 워커 2개로 묶였습니다.
+#: **One value is used, not split per format.** There used to be a separate
+#: 550 for RAW-only batches, but a single JPEG mixed into the batch tips it
+#: over to the worst-case value, and the value itself was far off the
+#: measurements (measured JPEG 402~546MB on Mac and 134~196MB on Windows,
+#: against a setting of 1,300). The loss from being off was larger than
+#: what splitting was worth - a JPEG batch on a 16GB Mac was held to 2
+#: workers.
 #:
-#: 800은 **실측 최악값이 아니라 의도적으로 낮춘 값**입니다. 실측 최악은
-#: HEIF 25.6MP의 1,109~1,144MB(맥)라, 800으로 나누면 HEIF 배치는 예산보다
-#: 많은 워커를 띄웁니다. 16GB 맥에서 5개 대신 7개입니다.
+#: 800 is **not the measured worst case but a deliberately lowered value**.
+#: The measured worst is 1,109~1,144MB for HEIF 25.6MP (Mac), so dividing
+#: by 800 starts more workers on a HEIF batch than the budget allows. On a
+#: 16GB Mac that is 7 instead of 5.
 #:
-#: 그 대가를 재 봤습니다(HIF 60장씩, 겹치지 않는 구역):
+#: The cost of that was measured (60 HIF frames each, non-overlapping
+#: regions):
 #:
-#:   워커 2   2.83장/s   2,287MB   스왑 +0
-#:   워커 5   3.18장/s   5,543MB   스왑 +0     ← 최적
-#:   워커 7   2.56장/s   7,224MB   스왑 +0     ← 이 값이 고르는 수
-#:   워커 9   2.46장/s   8,012MB   스왑 +664MB
+#:   2 workers   2.83 frames/s   2,287MB   swap +0
+#:   5 workers   3.18 frames/s   5,543MB   swap +0     <- optimum
+#:   7 workers   2.56 frames/s   7,224MB   swap +0     <- what this picks
+#:   9 workers   2.46 frames/s   8,012MB   swap +664MB
 #:
-#: HEIF에서 −19.5%입니다. 7워커는 스왑까지 가지 않으므로 저하 원인은
-#: 스왑이 아니라 경합입니다. 대신 RAW·JPEG에서는 손해가 없고(실측 구간이
-#: 평평합니다) 램이 큰 기계에서 워커가 더 나옵니다. **HEIF 한 형식의
-#: 20% 안쪽 손해를 받아들이고 나머지를 넉넉히 주는 쪽을 택했습니다.**
+#: That is -19.5% on HEIF. 7 workers do not reach swap, so the cause of
+#: the drop is contention, not swapping. In exchange there is no loss on
+#: RAW and JPEG (the measured range is flat) and machines with more RAM
+#: get more workers. **We chose to accept a loss inside 20% on the single
+#: HEIF format and give the rest plenty.**
 #:
-#: HEIF 배치가 느리다는 신고가 오면 여기부터 보십시오 — 1100으로 올리면
-#: 그 형식이 최적으로 돌아옵니다.
+#: If a report comes in that HEIF batches are slow, start here - raise it
+#: to 1100 and that format goes back to its optimum.
 WORKER_MEMORY_MB = 800
 
-#: 이 지점을 넘으면 오히려 느려집니다.
+#: Past this point it actually gets slower.
 #:
-#: 실측(300장, 32코어): 6워커 3.40배 / 8워커 3.60배 / **12워커 3.77배** /
-#: 16워커 3.61배 / 24워커 3.44배. 32코어를 다 써도 3.8배에서 멈추는 것은
-#: 40MB짜리 RAW를 읽는 디스크가 병목이기 때문입니다. 그 지점을 넘겨 워커를
-#: 늘리면 서로 디스크를 다투느라 되레 손해입니다.
+#: Measured (300 frames, 32 cores): 6 workers 3.40x / 8 workers 3.60x /
+#: **12 workers 3.77x** / 16 workers 3.61x / 24 workers 3.44x. Even using
+#: all 32 cores it stops at 3.8x because the disk reading 40MB RAWs is the
+#: bottleneck. Add workers past that point and they only fight each other
+#: for the disk, which is a loss.
 #:
-#: (표본이 작으면 워커 시작 비용에 가려 곡선이 왜곡됩니다. 48장으로 쟀을
-#: 때는 6에서 포화하는 것처럼 보였습니다.)
+#: (With a small sample the worker start-up cost masks the curve and
+#: distorts it. Measured with 48 frames it looked as if it saturated at 6.)
 MAX_USEFUL_WORKERS = 12
 
 
 def _available_memory_mb() -> int | None:
-    """쓸 수 있는 물리 메모리(MB). 알 수 없으면 None."""
-    try:  # 리눅스
+    """The usable physical memory (MB). None if it cannot be determined."""
+    try:  # Linux
         return int(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1024 / 1024)
     except (AttributeError, ValueError, OSError):
         pass
 
     if sys.platform == "darwin":
-        # macOS에는 SC_AVPHYS_PAGES가 아예 없습니다 — 이름 자체가 없어서
-        # ValueError로 떨어지고, 위 경로는 리눅스에서만 성립합니다. 그래서
-        # 맥에서는 램 제한이 통째로 걸리지 않은 채 코어 수만으로 워커를
-        # 정하고 있었습니다 (8GB 맥북에어에서 9워커 = 스왑).
+        # macOS has no SC_AVPHYS_PAGES at all - the name itself does not
+        # exist, so it falls through with a ValueError, and the path above
+        # only holds on Linux. That meant that on a Mac the RAM limit was
+        # not applied at all and the worker count was decided on the core
+        # count alone (9 workers on an 8GB MacBook Air = swapping).
         #
-        # vm_stat의 free·inactive·speculative가 당장 되돌려받을 수 있는 쪽입니다.
-        # active와 wired는 빼야 합니다 — 지금 쓰이고 있는 메모리입니다.
+        # vm_stat's free, inactive and speculative are the parts that can
+        # be reclaimed straight away. active and wired have to be left out
+        # - that is memory in use right now.
         try:
             output = subprocess.run(
                 ["vm_stat"], capture_output=True, text=True, timeout=5,
@@ -256,15 +280,16 @@ def _available_memory_mb() -> int | None:
 
 def resolve_workers(requested: int | None,
                     paths: Iterable[Path] | None = None) -> int:
-    """워커 수를 정합니다.
+    """Decides the worker count.
 
-    코어 수만 보고 늘리면 저사양 PC에서 램이 모자라 스왑이 걸립니다.
-    스왑이 시작되면 코어를 더 써도 오히려 느려집니다. 그래서 세 가지로
-    묶습니다: 코어 수(한 코어는 UI/OS 몫), 쓸 수 있는 램, 그리고 실측상
-    이득이 사라지는 지점.
+    Raise it on the core count alone and a low-spec PC runs short of RAM
+    and starts swapping. Once swapping starts, using more cores actually
+    makes it slower. So it is capped by three things: the core count (one
+    core is the UI/OS's share), the usable RAM, and the point at which the
+    measurements show the gain disappearing.
 
-    포맷별로 가르지 않습니다 — WORKER_MEMORY_MB 주석 참고. paths는
-    호출부 호환을 위해 남겨 두었고 지금은 쓰지 않습니다.
+    It is not split per format - see the WORKER_MEMORY_MB comment. paths is
+    left in for caller compatibility and is not used at present.
     """
     if requested and requested > 0:
         return requested
@@ -274,43 +299,49 @@ def resolve_workers(requested: int | None,
 
     available = _available_memory_mb()
     if available:
-        # 가용량을 그대로 나눕니다. 예전에는 0.5를 곱해 절반만 썼는데,
-        # 이 값은 이미 "당장 되돌려받을 수 있는" 몫이라(맥은 free+inactive+
-        # speculative, 윈도는 ullAvailPhys) UI가 쓰는 메모리는 애초에
-        # 빠져 있습니다. 절반을 또 떼면 이중으로 깎입니다 — 16GB 맥에서
-        # 워커가 2개로 묶인 것이 그 결과였습니다.
+        # The available amount is divided as it is. It used to be
+        # multiplied by 0.5 to use only half, but this value is already
+        # the "reclaimable straight away" share (free+inactive+speculative
+        # on Mac, ullAvailPhys on Windows), so the memory the UI uses is
+        # excluded from the start. Take another half off and it is cut
+        # twice over - that was what held workers to 2 on a 16GB Mac.
         by_memory = int(available // WORKER_MEMORY_MB)
         workers = max(1, min(workers, by_memory))
     return workers
 
 
 SECONDS_PER_PHOTO_PER_WORKER = 0.45
-"""워커 하나가 사진 한 장을 처리하는 데 걸리는 시간(초).
+"""The time one worker takes to process one photo (seconds).
 
-실측: 720장을 워커 12개로 26.9초 → 장당 0.037초, 워커당 0.45초.
-프리뷰 추출 + 얼굴 검출 + 선명도 측정 + 썸네일 쓰기까지 포함한 값입니다.
-바디나 디스크에 따라 달라지므로 어림값으로만 씁니다.
+Measured: 720 frames on 12 workers in 26.9 seconds -> 0.037 seconds per
+frame, 0.45 seconds per worker. The value covers preview extraction, face
+detection, sharpness measurement and writing the thumbnail. It varies with
+the body and the disk, so it is used only as a rough figure.
 """
 
 SECONDS_PER_PHOTO_PER_WORKER_DEMOSAIC = 0.96
-"""디모자이크로 분석할 때의 같은 값(초).
+"""The same value when analysing by demosaic (seconds).
 
-실측(DC-S5M2X RW2, 워커 12, 스폰 차분 제거): 내장 프리뷰 15.9ms/장 대
-half 디모자이크 79.9ms/장 → 워커당 0.96초. 표본이 4장이라 어림값입니다.
+Measured (DC-S5M2X RW2, 12 workers, spawn overhead subtracted out):
+embedded preview 15.9ms/frame against half demosaic 79.9ms/frame -> 0.96
+seconds per worker. The sample is 4 frames, so it is a rough figure.
 """
 
 PROCESS_POOL_STARTUP_SECONDS = 2.0
-"""프로세스 풀이 뜨는 데 걸리는 시간. spawn 방식이라 무시할 수 없습니다."""
+"""The time it takes the process pool to come up. It uses spawn, so it
+cannot be ignored."""
 
 
 def estimate_analysis_seconds(count: int, workers: int | None = None,
                               demosaic_count: int = 0) -> float:
-    """사진 count장을 분석하는 데 걸릴 시간(초) 어림값.
+    """A rough figure for the time (seconds) to analyse count photos.
 
-    "캐시를 지우면 다시 만듭니다"라고만 하면 사용자는 그게 10초인지 10분인지
-    모릅니다. 정확할 필요는 없고, 판단할 수 있을 정도면 됩니다.
+    Saying only "clear the cache and it will be rebuilt" leaves the user
+    not knowing whether that is 10 seconds or 10 minutes. It does not have
+    to be accurate, only good enough to decide on.
 
-    demosaic_count는 그중 디모자이크로 분석할 장수입니다(작은 프리뷰 RAW).
+    demosaic_count is how many of those will be analysed by demosaic (RAWs
+    with a small preview).
     """
     if count <= 0:
         return 0.0
@@ -322,11 +353,12 @@ def estimate_analysis_seconds(count: int, workers: int | None = None,
                + heavy * SECONDS_PER_PHOTO_PER_WORKER_DEMOSAIC) / max(1, workers))
 
 
-# 소요 시간을 사람이 읽는 문구로 바꾸는 일은 gui.i18n에 있습니다. 여기서
-# 만들면 번역을 못 걸어 영어 UI에 한국어가 섞입니다(실제로 그랬습니다).
+# Turning an elapsed time into wording a person reads lives in gui.i18n.
+# Build it here and no translation can be attached, so Korean gets mixed
+# into the English UI (which is what actually happened).
 
 
-# ---------------------------------------------------------------- 배치 실행
+# ---------------------------------------------------------------- batch run
 
 
 def analyze_paths(
@@ -337,7 +369,7 @@ def analyze_paths(
     progress_cb: ProgressCallback | None = None,
     should_cancel: CancelCheck | None = None,
 ) -> list[ImageRecord]:
-    """주어진 RAW 목록을 분석합니다. 입력 순서를 유지해 반환합니다."""
+    """Analyses the given list of RAWs. Returned in the input order."""
     config = config or Config()
     paths = list(paths)
     total = len(paths)
@@ -357,7 +389,7 @@ def analyze_paths(
             results = cache.get_many(paths)
             cached_count = len(results)
             log.info("캐시 히트 %d/%d", cached_count, total)
-        except Exception as exc:  # noqa: BLE001 - 캐시 문제로 분석을 막지 않습니다
+        except Exception as exc:  # noqa: BLE001 - cache must not block this
             log.warning("캐시 사용 불가, 전체 재분석: %s", exc)
             cache = None
 
@@ -390,7 +422,7 @@ def analyze_paths(
                     path = futures[future]
                     try:
                         record = future.result()
-                    except Exception as exc:  # noqa: BLE001 - 워커 프로세스 자체가 죽은 경우
+                    except Exception as exc:  # noqa: BLE001 - the worker died
                         record = ImageRecord(path=path, error=f"워커 오류: {exc}")
 
                     results[path] = record
@@ -398,10 +430,11 @@ def analyze_paths(
                     done += 1
                     if record.error:
                         failed += 1
-                        # 실패는 반드시 여기서 남깁니다. 워커는 spawn으로 떠서
-                        # 부모의 로깅 설정을 물려받지 못하므로(핸들러 0개),
-                        # 워커 안에서 부른 log.warning은 로그 파일에 닿지
-                        # 않습니다. 창만 있는 .app에서는 아예 사라집니다.
+                        # Failures must be recorded here. Workers start by
+                        # spawn and do not inherit the parent's logging
+                        # setup (0 handlers), so a log.warning called
+                        # inside a worker never reaches the log file. In a
+                        # window-only .app it disappears altogether.
                         log.warning("분석 실패 %s: %s", path.name, record.error)
 
                     if progress_cb:
@@ -412,7 +445,8 @@ def analyze_paths(
                             )
                         )
 
-                    # 중간에 끊겨도 여기까지는 건지도록 주기적으로 흘려 씁니다
+                    # Flushed periodically so that everything up to here
+                    # is saved even if it is cut off part way
                     if cache and len(fresh) >= 200:
                         cache.put_many(fresh)
                         fresh.clear()
@@ -438,7 +472,8 @@ def analyze_folder(
     progress_cb: ProgressCallback | None = None,
     should_cancel: CancelCheck | None = None,
 ) -> list[ImageRecord]:
-    """폴더를 스캔해서 분석합니다. 캐시는 폴더 옆에 둡니다."""
+    """Scans a folder and analyses it. The cache is placed next to the
+    folder."""
     config = config or Config()
     folder = Path(folder)
     paths = iter_raw_files(folder, recursive=config.recursive)

@@ -1,7 +1,7 @@
-"""백그라운드 작업 스레드.
+"""Background worker threads.
 
-무거운 일은 전부 여기서 합니다. 4000장 분석 중에 UI가 멈추면 사용자는
-프로그램이 죽은 줄 압니다.
+Everything heavy happens here. If the UI freezes while analysing 4000
+shots, the user takes it for a dead program.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ from ..core.thumbs import thumbnail_path
 
 
 def silent_disconnect(signal) -> None:
-    """연결이 없어도 조용히 넘어가는 disconnect.
+    """A disconnect that passes over quietly even with nothing connected.
 
-    정리 코드에서는 이미 끊긴 경우가 정상인데, libpyside는 그때마다
-    RuntimeWarning을 냅니다.
+    In cleanup code, already being disconnected is the normal case, but
+    libpyside raises a RuntimeWarning every single time.
     """
     import warnings
 
@@ -34,44 +34,48 @@ def silent_disconnect(signal) -> None:
 
 
 _UNSTOPPED_WORKERS: set = set()
-"""제때 멈추지 않은 워커를 붙잡아 두는 곳.
+"""Where a worker that did not stop in time is held on to.
 
-`stop_worker`가 False를 돌려준 뒤 호출부가 참조를 놓으면, 파이썬이 아직
-도는 QThread를 파괴하고 Qt는 그것을 치명적 오류로 보고 프로세스를
-즉사시킵니다(0xc0000409). 15초를 기다린 보람이 참조를 버리는 그 한 줄에서
-사라집니다.
+If the caller lets go of the reference after `stop_worker` returns False,
+Python destroys a QThread that is still running, Qt takes that as a fatal
+error and kills the process outright (0xc0000409). Everything gained by
+waiting 15 seconds is lost on that one line that throws the reference away.
 
-기다리는 대신 여기로 옮깁니다 — 창은 즉시 닫히고, 스레드는 제 속도로 끝난
-뒤 스스로 빠집니다. 파괴되는 시점에는 이미 멈춰 있습니다. loupe의
-`_detach_until_finished`와 같은 방식입니다.
+Instead of waiting, it is moved here - the window closes immediately, and
+the thread finishes at its own pace and then drops itself out. By the time
+it is destroyed it has already stopped. The same approach as loupe's
+`_detach_until_finished`.
 """
 
 
 def keep_until_finished(worker) -> None:
-    """멈추지 않은 워커의 참조를 프로세스 수준으로 옮깁니다."""
+    """Moves an unstopped worker's reference up to process level."""
     if worker is None:
         return
     _UNSTOPPED_WORKERS.add(worker)
     try:
         worker.finished.connect(lambda: _UNSTOPPED_WORKERS.discard(worker))
     except (AttributeError, RuntimeError):
-        # finished를 못 걸면 스스로 빠지지 못합니다. 그래도 붙잡아 두는
-        # 편이 낫습니다 — 새는 것은 객체 하나지만, 놓치면 프로세스입니다.
+        # If finished cannot be hooked up it can never drop itself out.
+        # Even so, holding on is better - what leaks is one object, but
+        # what is let go is the process.
         pass
 
 
 def stop_worker(worker, timeout_ms: int = 15000) -> bool:
-    """워커를 안전하게 세웁니다. 실제로 멈췄으면 True.
+    """Stops a worker safely. True if it really did stop.
 
-    QThread가 **도는 채로 파괴되면 Qt가 qFatal로 프로세스를 즉사시킵니다**
-    (Windows fail-fast, 0xc0000409). 그래서 순서가 중요합니다:
+    If a QThread is **destroyed while still running, Qt kills the process
+    outright with qFatal** (Windows fail-fast, 0xc0000409). That is why the
+    order matters:
 
-      1. 취소 신호 — run()이 다음 검사 지점에서 빠져나오게
-      2. 시그널 해제 — 늦게 도착한 신호가 이미 지워진 창을 건드리지 않게
-      3. 대기 — 진짜로 끝날 때까지
+      1. cancel signal - so run() drops out at the next check point
+      2. disconnect signals - so a late signal cannot touch a deleted window
+      3. wait - until it truly ends
 
-    타임아웃은 넉넉해야 합니다. 짧게 잡고 그냥 진행하면 바로 그 크래시가
-    납니다. 내보내기는 한 장 현상에 수백 ms가 걸리기도 합니다.
+    The timeout has to be generous. Set it short and carry on regardless and
+    you get exactly that crash. Export can take several hundred ms to
+    develop a single shot.
     """
     if worker is None:
         return True
@@ -86,11 +90,11 @@ def stop_worker(worker, timeout_ms: int = 15000) -> bool:
             return True
         return bool(worker.wait(timeout_ms))
     except RuntimeError:
-        return True  # 이미 정리된 객체
+        return True  # already a cleaned-up object
 
 
 class AnalysisWorker(QThread):
-    """폴더 분석을 백그라운드에서 돌립니다."""
+    """Runs the folder analysis in the background."""
 
     progressed = Signal(object)   # Progress
     finished_ok = Signal(object)  # SelectionSession
@@ -103,7 +107,7 @@ class AnalysisWorker(QThread):
         self.config = config
         self.use_cache = use_cache
         self.paths = paths
-        """None이면 폴더 전체 스캔, 목록이면 그 파일들만."""
+        """None scans the whole folder; a list means only those files."""
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -122,15 +126,16 @@ class AnalysisWorker(QThread):
                 paths=self.paths,
             )
             self.finished_ok.emit(session)
-        except Exception as exc:  # noqa: BLE001 - 스레드에서 새어나가면 앱이 죽습니다
+        except Exception as exc:  # noqa: BLE001 - a thread leak kills the app
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
 class ExportWorker(QThread):
-    """내보내기를 백그라운드에서 돌립니다.
+    """Runs the export in the background.
 
-    현상까지 하면 장당 수백 ms가 걸려서 수백 장이면 몇 분입니다. UI가 멈추면
-    안 되고, 중간에 그만둘 수 있어야 합니다.
+    With develop included it takes several hundred ms per shot, so a few
+    hundred shots is minutes. The UI must not freeze, and you have to be
+    able to give up part way through.
     """
 
     progressed = Signal(int, int)
@@ -170,14 +175,15 @@ class ExportWorker(QThread):
 
 
 class ThumbnailSignals(QObject):
-    loaded = Signal(str, object)  # path, QImage (QPixmap은 GUI 스레드에서만 만든다)
+    loaded = Signal(str, object)  # path, QImage (QPixmap: GUI thread only)
 
 
 class ThumbnailTask(QRunnable):
-    """썸네일 한 장을 디스크에서 읽어 옵니다.
+    """Reads one thumbnail off the disk.
 
-    분석 때 만들어 둔 512px JPEG를 읽습니다. 없으면 (예: 예전 캐시) RAW에서
-    직접 뽑는데, 이건 느리므로 스레드 풀에서 처리합니다.
+    Reads the 512px JPEG made during analysis. If it is missing (e.g. an old
+    cache) it is pulled straight out of the RAW, and since that is slow it
+    is handled on the thread pool.
     """
 
     def __init__(self, source: Path, cache_dir: Path, signals: ThumbnailSignals):
@@ -188,8 +194,9 @@ class ThumbnailTask(QRunnable):
         self.setAutoDelete(True)
 
     def run(self) -> None:
-        # QPixmap은 GUI 스레드 밖에서 만들면 안 됩니다(간헐적 크래시). 워커에서는
-        # QImage로 읽어 넘기고, 메인 스레드 슬롯에서 QPixmap으로 변환합니다.
+        # QPixmap must not be built outside the GUI thread (intermittent
+        # crashes). The worker reads it as a QImage and hands that over, and
+        # the main-thread slot converts it to a QPixmap.
         from PySide6.QtGui import QImage
 
         image = QImage()
@@ -199,7 +206,8 @@ class ThumbnailTask(QRunnable):
             image.load(str(thumb))
 
         if image.isNull():
-            # 썸네일이 없으면 원본에서 만들어 두고 다음부터 재사용합니다
+            # With no thumbnail, build one from the original and reuse it
+            # from then on
             try:
                 from ..core.raw_io import load_preview
                 from ..core.thumbs import write_thumbnail
@@ -207,7 +215,7 @@ class ThumbnailTask(QRunnable):
                 preview = load_preview(self.source, max_long_edge=512)
                 write_thumbnail(preview, thumb)
                 image.load(str(thumb))
-            except Exception:  # noqa: BLE001 - 썸네일 실패는 치명적이지 않습니다
+            except Exception:  # noqa: BLE001 - thumbnail failure is not fatal
                 pass
 
         self.signals.loaded.emit(str(self.source), image)

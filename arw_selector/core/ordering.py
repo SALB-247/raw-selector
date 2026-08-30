@@ -1,9 +1,10 @@
-"""격자 표시 순서.
+"""The display order of the grid.
 
-장면(그룹)과 무관하게 점수만으로 줄 세우고 싶을 때가 있습니다 — 배치 전체에서
-제일 잘 나온/제일 흔들린 컷을 빠르게 훑을 때. 정렬은 순수 함수라 UI 없이도
-검증합니다. 동점은 항상 파일명으로 안정화해, 같은 배치를 두 번 정렬해도
-순서가 흔들리지 않습니다.
+There are times you want everything lined up on score alone, regardless of
+the scene (group) - sweeping quickly through the best and the most shaken
+frames of the whole batch. The sort is a pure function, so it is verified
+without a UI. Ties are always stabilised on the filename, so sorting the
+same batch twice never shifts the order.
 """
 
 from __future__ import annotations
@@ -14,24 +15,26 @@ from .types import ImageRecord
 
 
 class SortMode(str, Enum):
-    FILE = "file"              # 파일명(≈촬영 순서) — 장면이 뭉쳐 보이는 기본값
-    SCORE_DESC = "score_desc"  # 점수 높은순
-    SCORE_ASC = "score_asc"    # 점수 낮은순
+    FILE = "file"              # filename (~capture order); scenes cluster
+    SCORE_DESC = "score_desc"  # highest score first
+    SCORE_ASC = "score_asc"    # lowest score first
 
 
-# 표시 문구는 여기 두지 않습니다. core는 Qt를 import하지 않으므로 번역할
-# 방법이 없고, 모듈 상수로 두면 import 시점에 언어가 굳습니다.
-# gui/ordering_text.py 를 보십시오.
+# The display wording does not live here. core does not import Qt, so there
+# is no way to translate it, and as a module constant the language would be
+# frozen at import time. See gui/ordering_text.py.
 
 
 def sort_records(records: list[ImageRecord], mode) -> list[ImageRecord]:
-    """새 리스트를 돌려줍니다 (원본 순서는 건드리지 않습니다).
+    """Returns a new list (the original order is not touched).
 
-    점수순 정렬은 그룹을 완전히 무시하고 배치 전체를 한 줄로 세웁니다.
+    Sorting by score ignores groups entirely and lines the whole batch up
+    in one row.
 
-    mode는 SortMode 또는 그 값 문자열을 받습니다. PySide6는 str을 상속한 Enum을
-    콤보박스 데이터로 저장할 때 평범한 str로 바꿔 버려서(GeometrySettings.ratio와
-    같은 함정), `is` 비교만 하면 전부 빗나가 조용히 파일순으로 떨어집니다.
+    mode takes a SortMode or its value string. PySide6 turns an Enum that
+    inherits str into a plain str when it stores it as combo box data (the
+    same trap as GeometrySettings.ratio), so comparing with `is` alone
+    misses every time and it quietly falls back to file order.
     """
     try:
         mode = SortMode(mode)

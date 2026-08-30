@@ -1,9 +1,10 @@
-"""색상휠 위젯.
+"""The colour wheel widget.
 
-색조와 채도를 슬라이더 두 개로 나눠 조작하면 "어느 방향으로 얼마나"가
-직관적으로 안 잡힙니다. 휠 위의 한 점을 끄는 편이 훨씬 빠릅니다.
+Working hue and saturation as two separate sliders gives no intuitive grip on
+"which direction, and how much". Dragging a single point on the wheel is far
+faster.
 
-각도가 색조, 중심에서의 거리가 채돕니다.
+The angle is the hue, the distance from the centre the saturation.
 """
 
 from __future__ import annotations
@@ -32,9 +33,9 @@ from .i18n import tr
 
 
 class ColorWheel(QWidget):
-    """색조/채도를 한 번에 고르는 원형 위젯."""
+    """A circular widget for picking hue/saturation in one go."""
 
-    changed = Signal(int, int)  # (색조 0~359, 채도 0~100)
+    changed = Signal(int, int)  # (hue 0~359, saturation 0~100)
 
     def __init__(self, title: str = "", parent=None):
         super().__init__(parent)
@@ -49,7 +50,7 @@ class ColorWheel(QWidget):
             "Double-click to reset"
         ))
 
-    # ------------------------------------------------------------ 상태
+    # ------------------------------------------------------------ State
 
     def values(self) -> tuple[int, int]:
         return self._hue, self._saturation
@@ -64,7 +65,7 @@ class ColorWheel(QWidget):
     def reset(self) -> None:
         self.set_values(0, 0)
 
-    # ------------------------------------------------------------ 좌표
+    # ------------------------------------------------------------ Coordinates
 
     def _wheel_rect(self) -> QRectF:
         size = min(self.width(), self.height()) - 4
@@ -92,7 +93,7 @@ class ColorWheel(QWidget):
         hue = int(round(math.degrees(math.atan2(dy, dx)))) % 360
         return hue, saturation
 
-    # ------------------------------------------------------------ 마우스
+    # ------------------------------------------------------------ Mouse
 
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.LeftButton:
@@ -111,17 +112,18 @@ class ColorWheel(QWidget):
         self.reset()
 
     def wheelEvent(self, event) -> None:
-        """휠은 부모 스크롤로 넘긴다 — 실수로 색이 바뀌면 문제가 됩니다."""
+        """The wheel is passed to the parent scroll - a colour changed by
+        accident is a problem."""
         event.ignore()
 
-    # ------------------------------------------------------------ 그리기
+    # ------------------------------------------------------------ Drawing
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self._wheel_rect()
 
-        # 색조 원 (각도 방향)
+        # The hue circle (around the angle)
         conical = QConicalGradient(rect.center(), 0)
         for step in range(13):
             position = step / 12.0
@@ -130,7 +132,7 @@ class ColorWheel(QWidget):
         painter.setBrush(conical)
         painter.drawEllipse(rect)
 
-        # 중심으로 갈수록 무채색 (채도 방향)
+        # Greyer the closer to the centre (along the saturation)
         radial = QRadialGradient(rect.center(), rect.width() / 2)
         radial.setColorAt(0.0, QColor(105, 105, 112, 255))
         radial.setColorAt(1.0, QColor(105, 105, 112, 0))
@@ -141,7 +143,7 @@ class ColorWheel(QWidget):
         painter.setPen(QPen(QColor(90, 90, 96), 1))
         painter.drawEllipse(rect)
 
-        # 선택 마커
+        # The selection marker
         marker = self._marker_pos()
         size = 6 if self._saturation else 4
         painter.setBrush(
@@ -156,7 +158,8 @@ class ColorWheel(QWidget):
 
 
 class ColorGradeZoneWidget(QWidget):
-    """색상휠 + 광도 슬라이더 한 세트 (그림자/중간/하이라이트용)."""
+    """One set of colour wheel + luminance slider (for shadows, midtones and
+    highlights)."""
 
     changed = Signal()
 
@@ -186,8 +189,9 @@ class ColorGradeZoneWidget(QWidget):
         self.wheel.changed.connect(self._on_changed)
         layout.addWidget(self.wheel, 1)
 
-        # 휠만 있으면 지금 값이 정확히 얼마인지 알 수 없습니다. 숫자를 함께
-        # 보여 주어야 같은 설정을 다시 맞추거나 남에게 전할 수 있습니다.
+        # With the wheel alone there is no telling exactly what the value is
+        # right now. The number has to be shown alongside for the same
+        # setting to be dialled in again or passed on to someone else.
         self.wheel_value = QLabel()
         self.wheel_value.setAlignment(Qt.AlignCenter)
         self.wheel_value.setStyleSheet("color: #9a9aa2; font-size: 10px;")
@@ -239,7 +243,7 @@ class ColorGradeZoneWidget(QWidget):
         self._refresh_reset()
 
     def reset(self) -> None:
-        """색상휠과 광도를 한꺼번에 되돌립니다."""
+        """Puts the colour wheel and the luminance back all at once."""
         self.set_values(0, 0, 0)
         self.changed.emit()
 
@@ -253,7 +257,7 @@ class ColorGradeZoneWidget(QWidget):
             if changed
             else "color: #b0b0b8; font-size: 11px;"
         )
-        # 채도가 0이면 색조는 의미가 없으므로 숨깁니다
+        # At saturation 0 the hue means nothing, so it is hidden
         self.wheel_value.setText(
             tr("Hue {hue}°   Saturation {saturation}").format(
                 hue=hue, saturation=saturation

@@ -1,17 +1,21 @@
-"""유사 컷 그룹핑.
+"""Grouping of similar frames.
 
-4000장은 실제로는 "비슷한 컷 3~10장 × 수백 그룹"입니다. 전체를 한 줄로 세워
-상위 N장을 뽑으면 잘 나온 장면 하나가 셀렉트를 독식하고 다른 장면은 통째로
-빠집니다. 그룹을 만들고 그룹마다 베스트를 뽑아야 셀렉터로서 쓸모가 있습니다.
+4000 frames is really "3~10 similar frames x several hundred groups". Line
+them all up and take the top N and one scene that came out well hogs the
+whole cull while other scenes drop out wholesale. Only by making groups and
+taking the best of each group is it any use as a culling tool.
 
-경계 판정은 촬영 시각을 주 신호로 씁니다. 실측에서 시간은 연사와 장면 전환을
-깨끗하게 갈랐지만(연사 내 0.16초 vs 전환 수십 초), 시각적 유사도는 그러지
-못했다 — 망원으로 움직이는 피사체는 0.16초 사이에도 화면이 크게 바뀌어서
-같은 연사의 해시 거리 분포와 장면 전환의 분포가 겹칩니다. 자세한 수치는
-GroupConfig.scene_change_distance 주석에 있습니다.
+The boundary decision uses the capture time as its main signal. Measured,
+time separated bursts from scene changes cleanly (0.16s within a burst vs
+tens of seconds across a change), but visual similarity did not - a moving
+subject shot with a telephoto changes the frame a great deal even within
+0.16s, so the hash distance distribution within one burst overlaps the
+distribution across a scene change. The detailed figures are in the
+GroupConfig.scene_change_distance comment.
 
-그래서 지각적 해시는 "명백한 전환"만 잡는 보조 신호로 두고, 시각 정보가
-유일한 근거인 경우(EXIF 시각 없음)에만 임계값을 조입니다.
+So the perceptual hash is left as a secondary signal that catches only the
+"blatant change", and the threshold is tightened only when the visual
+information is the sole evidence there is (no EXIF time).
 """
 
 from __future__ import annotations
@@ -23,14 +27,15 @@ from .config import GroupConfig
 from .types import ImageRecord
 
 DHASH_SIZE = 8
-"""8x8 비교 → 64비트 해시."""
+"""An 8x8 comparison -> a 64-bit hash."""
 
 
 def dhash(image_bgr: np.ndarray, size: int = DHASH_SIZE) -> int:
-    """difference hash. 인접 픽셀의 밝기 대소 관계만 남깁니다.
+    """difference hash. Only the brighter/darker relation between adjacent
+    pixels is kept.
 
-    노출과 화이트밸런스가 흔들려도 같은 장면이면 값이 거의 유지되므로
-    연사 묶기에 적합합니다.
+    The value holds almost unchanged for the same scene even when exposure
+    and white balance wobble, which suits grouping bursts.
     """
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY) if image_bgr.ndim == 3 else image_bgr
     resized = cv2.resize(gray, (size + 1, size), interpolation=cv2.INTER_AREA)
@@ -43,12 +48,13 @@ def dhash(image_bgr: np.ndarray, size: int = DHASH_SIZE) -> int:
 
 
 def hamming_distance(a: int, b: int) -> int:
-    """두 해시가 몇 비트나 다른지. 0이면 동일한 화면."""
+    """How many bits differ between two hashes. 0 is an identical frame."""
     return bin(a ^ b).count("1")
 
 
 def _sort_key(record: ImageRecord):
-    """촬영 시각 우선, 없으면 파일명. 연사는 서브초까지 봐야 순서가 맞습니다."""
+    """Capture time first, filename if there is none. A burst needs the
+    sub-second part for the order to come out right."""
     capture = record.metadata.capture_time if record.metadata else None
     return (0, capture, record.path.name) if capture else (1, None, record.path.name)
 
@@ -64,9 +70,11 @@ def _seconds_between(a: ImageRecord, b: ImageRecord) -> float | None:
 def assign_groups(
     records: list[ImageRecord], config: GroupConfig | None = None
 ) -> list[ImageRecord]:
-    """record.group_id를 채워서 그대로 돌려준다 (제자리 수정).
+    """Fills in record.group_id and returns the list as it is (modified in
+    place).
 
-    입력 리스트의 순서는 바꾸지 않는다 — 호출자가 기대하는 순서가 따로 있습니다.
+    The order of the input list is not changed - the caller has an order of
+    its own that it expects.
     """
     config = config or GroupConfig()
     if not records:
@@ -87,20 +95,23 @@ def assign_groups(
         previous = ordered[index - 1]
         gap = _seconds_between(previous, record)
 
-        # 화면 비교는 앵커(그룹 첫 장)와 합니다. 직전 장과만 비교하면 조금씩
-        # 달라지는 팬 촬영이 하나의 거대한 그룹으로 이어져 버립니다.
+        # The frame comparison is against the anchor (the group's first
+        # frame). Comparing only with the immediately preceding frame joins
+        # a slowly changing pan shot into one enormous group.
         distance = None
         if record.dhash is not None and anchor.dhash is not None:
             distance = hamming_distance(record.dhash, anchor.dhash)
 
         if gap is not None:
-            # 시간을 신뢰합니다. 화면 변화는 명백한 전환일 때만 개입시킵니다.
+            # Trust the time. The frame change steps in only on a blatant
+            # transition.
             visual_split = (
                 distance is not None and distance > config.scene_change_distance
             )
             starts_new_group = gap > config.time_gap_seconds or visual_split
         else:
-            # EXIF 시각이 없으면 화면 변화가 유일한 근거다 — 임계를 조입니다.
+            # With no EXIF time the frame change is the only evidence
+            # there is - so the threshold is tightened.
             starts_new_group = (
                 distance is not None and distance > config.no_time_hash_distance
             )

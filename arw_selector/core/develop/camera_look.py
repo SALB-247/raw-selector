@@ -1,29 +1,42 @@
-"""카메라 룩 매칭 — 내장 JPEG을 정답지로 중립 현상을 근접시키는 시작점.
+"""Camera look matching - a starting point that brings a neutral develop
+close to the embedded JPEG, taken as the answer key.
 
-보정창의 베이스는 중립 디모자이크(+표준 프로파일)라, 카메라가 구워 낸
-내장 JPEG(픽처스타일·톤매핑)과 상당히 다릅니다. 여기서는 그 차이를
-①노출 ②루마 분위수 커브 ③채도 스칼라로 피팅해(연구
-tools/research/research_camera_look.py 의 수학 그대로), 결과를 **앱의
-실제 보정값**으로 기록합니다:
+The develop window's base is a neutral demosaic (+ the standard profile),
+so it differs considerably from the embedded JPEG the camera baked
+(picture style, tone mapping). Here that difference is fitted as
+(1) exposure, (2) a luma quantile curve and (3) a saturation scalar
+(exactly the maths of the research script
+tools/research/research_camera_look.py), and the result is recorded as
+**the app's real adjustment values**:
 
-  - 노출     → BasicSettings.exposure (슬라이더 정밀도 0.01EV로 양자화)
-  - 커브     → CurveSettings 파라메트릭 4값(하이라이트/라이트/다크/섀도),
-               표현력이 모자라면 포인트 곡선(points_rgb)으로 폴백
-  - 채도     → BasicSettings.saturation
+  - exposure   -> BasicSettings.exposure (quantised to the slider's
+                  0.01EV precision)
+  - curve      -> the CurveSettings parametric 4 (highlights/lights/
+                  darks/shadows), falling back to a point curve
+                  (points_rgb) when they cannot express it
+  - saturation -> BasicSettings.saturation
 
-LUT를 몰래 끼워 넣지 않고 설정값으로 적는 이유는 화면=결과 보장입니다 —
-슬라이더에 그대로 보이고, 프리셋 저장·일괄 적용·내보내기 모두 같은 값을
-읽습니다.
+The reason a LUT is not slipped in behind the scenes but written as
+settings is the what-you-see-is-what-you-get guarantee - it shows up on
+the sliders as it is, and preset saving, batch apply and export all read
+the same values.
 
-실측 근거 (RESEARCH_METADATA.md 9절·9-1절, 총 1,035장):
-  - 루마 MAE 21.5→8.9 (다양한 장면 31장) / 15.2→10.6 (콘서트 위주 1,004장)
-  - 제어점 4개 양자화가 256단 LUT와 사실상 동급 (10.9 vs 10.6)
-  - 채널별 RGB 커브는 루마 커브보다 낫지 않음 (8.9 vs 8.9, 채도는 악화)
-  - 피팅 비용 7ms/장 — 보정창을 열 때마다 즉석 피팅해도 됩니다
-  - 하이라이트 클리핑↔잔여 상관 r=-0.02 — 천장 경고는 불요
+Measured evidence (RESEARCH_METADATA.md sections 9 and 9-1, 1,035 frames
+in total):
+  - luma MAE 21.5 -> 8.9 (31 varied scenes) / 15.2 -> 10.6 (1,004 frames,
+    mostly concert)
+  - quantising to 4 control points is effectively equal to a 256-step LUT
+    (10.9 vs 10.6)
+  - per-channel RGB curves are no better than the luma curve (8.9 vs 8.9,
+    and saturation gets worse)
+  - fitting costs 7ms/frame - it can be fitted on the spot every time the
+    develop window opens
+  - highlight clipping vs residual correlation r=-0.02 - no ceiling
+    warning needed
 
-잔여 오차의 근원은 카메라의 국소 톤매핑(DRO류)으로, 전역 커브의 본질적
-한계입니다. 이 기능은 '가장 비슷한 시작점'이지 완전 재현이 아닙니다.
+The source of the residual error is the camera's local tone mapping (the
+DRO family), which is an inherent limit of a global curve. This feature is
+'the most similar starting point', not a complete reproduction.
 """
 
 from __future__ import annotations
@@ -36,37 +49,47 @@ import numpy as np
 from .settings import BasicSettings, CurveSettings, DevelopSettings
 
 SIZE = 256
-"""피팅·평가 해상도(긴변). 연구와 같은 값 — 룩은 저주파 현상이라 이보다
-키워도 결과가 달라지지 않고, 이 크기라야 열 때마다 피팅해도 공짜입니다."""
+"""Fitting and evaluation resolution (long edge). The same value as the
+research - a look is a low-frequency phenomenon, so raising it above this
+does not change the result, and only at this size is fitting on every open
+free."""
 
 POINTS = 16
-"""분위수 커브 제어점 수(연구와 동일). 최종적으로 앱 값에 양자화되므로
-여기서의 표본 수는 피팅 안정성만 좌우합니다."""
+"""Number of quantile curve control points (the same as the research). It
+is quantised to app values in the end, so the sample count here only
+governs the stability of the fit."""
 
 EXPOSURE_DECIMALS = 2
-"""노출 기록 자릿수. 슬라이더(QDoubleSpinBox decimals=2)가 이 정밀도라,
-더 곱게 계산해 봐야 화면에 올리는 순간 반올림됩니다 — 화면=결과를
-지키려면 계산 단계에서 먼저 양자화해야 합니다."""
+"""Decimal places the exposure is recorded to. The slider
+(QDoubleSpinBox decimals=2) is at this precision, so computing any more
+finely only gets rounded the moment it goes on screen - to keep what you
+see being what you get, it has to be quantised at the computation stage
+first."""
 
 PARAMETRIC_MAX_ERR = 2.5
-"""파라메트릭 4값 근사를 받아들이는 상한 (가중 평균 오차, 8비트 레벨).
+"""The ceiling for accepting the parametric 4-value approximation
+(weighted mean error, in 8-bit levels).
 
-이보다 나쁘면 포인트 곡선으로 폴백합니다. 연구 실측에서 4점 양자화의
-전체 잔여가 256단 대비 +0.3에 그쳤으므로, LUT 근사 오차가 이 수준이면
-이미지 잔여에는 사실상 차이가 없습니다."""
+Worse than this and it falls back to the point curve. Measured in the
+research, the whole residual of the 4-point quantisation came to only
++0.3 against 256 steps, so a LUT approximation error at this level makes
+practically no difference to the image residual."""
 
 _CURVE_SAMPLE_XS = (0, 4, 10, 22, 40, 64, 96, 136, 192, 255)
-"""포인트 곡선 폴백에서 LUT를 표본화할 입력 위치.
+"""The input positions the LUT is sampled at in the point-curve fallback.
 
-섀도 쪽이 촘촘한 이유: 카메라 룩의 급한 굴곡은 토(toe) 리프트에 몰려
-있고, 균등 간격(32씩)은 그 구간에서 스플라인이 평균 2.4레벨을 빗나갔
-습니다(감마 0.45 실측). 이 격자는 같은 곡선을 평균 0.4레벨로 통과합니다.
-더 촘촘히 찍으면 곡선 편집기에 점이 바글거려 사용자가 손대기 어렵습니다."""
+Why the shadow end is dense: the sharp bends of a camera look are
+clustered in the toe lift, and at even spacing (32 apart) the spline
+missed by 2.4 levels on average over that stretch (measured at gamma
+0.45). This grid passes the same curve at 0.4 levels on average. Sample
+any denser and the curve editor swarms with points, which makes it hard
+for the user to touch."""
 
 
-# ------------------------------------------------------------------ 피팅 원형
-# (연구 스크립트 fit_look의 수학을 그대로 옮긴 것. 여기가 기준 구현이고
-#  연구 쪽은 재현용 사본으로 남습니다.)
+# ------------------------------------------------------------ the fitting core
+# (the maths of the research script's fit_look, carried over as it is.
+#  This is the reference implementation; the research side stays as a copy
+#  for reproduction.)
 
 
 def _luma(bgr: np.ndarray) -> np.ndarray:
@@ -89,11 +112,12 @@ def _small(bgr: np.ndarray) -> np.ndarray:
 
 
 def _pair(render: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """둘 다 평가 해상도로 줄이고 모양을 맞춥니다.
+    """Shrink both to the evaluation resolution and match their shapes.
 
-    내장 JPEG은 센서와 종횡비가 미세하게 다를 수 있습니다(여백 크롭 등).
-    화소 단위 정합이 아니라 분위수·평균 통계만 쓰므로 강제 리사이즈로
-    충분합니다 — 연구도 같은 방식으로 쟀습니다.
+    The embedded JPEG can differ slightly from the sensor in aspect ratio
+    (a margin crop and so on). We use only quantile and mean statistics,
+    not a pixel-level registration, so a forced resize is enough - the
+    research measured it the same way.
     """
     render_s, target_s = _small(render), _small(target)
     if render_s.shape != target_s.shape:
@@ -102,44 +126,53 @@ def _pair(render: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, np.ndarra
 
 
 def fit_look(render: np.ndarray, target: np.ndarray) -> dict:
-    """중립 현상(render)을 target(내장 JPEG)에 근접시키는 원 파라미터.
+    """The raw parameters that bring the neutral develop (render) close to
+    target (the embedded JPEG).
 
-    반환: {"exposure": EV, "lut": float32[256], "saturation": 배율}.
-    lut는 노출 적용 **후**의 루마에 대한 매핑입니다.
+    Returns: {"exposure": EV, "lut": float32[256], "saturation": factor}.
+    lut is the mapping for the luma **after** exposure has been applied.
     """
     from .engine import apply_exposure_with_shoulder, to_light
 
     render_s, target_s = _pair(render, target)
     luma_r, luma_t = _luma(render_s), _luma(target_s)
 
-    # ① 노출: 중앙값 로그비 (극단 클리핑에 둔감).
+    # (1) Exposure: the median log ratio (insensitive to extreme
+    # clipping).
     #
-    # 비를 **엔진이 곱하는 그 공간에서** 잡습니다. 우리가 찾는 것은
-    # "engine.apply_exposure가 render의 표시값을 target의 표시값으로
-    # 옮기려면 광량에 얼마를 곱해야 하는가"이므로, 두 값 모두 엔진의
-    # 전달함수(to_light)로 되돌려야 합니다. 예전에는 sRGB로 되돌렸는데,
-    # render는 postprocess·기종보정·프로파일 곡선을 지난 값이라 sRGB가
-    # 아닙니다 — 슬라이더에 찍히는 값이 0.24~0.81 EV 어긋났습니다(실측).
+    # The ratio is taken **in the space the engine multiplies in**. What
+    # we are after is "how much does engine.apply_exposure have to
+    # multiply the light by to move render's display value to target's
+    # display value", so both values have to be undone with the engine's
+    # transfer function (to_light). We used to undo with sRGB, but render
+    # is a value that has been through postprocess, the body correction
+    # and the profile curve, so it is not sRGB - the value printed on the
+    # slider was off by 0.24~0.81 EV (measured).
     #
-    # target을 그 출신(카메라 JPEG = 진짜 sRGB)대로 sRGB로 되돌리는 것은
-    # **틀립니다.** 같은 그림을 자기 자신에 맞추면 노출이 0이어야 하는데
-    # 두 공간이 갈려 0.59가 나옵니다. 목표는 그저 도달할 표시값입니다.
+    # Undoing target with sRGB on the grounds of where it came from (a
+    # camera JPEG = genuine sRGB) is **wrong.** Match the same picture to
+    # itself and the exposure ought to be 0, but the two spaces split and
+    # 0.59 comes out. The target is simply a display value to reach.
     #
-    # 노출이 커지면 노출 단계에서 255에 붙는 화소가 0.76%에서 2.25%로
-    # 늘어나 하이라이트를 잃는 것처럼 보입니다. 그런데 **최종 계조를 세어
-    # 보면 반대**입니다 — 목표에서 밝은 10% 구간에 남는 고유 레벨이
-    # 121.6에서 125.4로 늘어납니다. 255에 붙는 그 화소들은 어차피 흰색에
-    # 가깝던 쪽이고, 노출을 제대로 올리면 나머지가 커브의 촘촘한 구간에
-    # 얹히기 때문입니다. 중간 단계의 클립 비율로 판단하면 안 됩니다.
+    # As the exposure grows, the pixels pinned at 255 in the exposure
+    # stage rise from 0.76% to 2.25%, which looks like losing highlights.
+    # But **count the final gradation and it is the opposite** - the
+    # unique levels left in the bright 10% band of the target rise from
+    # 121.6 to 125.4. Those pixels pinned at 255 were the ones already
+    # close to white anyway, and raising the exposure properly lays the
+    # rest onto the dense stretch of the curve. It must not be judged by
+    # the clip ratio of an intermediate stage.
     lin_r = float(to_light(np.median(luma_r)))
     lin_t = float(to_light(np.median(luma_t)))
     exposure = float(np.log2((lin_t + 1e-4) / (lin_r + 1e-4)))
-    # 렌더 경로가 노출 뒤에 하이라이트 어깨를 겁니다(_tone_lut). 여기서
-    # 순수한 곱만 쓰면 아래 분위수 커브가 어깨를 모르는 밝기 위에서 맞춰져,
-    # 이 파일이 내세운 "피팅과 렌더가 같은 연산을 써야 한다"가 다시 깨집니다.
+    # The render path applies a highlight shoulder after exposure
+    # (_tone_lut). Use only the pure multiply here and the quantile curve
+    # below gets matched on top of a brightness that knows nothing of the
+    # shoulder, which breaks this file's own "fitting and rendering have
+    # to use the same operation" all over again.
     luma_r2 = np.clip(apply_exposure_with_shoulder(luma_r, exposure), 0, 255)
 
-    # ② 루마 분위수 커브: 같은 분위수끼리 짝지어 단조 LUT
+    # (2) Luma quantile curve: pair like quantiles into a monotone LUT
     quantiles = np.linspace(0.02, 0.98, POINTS)
     src = np.quantile(luma_r2, quantiles)
     dst = np.quantile(luma_t, quantiles)
@@ -147,7 +180,7 @@ def fit_look(render: np.ndarray, target: np.ndarray) -> dict:
     dst = np.maximum.accumulate(np.concatenate([[0.0], dst, [255.0]]))
     lut = np.interp(np.arange(256), src, dst).astype(np.float32)
 
-    # ③ 채도: 커브 적용 후 크로마 비
+    # (3) Saturation: the chroma ratio after the curve is applied
     matched = apply_look(render_s, {"exposure": exposure, "lut": lut,
                                     "saturation": 1.0})
     chroma_ratio = (_chroma(target_s) + 1e-6) / (_chroma(matched) + 1e-6)
@@ -156,11 +189,13 @@ def fit_look(render: np.ndarray, target: np.ndarray) -> dict:
 
 
 def apply_look(bgr: np.ndarray, look: dict) -> np.ndarray:
-    """연구용 룩 적용(YCrCb 공간). 합성 검증과 채도 피팅에만 씁니다.
+    """Research-side look application (YCrCb space). Used only for the
+    synthetic verification and the saturation fit.
 
-    제품 렌더는 이걸 쓰지 않습니다 — 설정값으로 기록해 engine.apply_settings
-    가 그리는 것이 최종이고, 여기와의 잔차는 match_settings가 채도 단계에서
-    실제 엔진 응답으로 흡수합니다.
+    The product render does not use this - what is final is recorded as
+    settings and drawn by engine.apply_settings, and the residual against
+    here is absorbed by match_settings at the saturation stage using the
+    real engine response.
     """
     from .engine import apply_exposure
 
@@ -173,7 +208,10 @@ def apply_look(bgr: np.ndarray, look: dict) -> np.ndarray:
 
 
 def score(render: np.ndarray, target: np.ndarray) -> tuple[float, float]:
-    """(루마 MAE, 채도 MAE) — 낮을수록 비슷. 연구와 같은 자입니다."""
+    """(luma MAE, chroma MAE) - lower is more similar. The same ruler as the
+    research. The second term is measured on Cr/Cb, so it is chroma rather
+    than a saturation slider value - the local variable and _chroma() below
+    use the same name."""
     render_s, target_s = _pair(render, target)
     luma = float(np.abs(_luma(render_s) - _luma(target_s)).mean())
     ycc_r = cv2.cvtColor(render_s, cv2.COLOR_BGR2YCrCb).astype(np.float32)
@@ -182,16 +220,19 @@ def score(render: np.ndarray, target: np.ndarray) -> tuple[float, float]:
     return luma, chroma
 
 
-# ------------------------------------------------------------------ LUT → 앱 값
+# ----------------------------------------------------------- LUT -> app values
 
 
 def _weights(render_s: np.ndarray, exposure: float) -> np.ndarray:
-    """LUT 근사 오차의 가중치 — 노출 적용 후 루마 히스토그램.
+    """Weights for the LUT approximation error - the luma histogram after
+    exposure is applied.
 
-    LUT 256칸을 똑같이 취급하면 화소가 하나도 없는 계조 구간의 오차가
-    피팅을 끌고 갑니다. 이미지 잔여(MAE)를 줄이는 것이 목적이므로 화소가
-    실제로 놓인 곳을 세게 봅니다. 바닥값을 깔아 빈 구간도 완전히 버리지는
-    않습니다 — 같은 커브가 노출이 조금 다른 옆 컷에도 이식되기 때문입니다.
+    Treat all 256 LUT slots alike and the error over a tonal stretch that
+    holds not a single pixel drags the fit around. The point is to reduce
+    the image residual (MAE), so we look hard at where the pixels actually
+    lie. A floor is laid down so that empty stretches are not thrown away
+    entirely - the same curve gets transplanted onto the next frame over,
+    whose exposure is slightly different.
     """
     from .engine import apply_exposure
 
@@ -204,7 +245,8 @@ def _weights(render_s: np.ndarray, exposure: float) -> np.ndarray:
 
 def _parametric_error(amounts: tuple[int, int, int, int], lut: np.ndarray,
                       weights: np.ndarray) -> float:
-    """파라메트릭 4값이 만든 곡선과 목표 LUT의 가중 평균 오차(레벨)."""
+    """Weighted mean error (levels) between the curve the parametric 4
+    values make and the target LUT."""
     from .engine import parametric_tone_lut
 
     shadows, darks, lights, highlights = amounts
@@ -214,13 +256,17 @@ def _parametric_error(amounts: tuple[int, int, int, int], lut: np.ndarray,
 
 def fit_parametric(lut: np.ndarray,
                    weights: np.ndarray | None = None) -> tuple[int, int, int, int]:
-    """목표 LUT에 가장 가까운 앱 파라메트릭 4값 (섀도/다크/라이트/하이라이트).
+    """The app parametric 4 closest to the target LUT (shadows/darks/
+    lights/highlights).
 
-    엔진의 실제 응답(engine.parametric_tone_lut)에 맞춥니다. 응답은 구간별
-    가우시안을 **순차** 적용하므로 엄밀히는 비선형이지만, 항등 기준으로
-    선형화한 최소자승이 좋은 출발점이고, 그 위에서 정수 좌표 하강(구간별
-    삼분 탐색)으로 실제 응답 기준의 최적을 찾습니다. 반환값은 슬라이더
-    범위(-100~100)의 정수라 그대로 화면에 올라갑니다.
+    It is matched against the engine's real response
+    (engine.parametric_tone_lut). The response applies the per-region
+    Gaussians **in sequence**, so strictly it is non-linear, but a least
+    squares linearised about identity is a good starting point, and on
+    top of that an integer coordinate descent (a ternary search per
+    region) finds the optimum against the real response. The return
+    values are integers in the slider range (-100~100), so they go on
+    screen as they are.
     """
     from .engine import (
         _PARAMETRIC_STRENGTH,
@@ -232,23 +278,25 @@ def fit_parametric(lut: np.ndarray,
     if weights is None:
         weights = np.full(256, 1.0 / 256.0)
 
-    # ── 선형화 초기값: identity + Σ (amount/100)·강도·가우시안 ≈ lut
+    # -- Linearised start: identity + sum (amount/100)*strength*gaussian ~ lut
     x = np.arange(256, dtype=np.float64) / 255.0
     basis = np.stack([
         _PARAMETRIC_STRENGTH * np.exp(-((x - center) ** 2)
                                       / (2 * _PARAMETRIC_WIDTH ** 2)) * 255.0
         for _name, center in PARAMETRIC_REGIONS
-    ], axis=1)                                    # (256, 4) — 섀도·다크·라이트·하이라이트 순
+    ], axis=1)                                    # (256, 4) shadow..highlight
     delta = lut - np.arange(256, dtype=np.float64)
     w_col = np.sqrt(weights)[:, None]
     solution, *_ = np.linalg.lstsq(basis * w_col, delta * w_col[:, 0], rcond=None)
     amounts = [int(np.clip(round(v * 100.0), -100, 100)) for v in solution]
 
-    # ── 정수 좌표 하강: 실제 응답 기준. 한 좌표의 오차 곡선은 실측상
-    #    단봉이라 삼분 탐색이 통하고, 혹시 모를 평평한 바닥은 마지막
-    #    국소 스캔(±2)이 정리합니다. 삼분 탐색과 국소 스캔이 같은 값을
-    #    거듭 두드리므로 평가를 캐시합니다 — 보정창을 열 때마다 도는
-    #    코드라 낭비가 그대로 대기 시간이 됩니다.
+    # -- Integer coordinate descent, against the real response. Measured,
+    #    the error curve along one coordinate is unimodal, so a ternary
+    #    search works, and any flat bottom there might be is tidied up by
+    #    the final local scan (+-2). The ternary search and the local scan
+    #    keep hitting the same values, so evaluations are cached - this
+    #    code runs every time the develop window opens, so the waste turns
+    #    straight into waiting time.
     cache: dict[tuple[int, int, int, int], float] = {}
 
     def err_at(index: int, value: int) -> float:
@@ -287,11 +335,13 @@ def fit_parametric(lut: np.ndarray,
 
 
 def lut_to_curve_points(lut: np.ndarray) -> tuple[tuple[int, int], ...]:
-    """LUT를 곡선 편집기 포인트로 표본화합니다 (파라메트릭 폴백용).
+    """Sample the LUT into curve editor points (for the parametric
+    fallback).
 
-    입력 x는 고정 격자를 씁니다 — 분위수 자리를 쓰면 컷마다 점 위치가
-    널뛰어 곡선 편집기에서 비교가 안 됩니다. 단조 LUT + 단조 스플라인
-    조합이라 이 간격이면 레벨 미만으로 통과합니다.
+    The input x uses a fixed grid - use the quantile positions and the
+    point positions jump about from frame to frame, so nothing can be
+    compared in the curve editor. It is a monotone LUT plus a monotone
+    spline, so at this spacing it passes within less than a level.
     """
     lut = np.asarray(lut, dtype=np.float64)
     points = []
@@ -305,22 +355,25 @@ def lut_to_curve_points(lut: np.ndarray) -> tuple[tuple[int, int], ...]:
     return tuple(points)
 
 
-# ------------------------------------------------------------------ 제품 진입점
+# ------------------------------------------------------- product entry points
 
 
 def curve_for_lut(lut: np.ndarray, weights: np.ndarray,
                   base_curve: CurveSettings) -> CurveSettings:
-    """피팅 LUT를 앱 커브 설정으로 — 파라메트릭 우선, 모자라면 포인트.
+    """The fitted LUT into app curve settings - parametric first, points
+    if that is not enough.
 
-    파라메트릭 4값이 기본인 이유: 슬라이더에 그대로 보여서 사용자가 이어서
-    만지기 쉽고, 연구 실측에서 256단 LUT와 사실상 동급(10.9 vs 10.6)이었기
-    때문입니다. 다만 파라메트릭 응답은 구간당 진폭이 ±0.22로 묶여 있어
-    급한 굴곡은 못 담습니다 — 그때 조용히 눌러 담으면 '매칭했는데 안
-    비슷한' 상태가 되므로 포인트 곡선으로 넘어갑니다. 어느 쪽이든 곡선
-    편집기가 그대로 보여 주는 값입니다.
+    Why the parametric 4 are the default: they show up on the sliders as
+    they are, so the user can carry on adjusting from there, and measured
+    in the research they were effectively equal to a 256-step LUT (10.9
+    vs 10.6). But the parametric response has its amplitude tied to
+    +-0.22 per region, so it cannot hold a sharp bend - quietly squashing
+    it in at that point leaves the state 'matched, and yet it does not
+    look alike', so we cross over to the point curve. Either way it is a
+    value the curve editor shows as it is.
 
-    base_curve의 채널별 곡선(R/G/B 포인트)은 매칭 소유가 아니라 그대로
-    지나갑니다.
+    base_curve's per-channel curves (the R/G/B points) are not owned by
+    matching and pass straight through.
     """
     parametric = fit_parametric(lut, weights)
     if _parametric_error(parametric, lut, weights) <= PARAMETRIC_MAX_ERR:
@@ -334,7 +387,7 @@ def curve_for_lut(lut: np.ndarray, weights: np.ndarray,
 
 
 def _wb_log_ratios(mean_bgr: np.ndarray) -> tuple[float, float]:
-    """표시값 채널 평균 → 선형 → (log R/G, log B/G)."""
+    """Display-value channel means -> linear -> (log R/G, log B/G)."""
     from .engine import srgb_to_linear
 
     lin = srgb_to_linear(np.maximum(np.asarray(mean_bgr, np.float64), 1.0)
@@ -343,11 +396,12 @@ def _wb_log_ratios(mean_bgr: np.ndarray) -> tuple[float, float]:
 
 
 def _wb_means(render: np.ndarray, target: np.ndarray):
-    """비교에 쓸 (target, render) 채널 평균.
+    """The (target, render) channel means to compare with.
 
-    무채색 후보가 있으면 그것을(조명 색에 안 휘둘림), 없으면 전체 평균을
-    씁니다 — 색조명 장면(이자카야 LED 등)은 무채색이 아예 없는데, 하필
-    그런 컷이 이 피팅을 가장 필요로 합니다.
+    If there are neutral candidates we use those (they are not swayed by
+    the light's colour), otherwise the overall mean - a coloured-light
+    scene (an izakaya's LEDs and the like) has no neutrals at all, and it
+    is precisely those frames that need this fit the most.
     """
     from .calibration import _neutral_means
 
@@ -359,29 +413,35 @@ def _wb_means(render: np.ndarray, target: np.ndarray):
 
 
 def _wb_gap(render: np.ndarray, target: np.ndarray) -> float:
-    """두 그림의 색 균형 차이 — log(R/G)·log(B/G) 절대합."""
+    """The colour balance gap between two pictures - the absolute sum of
+    log(R/G) and log(B/G)."""
     t_mean, r_mean = _wb_means(render, target)
     want, got = _wb_log_ratios(t_mean), _wb_log_ratios(r_mean)
     return abs(got[0] - want[0]) + abs(got[1] - want[1])
 
 
 CHANNEL_POINTS = 8
-"""채널별 잔차 곡선의 분위수 표본 수. 잔차용이라 성글게 잡습니다."""
+"""Quantile sample count of the per-channel residual curve. It is for a
+residual, so it is set coarse."""
 
 CHANNEL_MAX_SHIFT = 12.0
-"""채널 곡선이 움직일 수 있는 최대 레벨. 분위수 대응이 폭주하는 것만
-막습니다 — 색이 나빠지는 쪽은 스코어 판정(match_settings)이 잡습니다."""
+"""The maximum number of levels a channel curve may move. It only stops
+the quantile mapping from running away - the side where the colour gets
+worse is caught by the score decision (match_settings)."""
 
 CHANNEL_MIN_GAIN = 0.05
-"""채널 곡선 채택에 요구하는 최소 상대 개선. 여기 스코어는 작은 근사
-렌더(WB 근사·광학 보정 없음)로 재는데, 실제 정착 경로(재디모자이크·광학
-포함)로 넘어가면 아슬아슬한 이득은 뒤집힐 수 있습니다 — 실측: 내부 +2~3%
-이득이던 P1032946이 정착 렌더에서 -2% 손해로 반전. 진짜 수혜 컷은 내부
--21~-30%라 5% 문턱과는 한 자릿수 차이로 떨어져 있습니다."""
+"""The minimum relative improvement required to adopt a channel curve.
+The score here is measured on a small approximate render (approximate WB,
+no optical correction), and a marginal gain can flip once it moves to the
+real settled path (re-demosaic and optics included) - measured: P1032946,
+a +2~3% gain internally, reversed into a -2% loss on the settled render.
+Frames that genuinely benefit are at -21~-30% internally, a whole digit
+clear of the 5% threshold."""
 
 
 def _fit_channel_curve(render_ch: np.ndarray, target_ch: np.ndarray) -> tuple:
-    """한 채널의 잔차를 분위수 대응으로 — 편집기 좌표 점들. 없으면 ()."""
+    """One channel's residual by quantile mapping - points in editor
+    coordinates. () if there is none."""
     quantiles = np.linspace(0.03, 0.97, CHANNEL_POINTS)
     src = np.quantile(render_ch, quantiles)
     dst = np.clip(np.quantile(target_ch, quantiles),
@@ -395,21 +455,25 @@ def _fit_channel_curve(render_ch: np.ndarray, target_ch: np.ndarray) -> tuple:
         seen.add(int(x))
         points.append((int(x), int(y)))
     if not points or max(abs(y - x) for x, y in points) < 1.5:
-        return ()                      # 잔차가 반올림 수준 — 항등으로 둡니다
+        return ()                      # residual is rounding-level - identity
     return ((0, 0), *points, (255, 255))
 
 
 def _apply_matched_wb(render: np.ndarray, kelvin: int, tint: int,
                       wb) -> np.ndarray:
-    """(색온도, 색조)가 **정착 후** 실제로 만드는 그림을 예측합니다.
+    """Predict the picture (temperature, tint) really makes **once
+    settled**.
 
-    슬라이더가 놓이면 색온도는 재디모자이크로 **선형에서** 걸리고
-    (raw_io.load_demosaiced의 앵커 배수), 색조는 표시값 G 곱으로
-    남습니다(engine._apply_white_balance). 피팅의 검증·사전 적용이 이
-    조합과 다른 공간을 쓰면 — 처음에 드래그용 근사(전부 감마 곱)를 썼다가
-    왕복 테스트가 잡았습니다: 켈빈 3000을 건 목표에서 2200·틴트 -87이
-    나왔습니다. 감마에 곱한 게인을 선형 가정으로 읽으면 2.4승으로
-    부풀기 때문입니다.
+    Once the sliders are set, the temperature is applied **in linear** by
+    the re-demosaic (the anchor multipliers in raw_io.load_demosaiced),
+    while the tint stays a display-value G multiply
+    (engine._apply_white_balance). If the fit's verification and its
+    pre-application use a space different from that combination - we
+    first used the drag-time approximation (multiply everything in
+    gamma), and the round-trip test caught it: a target with kelvin 3000
+    applied came back as 2200 and tint -87. It is because reading a gain
+    that was multiplied in gamma under a linear assumption inflates it by
+    the power of 2.4.
     """
     from ..raw_io import _estimate_as_shot_kelvin
     from .engine import _kelvin_to_rgb, linear_to_srgb, srgb_to_linear
@@ -430,12 +494,16 @@ def _apply_matched_wb(render: np.ndarray, kelvin: int, tint: int,
 
 
 def _kelvin_working(working: np.ndarray, kelvin: int, wb) -> np.ndarray:
-    """작업 공간 float에 앵커 켈빈 게인을 미리 겁니다 (정착의 근사).
+    """Apply the anchor kelvin gain to the working-space float up front
+    (an approximation of settling).
 
-    정착은 센서 선형(색 행렬 앞)에 배수를 걸지만, 여기서는 행렬 뒤의 작업
-    선형에 같은 배수를 겁니다 — 앵커(추정 켈빈) 근처의 작은 게인에서는
-    차이가 작고, 채택은 어차피 실제 렌더 스코어로 판정하므로 근사가 나쁘면
-    그대로 기각됩니다. 작업 공간 전달함수는 sRGB 곡선입니다(Melissa).
+    Settling applies the multipliers in sensor linear (before the colour
+    matrix), while here the same multipliers are applied to the working
+    linear after the matrix - at the small gains near the anchor (the
+    estimated kelvin) the difference is small, and adoption is decided on
+    the real render score anyway, so a bad approximation is simply
+    rejected. The working space transfer function is the sRGB curve
+    (Melissa).
     """
     from ..raw_io import _estimate_as_shot_kelvin
     from .engine import _kelvin_to_rgb, linear_to_srgb, srgb_to_linear
@@ -456,18 +524,23 @@ def _kelvin_working(working: np.ndarray, kelvin: int, wb) -> np.ndarray:
 
 def fit_white_balance(render: np.ndarray, target: np.ndarray,
                       wb) -> tuple[int, int] | None:
-    """render의 색 균형을 target에 맞추는 (색온도, 색조). 못 맞추면 None.
+    """The (temperature, tint) that matches render's colour balance to
+    target. None if it cannot be matched.
 
-    채널 비(R/G, B/G)를 목표로 앵커 모델(camera × K(추정)/K(t))의 켈빈과,
-    켈빈 축에 없는 초록-마젠타 성분을 색조로 역산합니다. 앵커 공식이라
-    "temperature=t"가 렌더에 주는 선형 게인이 정확히 K(추정)/K(t)이고,
-    그 예측 위에서 2축을 2변수로 풉니다.
+    Taking the channel ratios (R/G, B/G) as the goal, it solves back for
+    the kelvin of the anchor model (camera x K(estimated)/K(t)) and, as
+    the tint, the green-magenta component that is not on the kelvin axis.
+    Because it is the anchor formula, the linear gain "temperature=t"
+    gives the render is exactly K(estimated)/K(t), and on top of that
+    prediction the two axes are solved as two variables.
 
-    **개선될 때만 답을 냅니다.** 색 차이에는 켈빈·색조 축 밖의 성분(제조사
-    색 렌더)도 섞여 있어서, 억지로 맞추면 한 축을 줄이며 다른 축을
-    키웁니다 — 실측에서 파나소닉 컷의 R/G가 2.0%에서 4.9%로 나빠졌습니다.
-    맞춘 결과의 색 균형 차이가 10% 이상 줄지 않으면 None을 돌려주고,
-    호출자는 기존 값을 둡니다.
+    **It only answers when things improve.** The colour difference also
+    has components off the kelvin and tint axes mixed in (the maker's
+    colour rendering), so forcing a match shrinks one axis while growing
+    the other - measured, the R/G of a Panasonic frame got worse, from
+    2.0% to 4.9%. If the matched result does not shrink the colour
+    balance gap by 10% or more it returns None, and the caller leaves the
+    existing values alone.
     """
     from ..raw_io import _estimate_as_shot_kelvin
     from .engine import _kelvin_to_rgb, linear_to_srgb
@@ -492,7 +565,8 @@ def fit_white_balance(render: np.ndarray, target: np.ndarray,
         gain = anchor / _kelvin_to_rgb(float(kelvin))
         model_rg = float(np.log(gain[0] / gain[1]))
         model_bg = float(np.log(gain[2] / gain[1]))
-        # 색조(G만 곱함)는 (log R/G, log B/G) 공간에서 (+d, +d) 방향입니다
+        # Tint (multiplies G only) is the (+d, +d) direction in the
+        # (log R/G, log B/G) space
         delta = ((want_rg - model_rg) + (want_bg - model_bg)) / 2.0
         residual = ((want_rg - model_rg - delta) ** 2
                     + (want_bg - model_bg - delta) ** 2)
@@ -500,8 +574,9 @@ def fit_white_balance(render: np.ndarray, target: np.ndarray,
             best = (residual, kelvin, delta)
 
     _, kelvin, delta = best
-    # delta = 선형 G 공통 성분. tint의 정의는 **표시값** G 게인
-    # (1 - 0.18·tint/100)이므로 중간 회색에서 정확히 환산합니다.
+    # delta = the common linear G component. tint is defined as the
+    # **display-value** G gain (1 - 0.18*tint/100), so it is converted
+    # exactly at middle grey.
     grey = 0.18
     disp_gain = float(linear_to_srgb(np.float64(grey * np.exp(-delta)))
                       / linear_to_srgb(np.float64(grey)))
@@ -520,40 +595,51 @@ def match_settings(
     wb=None,
     working: np.ndarray | None = None,
 ) -> DevelopSettings:
-    """중립 현상 render를 내장 JPEG target에 근접시키는 DevelopSettings.
+    """The DevelopSettings that bring the neutral develop render close to
+    the embedded JPEG target.
 
-    render는 보정창 베이스(디모자이크+프로파일)의 8비트 BGR, target은
-    load_preview 결과입니다. base를 주면 그 설정에서 **색온도·색조·노출·
-    채도·톤 곡선만** 바꾼 사본을 돌려줍니다 — 디테일·마스크·크롭 등 다른
-    편집은 그대로 둡니다(원클릭 버튼이 기존 편집을 지우면 안 됩니다).
+    render is the 8-bit BGR of the develop window base (demosaic +
+    profile), target is the load_preview result. Given base, it returns a
+    copy of those settings with **only the temperature, tint, exposure,
+    saturation and tone curve** changed - other edits such as detail,
+    masks and crop are left alone (a one-click button must not wipe out
+    existing edits).
 
-    working은 같은 컷의 **작업 공간 float**(보정창의 self._source)입니다.
-    주면 피팅·검증 렌더를 전부 실제 화면 경로(작업 공간에 적용 →
-    output_space="srgb"로 변환)로 돌립니다. 표시값 위에서 피팅·검증하면
-    커브·채도가 실제로는 더 넓은 작업 공간에 걸리는 것과 어긋납니다 —
-    실측으로 같은 설정이 두 공간에서 R/G 12%까지 다른 색을 만듭니다
-    (채도 높은 컷일수록 큼). 없으면 예전처럼 표시값 위에서 피팅합니다.
+    working is the **working-space float** of the same frame (the develop
+    window's self._source). Given it, every fitting and verification
+    render is run down the real screen path (applied in the working
+    space, then converted with output_space="srgb"). Fitting and
+    verifying on top of display values disagrees with the fact that the
+    curve and saturation really apply in the wider working space -
+    measured, the same settings make colours differing by up to 12% in
+    R/G between the two spaces (the more saturated the frame, the
+    larger). Without it, the fit is done on display values as before.
 
-    wb는 (camera_whitebalance, daylight_whitebalance)입니다. 주면 색 균형을
-    먼저 맞춥니다(fit_white_balance) — 노출·커브·채도는 밝기와 크로마
-    크기만 다루므로, 색 균형이 어긋난 상태로는 "맞추기를 눌러도 색이
-    다르다"가 됩니다(실측: 이자카야 LED에서 R/G 8.1%·B/G 11.2% 어긋남이
-    피팅으로 0.3%·1.2%가 됩니다). 색이 개선되지 않는 컷(제조사 색 렌더가
-    지배)은 자동으로 건너뜁니다.
+    wb is (camera_whitebalance, daylight_whitebalance). Given it, the
+    colour balance is matched first (fit_white_balance) - exposure, curve
+    and saturation only deal with brightness and the size of the chroma,
+    so with the colour balance off you get "I pressed match and the
+    colour is still different" (measured: under izakaya LEDs a gap of
+    8.1% in R/G and 11.2% in B/G becomes 0.3% and 1.2% with the fit).
+    Frames where the colour does not improve (dominated by the maker's
+    colour rendering) are skipped automatically.
 
-    채도는 연구처럼 YCrCb 근사가 아니라 **실제 엔진 렌더**(apply_settings)
-    위에서 잽니다. 엔진은 커브를 채널별로 적용해 크로마가 함께 움직이므로,
-    같은 채도값이라도 YCrCb 근사와 결과가 다릅니다 — 화면에 나올 그
-    경로에서 재야 화면=결과가 맞습니다.
+    Saturation is measured on the **real engine render**
+    (apply_settings), not on a YCrCb approximation as in the research.
+    The engine applies the curve per channel so the chroma moves along
+    with it, which means the same saturation value gives a different
+    result from the YCrCb approximation - it has to be measured on the
+    path that will reach the screen for what you see to be what you get.
     """
     from ..raw_io import to_display
     from .engine import apply_settings
 
     base = base or DevelopSettings()
     if working is not None:
-        # 실제 프레임: 렌더 비교 기준도 작업 이미지에서 파생시킵니다.
-        # (전달된 render와 사실상 같지만, 한 원본에서 나와야 어긋날 수
-        # 없습니다.)
+        # The real frame: the render we compare against is derived from
+        # the working image too. (Effectively the same as the render that
+        # was passed in, but coming out of one original is what makes it
+        # impossible for them to disagree.)
         working_s = _small(np.clip(working, 0.0, 255.0).astype(np.float32))
         render_s = to_display(working_s)
         _, target_s = _pair(render_s, target)
@@ -562,11 +648,13 @@ def match_settings(
         render_s, target_s = _pair(render, target)
 
     def fit_tone(source: np.ndarray, source_working, tone_tint: int):
-        """색 균형이 정해진 소스에서 노출·커브·채도를 피팅합니다.
+        """Fit exposure, curve and saturation on a source whose colour
+        balance is already decided.
 
-        source_working이 있으면 렌더는 실제 화면 경로(작업 공간 적용 후
-        sRGB 변환)를 씁니다. tone_tint는 그 렌더에 함께 태우는 색조 —
-        정착 화면도 색조를 엔진에서 겁니다.
+        With source_working present, the render uses the real screen path
+        (applied in the working space, then converted to sRGB). tone_tint
+        is the tint carried along in that render - the settled screen
+        applies the tint in the engine as well.
         """
         def real(applied: DevelopSettings) -> np.ndarray:
             if source_working is None:
@@ -579,9 +667,11 @@ def match_settings(
         weights = _weights(source, exposure)
         curve = curve_for_lut(fitted["lut"], weights, base.curve)
 
-        # 채도는 톤을 확정한 뒤 실제 엔진 응답에서 잽니다. 톤·채도만 넣은
-        # 벌거벗은 설정을 쓰는 이유: base의 크롭·마스크·정보 띠가 끼면 작은
-        # 비교 이미지가 잘리거나 덧그려져 측정 자체가 깨집니다.
+        # Saturation is measured on the real engine response after the
+        # tone is settled. Why a bare settings object holding only tone
+        # and saturation is used: let base's crop, masks or info bar in
+        # and the small comparison image gets cut or drawn over, which
+        # breaks the measurement itself.
         tone_only = DevelopSettings(
             basic=BasicSettings(exposure=exposure, tint=tone_tint),
             curve=CurveSettings(
@@ -599,17 +689,22 @@ def match_settings(
         luma_err, chroma_err = score(rendered, target_s)
         return exposure, curve, saturation, luma_err + chroma_err, rendered
 
-    # 색 균형을 먼저 맞추고, 노출·커브·채도는 그 위에서 잽니다. 실제
-    # 화면도 같은 순서입니다(화이트밸런스 → 톤). 사전 적용은 정착 후
-    # 실제와 같은 공간을 씁니다 — 실제 프레임에서는 켈빈 게인을 작업
-    # 선형에 걸고(_kelvin_working) 색조는 엔진 렌더에 태우며, 표시값
-    # 폴백에서는 _apply_matched_wb를 씁니다.
+    # The colour balance is matched first, and exposure, curve and
+    # saturation are measured on top of it. The real screen is in the
+    # same order too (white balance -> tone). The pre-application uses
+    # the same space as the real thing after settling - on a real frame
+    # the kelvin gain is applied in the working linear (_kelvin_working)
+    # and the tint is carried in the engine render, while the
+    # display-value fallback uses _apply_matched_wb.
     #
-    # **채택은 최종 그림으로 판정합니다.** 색 균형 지표만 보면 무채색은
-    # 좋아지는데 커브·채도까지 얹은 결과가 나빠지는 컷이 있습니다(실측
-    # 파나소닉: 균형 지표는 개선인데 최종 B/G가 0.0% → 4.6%). 그래서 두
-    # 후보(피팅 WB / 지금 WB)를 끝까지 피팅해 실제 엔진 렌더가 목표에 더
-    # 가까운 쪽을 씁니다 — 채도를 엔진 응답에서 재는 것과 같은 원칙입니다.
+    # **Adoption is decided on the final picture.** Going by the colour
+    # balance metric alone there are frames where the neutrals improve
+    # but the result with the curve and saturation laid on gets worse
+    # (measured, Panasonic: the balance metric improves while the final
+    # B/G goes 0.0% -> 4.6%). So both candidates (the fitted WB / the
+    # current WB) are fitted all the way through and whichever real
+    # engine render lands closer to the target is used - the same
+    # principle as measuring saturation on the engine response.
     temperature = base.basic.temperature
     tint = base.basic.tint
     source, source_working = render_s, working_s
@@ -635,17 +730,23 @@ def match_settings(
             source, source_working = cand_display, cand_working
             cur_tint = tint if working_s is not None else 0
 
-    # 남은 색 잔차를 **채널별 곡선**으로 한 번 더 좁힙니다 — 승자 렌더와
-    # 목표의 채널별 분위수 대응입니다(SIZE 렌더라 왕복이 ms 단위). 연구는
-    # 채널별 커브를 기각했지만(채도 악화) 그때는 WB 선행도 스코어 판정도
-    # 없었습니다. 지금은 실제 엔진 렌더의 스코어가 좋아질 때만 채택하므로
-    # 그 우려를 판정이 직접 잡습니다 — 실측: 이자카야 LED 컷 합 8.87→7.02,
-    # 형광 혼합 컷 12.05→9.52, 개선 없는 컷은 자동 기각.
+    # The colour residual left over is narrowed once more with
+    # **per-channel curves** - a per-channel quantile mapping between the
+    # winning render and the target (it is a SIZE render, so the round
+    # trip is in milliseconds). The research rejected per-channel curves
+    # (saturation got worse), but back then there was neither a preceding
+    # WB nor a score decision. Now they are adopted only when the score
+    # of the real engine render improves, so the decision catches that
+    # worry directly - measured: the izakaya LED frame's sum
+    # 8.87 -> 7.02, the mixed-fluorescent frame 12.05 -> 9.52, and frames
+    # with no improvement are rejected automatically.
     #
-    # 두 번 반복은 무익했습니다(곡선을 누적이 아니라 대체하므로 늘 악화).
+    # Repeating it twice was useless (the curve is replaced rather than
+    # accumulated, so it always got worse).
     #
-    # base에 사용자가 넣어 둔 채널 곡선이 있으면 시도하지 않습니다 —
-    # 채널 곡선은 매칭 소유가 아니라는 계약(curve_for_lut)이 우선입니다.
+    # If base holds channel curves the user put there, it is not
+    # attempted - the contract that channel curves are not owned by
+    # matching (curve_for_lut) takes priority.
     if not (base.curve.points_red or base.curve.points_green
             or base.curve.points_blue):
         rendered_s, tgt_s = _pair(rendered, target_s)

@@ -1,8 +1,9 @@
-"""새 기종 색 보정 — 안내와 진행 표시.
+"""Colour calibration for a new camera model - the notice and the progress.
 
-카메라가 만든 JPEG을 정답지로 삼아 이 PC에서 보정값을 구합니다. 시간이
-걸리고(장당 1초 안팎) 결과가 이후 모든 현상에 영향을 주므로, 무엇을 하는
-것인지 먼저 알리고 동의를 받습니다.
+The adjustment values are worked out on this PC, using the JPEGs the camera
+produced as the answer key. It takes time (around 1 second per shot) and
+the result affects every develop from then on, so we say what is about to
+happen first and get consent.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from .i18n import tr
 
 
 class CalibrationWorker(QThread):
-    """측정은 몇 초에서 수십 초 걸립니다. 창이 멈추면 안 됩니다."""
+    """Measuring takes a few to tens of seconds. The window must not stall."""
 
     progressed = Signal(int, int)
     finished_ok = Signal(object)
@@ -35,7 +36,8 @@ class CalibrationWorker(QThread):
         super().__init__(parent)
         self._paths = paths
         self._camera = camera
-        # 저장 키. 이름에서 다시 만들면 읽을 때와 어긋납니다(calibration.key 참고).
+        # The save key. Rebuilding it from the name puts it out of step with
+        # what reading uses (see calibration.key).
         self._key = key
         self._cancelled = False
 
@@ -68,7 +70,7 @@ class CalibrationWorker(QThread):
 def ask_to_calibrate(
     parent, need: "calib.CalibrationNeed", manual: bool = False
 ) -> bool:
-    """보정을 진행할지 묻습니다. 무엇을 왜 하는지 먼저 설명합니다."""
+    """Asks whether to go ahead. Explains what and why beforehand."""
     existing = calib.load(need.key)
     box = QMessageBox(parent)
     box.setIcon(QMessageBox.Warning)
@@ -118,7 +120,7 @@ def ask_to_calibrate(
 
 
 class CalibrationProgressDialog(QDialog):
-    """측정 진행 표시. 취소할 수 있습니다."""
+    """Shows measurement progress. It can be cancelled."""
 
     def __init__(self, need: "calib.CalibrationNeed", parent=None):
         super().__init__(parent)
@@ -172,7 +174,7 @@ class CalibrationProgressDialog(QDialog):
         super().reject()
 
     def closeEvent(self, event) -> None:
-        """스레드가 도는 채로 창이 사라지면 Qt가 프로세스를 죽입니다."""
+        """If the window goes while the thread runs, Qt kills the process."""
         from .workers import stop_worker
 
         stop_worker(self._worker)
@@ -182,7 +184,7 @@ class CalibrationProgressDialog(QDialog):
 def run_calibration(
     parent, need: "calib.CalibrationNeed", manual: bool = False
 ) -> bool:
-    """묻고, 계산하고, 저장까지. 저장했으면 True."""
+    """Ask, compute, and save. True if it was saved."""
     if not ask_to_calibrate(parent, need, manual=manual):
         return False
 

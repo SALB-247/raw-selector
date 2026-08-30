@@ -1,9 +1,10 @@
-"""보정 패널.
+"""Adjustment panel.
 
-Lightroom / Camera Raw의 패널 구성을 따른다 — 사용자가 이미 익숙한 이름과
-배치를 쓰는 편이 배우기 쉽습니다. 섹션은 접이식이라 필요한 것만 펴 놓고 씁니다.
+It follows the panel layout of Lightroom / Camera Raw - using the names and
+the arrangement the user already knows is easier to learn. Sections are
+collapsible, so only the ones you need stay open.
 
-값이 바뀌면 settings_changed를 쏘고, 미리보기가 다시 그려집니다.
+When a value changes it emits settings_changed and the preview is redrawn.
 """
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ from ..core.develop import (
     HSLSettings,
     LocalAdjustments,
     Mask,
+    MaskCombine,
     MaskType,
     MetadataSettings,
     NoiseAlgorithm,
@@ -86,22 +88,25 @@ RATIO_LABELS = {
     CropRatio.SIXTEEN_NINE: "16:9",
 }
 
-# 색온도 슬라이더의 기본 표시값. as-shot을 모를 때만 쓰는 폴백입니다.
+# Default displayed value of the temperature slider. A fallback used only
+# when the as-shot value is unknown.
 DEFAULT_KELVIN = 5500
 KELVIN_MIN, KELVIN_MAX = 2000, 12000
 
 PANEL_MIN_CHARS = 46
-"""보정 패널 최소 폭 (글자 수 기준).
+"""Minimum width of the adjustment panel (in characters).
 
-픽셀로 박아 두면 폰트 크기나 DPI가 달라질 때 잘립니다. 한글 라벨 + 값 입력칸
-+ 리셋 버튼이 한 줄에 들어가는 데 필요한 글자 수로 잡고, 실제 폭은 폰트
-메트릭에서 계산합니다.
+Nailed down in pixels it gets clipped whenever the font size or the DPI
+changes. It is taken as the number of characters a Hangul label + the value
+box + the reset button need to fit on one line, and the real width is
+computed from the font metrics.
 
-폭 자체는 **고정하지 않습니다**. 최소만 지키고 나머지는 스플리터가 정하므로,
-섹션에 위젯을 추가해 내용이 넓어져도 잘리는 대신 사용자가 넓힐 수 있습니다.
+The width itself is **not fixed**. Only the minimum is held and the splitter
+decides the rest, so when a widget is added to a section and the content
+grows wider, the user can widen it instead of it being clipped.
 """
 
-# 곡선 위 버튼(클리핑/초기화) 공통 스타일
+# Shared style for the buttons above the curve (clipping / reset)
 _CURVE_BUTTON_STYLE = (
     "QPushButton { background: #2f2f35; color: #ccc; border: 1px solid #444;"
     " border-radius: 3px; font-size: 11px; }"
@@ -111,10 +116,12 @@ _CURVE_BUTTON_STYLE = (
 
 
 def _curve_channel_style(color: str) -> str:
-    """채널 버튼(밝기/R/G/B) — 선택되면 그 채널 색으로 채웁니다.
+    """Channel buttons (luminance/R/G/B) - filled with that channel's colour
+    once selected.
 
-    패딩을 명시하는 이유: 안 쓰면 전역 BUTTON의 8px 16px이 그대로 걸리고,
-    34px 고정 폭에서는 내용 폭이 0이 되어 글자가 통째로 잘립니다.
+    Why the padding is spelled out: without it the global BUTTON's 8px 16px
+    applies as-is, and at the fixed width of 34px the content width becomes 0
+    and the label is clipped entirely.
     """
     return (
         "QPushButton { background: #2f2f35; color: #aaa; border: 1px solid #444;"
@@ -125,16 +132,18 @@ def _curve_channel_style(color: str) -> str:
         f" border-color: {color}; }}"
     )
 
-# 슬라이더 한 줄이 어느 설정 필드에 대응하는지.
+# Which settings field each slider row corresponds to.
 #
-# 색온도(basic.temperature)는 절대 Kelvin이고 "손대지 않음"을 0으로 구분해야
-# 해서 이 표에 넣지 않고 따로 처리합니다.
+# Temperature (basic.temperature) is absolute Kelvin and has to distinguish
+# "untouched" as 0, so it is handled separately rather than living in this
+# table.
 #
-# 읽기(settings)와 쓰기(set_settings)를 각각 손으로 나열하면 한쪽에만 필드를
-# 추가하는 실수가 납니다. 실제로 그렇게 값이 저장되지 않는 문제가 있었습니다.
-# 한 표에서 양방향을 모두 생성해 그 가능성을 없앱니다.
+# Listing the read side (settings) and the write side (set_settings) by hand
+# invites the mistake of adding a field to only one of them. That really
+# happened, and values were not saved. Generating both directions from one
+# table removes the possibility.
 #
-# 형식: 행 키 -> (설정 섹션, 필드명, 형변환, 배율)
+# Format: row key -> (settings section, field name, cast, scale)
 SLIDER_BINDINGS: dict[str, tuple[str, str, type, float]] = {
     "basic.tint": ("basic", "tint", int, 1),
     "basic.exposure": ("basic", "exposure", float, 1),
@@ -178,7 +187,7 @@ SLIDER_BINDINGS: dict[str, tuple[str, str, type, float]] = {
     "effects.vignette_amount": ("effects", "vignette_amount", int, 1),
     "effects.vignette_midpoint": ("effects", "vignette_midpoint", int, 1),
 
-    # 크롭은 UI에서 %, 설정에서는 0~1 정규화 값입니다
+    # Crop is % in the UI and a 0~1 normalised value in the settings
     "geo.crop_left": ("geometry", "crop_left", float, 0.01),
     "geo.crop_top": ("geometry", "crop_top", float, 0.01),
     "geo.crop_right": ("geometry", "crop_right", float, 0.01),
@@ -208,17 +217,19 @@ POSITION_LABELS = {
 }
 
 
-# 아래 라벨들은 화면에 보이는 텍스트라 언어에 따라 달라집니다. 모듈 로드
-# 시점에 tr()로 굳히면 언어 전환이 안 되므로(gui/ordering_text.py와 같은
-# 이유), 값을 함수 안에 두어 호출할 때마다 번역되게 합니다. core에 있는
-# 표(NOISE·HSL·EXIF·STRIP·마스크 프리셋)는 Qt를 모르므로 여기서 옮겨 씁니다.
+# The labels below are text shown on screen, so they change with the
+# language. Freezing them with tr() at module load time would break language
+# switching (the same reason as gui/ordering_text.py), so the values live
+# inside functions and are translated on every call. The tables in core
+# (NOISE, HSL, EXIF, STRIP, mask presets) know nothing about Qt, so they are
+# transcribed here.
 
 
 def _ratio_label(ratio: CropRatio) -> str:
     return {
         CropRatio.FREE: tr("Free"),
         CropRatio.ORIGINAL: tr("Original ratio"),
-    }.get(ratio, RATIO_LABELS[ratio])  # 1:1·4:3 등 숫자 비율은 그대로 둡니다
+    }.get(ratio, RATIO_LABELS[ratio])  # numeric ratios (1:1, 4:3 …) stay as-is
 
 
 def _position_label(position: WatermarkPosition) -> str:
@@ -327,58 +338,102 @@ def _mask_preset_description(key: str) -> str:
     }.get(key, "")
 
 
+class _AdvancedGroup:
+    """A titled fold holding the fine-tuning controls of one section.
+
+    Exposes add_widget/add_layout so it can stand in for a section wherever
+    a control is added - the caller does not need to know it is folded.
+    """
+
+    def __init__(self, title: str, tooltip: str = "") -> None:
+        self._title = title
+        self.toggle = QPushButton(f"{title}  ▸")
+        self.toggle.setCheckable(True)
+        self.toggle.setCursor(Qt.PointingHandCursor)
+        self.toggle.setStyleSheet(
+            "QPushButton { text-align: left; border: none; color: #aaa;"
+            " padding: 4px 0; } QPushButton:checked { color: #ddd; }"
+        )
+        if tooltip:
+            self.toggle.setToolTip(tooltip)
+        self.box = QWidget()
+        self.box.setVisible(False)
+        self._layout = QVBoxLayout(self.box)
+        self._layout.setContentsMargins(0, 0, 0, 4)
+        self._layout.setSpacing(2)
+        self.toggle.toggled.connect(self._on_toggled)
+
+    def _on_toggled(self, shown: bool) -> None:
+        self.box.setVisible(shown)
+        self.toggle.setText(f"{self._title}  " + ("▾" if shown else "▸"))
+
+    def add_widget(self, widget) -> None:
+        self._layout.addWidget(widget)
+
+    def add_layout(self, layout) -> None:
+        self._layout.addLayout(layout)
+
+
 class DevelopPanel(QWidget):
-    """전체 보정 파라미터를 접이식 섹션으로 노출합니다."""
+    """Exposes every adjustment parameter as collapsible sections."""
 
     settings_changed = Signal()
     crop_mode_changed = Signal(bool)
-    pick_mode_changed = Signal(str)  # "purple" / "green" / "" (해제)
-    mask_overlay_changed = Signal()  # 선택 마스크 영역 표시 토글/선택 변경
+    pick_mode_changed = Signal(str)  # "purple" / "green" / "" (cleared)
+    mask_overlay_changed = Signal()  # region display toggle / selection change
     mask_shape_changed = Signal()
-    """이미지 위에 그릴 도형(방사형·선형)이 달라졌음.
+    """The shape to draw on the image (radial / linear) has changed.
 
-    영역 표시(mask_overlay_changed)와는 별개입니다. 조작점은 빨간 오버레이를
-    켜지 않아도 보여야 하고, 반대로 오버레이만 껐다 켜는 것으로 도형이
-    바뀌지는 않습니다.
+    Separate from the region display (mask_overlay_changed). The handles have
+    to be visible without turning the red overlay on, and conversely toggling
+    the overlay alone does not change the shape.
     """
-    brush_mode_changed = Signal(bool)  # 브러시로 직접 칠하기 on/off
-    brush_changed = Signal()           # 붓 크기·지우개 변경 (미리보기 원 갱신)
+    brush_mode_changed = Signal(bool)  # painting by brush on/off
+    brush_changed = Signal()           # brush size / eraser (redraw circle)
 
     camera_match_requested = Signal()
-    """'카메라 JPEG에 맞추기' 버튼. 피팅에는 원본과 내장 JPEG이 필요한데
-    둘 다 루페가 들고 있으므로, 패널은 요청만 올립니다."""
+    """The 'Match camera JPEG' button. Fitting needs both the original and the
+    embedded JPEG, and the loupe holds both, so the panel only raises the
+    request."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._loading = False
+        self._waking = False
+        self._raw_state = None
         self.rows: dict[str, SliderRow] = {}
         self.sections: dict[str, CollapsibleSection] = {}
         self._section_labels: dict[str, tuple[str, str]] = {}
         self.defringe_pickers: dict[str, QPushButton] = {}
         self._defringe_hues = {"purple": 145, "green": 65}
-        # 색온도는 절대 Kelvin. 손대지 않으면 as-shot(=변화 없음, 0으로 저장),
-        # 사용자가 움직이면 그 절대값을 저장합니다.
+        # Temperature is absolute Kelvin. Untouched it stays at as-shot
+        # (= no change, stored as 0); once the user moves it, that absolute
+        # value is stored.
         self._as_shot_kelvin = DEFAULT_KELVIN
         self._temperature_touched = False
-        # HSL은 8개 밴드 × 3채널인데 슬라이더는 8개뿐입니다. 보이지 않는
-        # 채널 값을 여기 들고 있다가 탭을 바꿀 때 바꿔 끼웁니다.
+        # HSL is 8 bands x 3 channels but there are only 8 sliders. The values
+        # of the channels that are not shown are held here and swapped in when
+        # the tab changes.
         self._hsl_state: dict[str, HSLBand] = {band: HSLBand() for band in HSL_BANDS}
-        # 국소 보정 마스크. 컷별 편집 상태라 프리셋 공유·일괄 적용에서 빠집니다.
+        # Local adjustment masks. Per-frame editing state, so they are left out
+        # of preset sharing and batch apply.
         self._masks: list[Mask] = []
-        # 폭은 **최소치만** 정하고 나머지는 스플리터에 맡깁니다. 고정하면
-        # 내용이 조금만 늘어도 오른쪽이 말없이 잘립니다(세 번 겪었습니다).
-        # 최소치도 픽셀이 아니라 글자 폭에서 뽑아, 폰트·DPI가 달라져도
-        # 같은 비율로 맞습니다.
+        # Only the **minimum** width is set and the splitter is left to decide
+        # the rest. Fixed, the right-hand side is silently clipped as soon as
+        # the content grows a little (this happened three times). The minimum
+        # is derived from the character width rather than pixels too, so it
+        # holds the same proportion when the font or the DPI changes.
         self.setMinimumWidth(self._minimum_panel_width())
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(4)
 
-        # 프리셋은 **컷마다 다른 값**을 담지 않습니다 — 수평 보정·워터마크·
-        # 마스크(DevelopSettings.for_preset). 불러올 때도 그것들은 지금 값을
-        # 지킵니다(with_preset), 안 그러면 프리셋을 고를 때마다 맞춰 둔
-        # 수평이 풀리고 워터마크가 사라집니다.
+        # A preset does not carry the **values that differ per frame** -
+        # straightening, watermark, masks (DevelopSettings.for_preset). On load
+        # those keep their current values too (with_preset); otherwise every
+        # time a preset is picked the straightening you set comes undone and
+        # the watermark disappears.
         self.preset_bar = PresetBar(
             develop_presets(),
             collect=lambda: self.settings().for_preset().to_dict(),
@@ -391,8 +446,9 @@ class DevelopPanel(QWidget):
         wrapper_layout.setContentsMargins(8, 8, 8, 0)
         wrapper_layout.addWidget(self.preset_bar)
 
-        # 카메라 룩 매칭 — 노출·커브·채도에 걸치는 원클릭이라 특정 섹션이
-        # 아니라 프리셋 줄 곁에 둡니다. 접힌 섹션 안에 숨으면 못 찾습니다.
+        # Camera look matching - a one-click that spans exposure, curve and
+        # saturation, so it sits beside the preset row rather than in any one
+        # section. Hidden inside a collapsed section it would never be found.
         self.match_camera_button = QPushButton(tr("Match camera JPEG"))
         self.match_camera_button.clicked.connect(self.camera_match_requested.emit)
         wrapper_layout.addWidget(self.match_camera_button)
@@ -403,16 +459,18 @@ class DevelopPanel(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setStyleSheet(f"QScrollArea {{ background: {theme.BACKGROUND}; }}")
-        # 최후의 안전장치. 화면이 좁거나 폰트가 커서 내용이 안 들어가면
-        # 잘라 버리는 대신 가로로 밀어 볼 수 있게 합니다. 지금까지 이
-        # 상황에서 오른쪽이 그냥 사라져 손이 닿지 않았습니다.
+        # The last safety net. When the screen is narrow or the font is large
+        # and the content does not fit, it can be scrolled horizontally instead
+        # of being clipped. Until now the right-hand side simply vanished in
+        # that situation and could not be reached.
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._scroll = scroll
 
-        # 섹션이 열두 개라 스크롤이 깁니다. 오른쪽 가장자리에 노트 인덱스처럼
-        # 탭을 세워 두면 원하는 섹션으로 바로 갈 수 있습니다.
-        # 탭은 왼쪽 가장자리에 둡니다. 오른쪽에 두면 값 입력칸·스크롤바와 붙어
-        # 시선이 분산되고, 패널이 좁아질 때 제일 먼저 밀려 잘립니다.
+        # With twelve sections the scroll is long. Standing tabs along the edge
+        # like a notebook index lets you go straight to the section you want.
+        # The tabs sit on the left edge. On the right they would butt against
+        # the value boxes and the scrollbar, splitting the eye, and they would
+        # be the first thing pushed out and clipped as the panel narrows.
         body_row = QHBoxLayout()
         body_row.setContentsMargins(0, 0, 0, 0)
         body_row.setSpacing(0)
@@ -438,25 +496,32 @@ class DevelopPanel(QWidget):
         self._build_effects()
         self._build_optics()
         self._build_geometry()
+        # Everything above adjusts the photograph. The three below put
+        # something onto the file that leaves - they were sitting in the same
+        # run as the sliders with nothing to say they are a different kind of
+        # thing.
+        self._add_group_heading(tr("On the exported file"))
         self._build_exif_strip()
         self._build_watermark()
         self._build_metadata()
         self.body.addStretch(1)
         self._build_section_tabs()
-        # 드롭다운·스핀박스 위를 휠로 지나갈 때 값이 바뀌지 않게 합니다
+        # Stop the value changing when the wheel passes over a dropdown or spin
+        # box
         disable_wheel_in(self)
 
-        # 콤보가 '가장 긴 항목'만큼 넓어지려 들면 패널이 밀려 오른쪽이 잘립니다.
-        # 렌즈 목록(1218개)과 글꼴 목록(620여 개)에는 아주 긴 이름이 섞여 있어
-        # 실제로 그렇게 됐습니다. 목록 팝업은 넓게 뜨되, 콤보 자체는 칸에
-        # 맞추게 합니다.
+        # If a combo insists on being as wide as its 'longest item', the panel
+        # is pushed out and the right-hand side is clipped. The lens list
+        # (1218 entries) and the font list (620-odd) have very long names mixed
+        # in and that really happened. The list popup opens wide, but the combo
+        # itself is made to fit its slot.
         for combo in self.findChildren(QComboBox):
             combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(8)
 
-        # 왼쪽 탭 띠가 생긴 뒤 스크롤 영역의 자리를 다시 잡습니다. 이걸
-        # 빠뜨리면 스크롤 영역이 패널 전체 폭을 차지한 채 남아, 내용이 탭 띠
-        # 폭(28px)만큼 오른쪽으로 밀려 잘립니다.
+        # Re-lay the scroll area now that the left tab strip exists. Leave this
+        # out and the scroll area stays occupying the whole panel width, so the
+        # content is pushed right by the tab strip width (28px) and clipped.
         self.layout().activate()
 
         reset = QPushButton(tr("Reset all"))
@@ -467,20 +532,33 @@ class DevelopPanel(QWidget):
         footer_layout.addWidget(reset)
         outer.addWidget(footer)
 
-    # ------------------------------------------------------------ 섹션 구성
+    # ------------------------------------------------------ section building
+
+    def _add_group_heading(self, text: str) -> None:
+        """A divider naming the run of sections that follows it."""
+        heading = QLabel(text)
+        heading.setStyleSheet(
+            "QLabel { color: #7f7f8a; font-size: 11px; letter-spacing: 1px;"
+            " padding: 10px 8px 2px 8px; border-top: 1px solid #3a3a42; }"
+        )
+        self.body.addWidget(heading)
 
     def _section(
-        self, key: str, title: str, icon: str = "", expanded: bool = False
+        self, key: str, title: str, icon: str = "", expanded: bool = False,
+        tooltip: str = "",
     ) -> CollapsibleSection:
         section = CollapsibleSection(f"{icon} {title}" if icon else title, expanded)
+        if tooltip:
+            section.header.setToolTip(tooltip)
         section.visibility_changed.connect(self._emit)
         self.sections[key] = section
-        # 우측 탭에 쓸 아이콘·이름을 기억해 둡니다
+        # Remember the icon and name to use on the side tab
         self._section_labels[key] = (icon or "•", title)
         self.body.addWidget(section)
         return section
 
-    # 탭이 왼쪽 가장자리라 강조선은 안쪽(오른쪽)에 그립니다.
+    # The tabs are on the left edge, so the highlight line is drawn on the
+    # inner side (the right).
     _TAB_STYLE = (
         "QToolButton { background: #2b2b30; color: #b8b8c0; border: none;"
         " border-right: 2px solid transparent; font-size: 13px; }"
@@ -495,13 +573,15 @@ class DevelopPanel(QWidget):
     _TAB_STRIP_WIDTH = 28
 
     def _minimum_panel_width(self) -> int:
-        """최소 폭을 글자 폭에서 계산합니다 (폰트·DPI에 따라 함께 커집니다).
+        """Computes the minimum width from the character width (so it grows
+        along with the font and the DPI).
 
-        다만 화면 폭의 일정 비율을 넘지 않게 눌러 둡니다. 최소 폭이 화면보다
-        커지면 스플리터가 그 요구를 들어줄 수 없어, 사용자가 손으로 끌기
-        전에는 오른쪽이 잘린 채로 뜹니다(FHD 100%에서 실제로 발생).
-        넘치는 내용은 이제 가로 스크롤로 닿을 수 있으므로, 최소 폭을
-        낮춰도 접근성이 사라지지 않습니다.
+        It is held down to no more than a set fraction of the screen width
+        though. Once the minimum width exceeds the screen, the splitter cannot
+        honour the demand and the panel comes up with its right-hand side
+        clipped until the user drags it by hand (this really happened at FHD
+        100%). Content that overflows can now be reached by horizontal
+        scrolling, so lowering the minimum width does not cost access.
         """
         char = max(7, self.fontMetrics().averageCharWidth())
         scrollbar = self.style().pixelMetric(QStyle.PM_ScrollBarExtent)
@@ -511,26 +591,28 @@ class DevelopPanel(QWidget):
         if screen is not None:
             available = screen.availableGeometry().width()
             if available > 0:
-                # 절반을 넘게 차지하면 정작 사진이 안 보입니다
+                # Taking more than half leaves no room to see the photo
                 wanted = min(wanted, int(available * 0.38))
         return max(320, wanted)
 
     def content_width(self) -> int:
-        """스크롤 안 내용이 실제로 쓸 수 있는 가로 폭.
+        """The horizontal width the content inside the scroll can really use.
 
-        패널 폭에서 왼쪽 탭 띠와 세로 스크롤바를 뺀 값입니다. 테스트가 이 값과
-        내용 선호 폭을 비교해 잘림을 잡아냅니다.
+        The panel width minus the left tab strip and the vertical scrollbar.
+        Tests compare this against the content's preferred width to catch
+        clipping.
         """
         scrollbar = self.style().pixelMetric(QStyle.PM_ScrollBarExtent)
         width = self.width() or self.minimumWidth()
         return width - self._TAB_STRIP_WIDTH - scrollbar - 8
 
     def required_content_width(self) -> int:
-        """내용이 제대로 보이려면 필요한 가로 폭.
+        """The horizontal width the content needs to be shown properly.
 
-        minimumSizeHint는 못 씁니다 — 버튼은 글자를 뭉개서라도 줄어들 수 있다고
-        보고해서 '맞는다'고 나오지만 화면에서는 잘립니다. 선호 폭(sizeHint)의
-        최댓값을 봐야 합니다.
+        minimumSizeHint cannot be used - a button reports that it can shrink
+        even if that mangles its text, so it comes back as 'it fits' while on
+        screen it is clipped. The maximum of the preferred widths (sizeHint) is
+        what has to be looked at.
         """
         needed = self.body.sizeHint().width()
         for child in self._content.findChildren(QWidget):
@@ -538,7 +620,9 @@ class DevelopPanel(QWidget):
         return needed
 
     def _build_section_tabs(self) -> None:
-        """오른쪽 가장자리 세로 탭. 누르면 그 섹션을 펴고 그리로 스크롤합니다."""
+        """Vertical tabs down the left edge. Pressing one expands that
+        section and scrolls to it. (They used to sit on the right - see the
+        comment at the body_row layout for why they moved.)"""
         strip = QWidget()
         strip.setFixedWidth(28)
         strip.setStyleSheet(f"background: {theme.BACKGROUND};")
@@ -553,8 +637,8 @@ class DevelopPanel(QWidget):
             tab.setToolTip(title)
             tab.setFixedSize(28, 30)
             tab.setCursor(Qt.PointingHandCursor)
+            # It sits on the left, so the highlight line is drawn on the right
             tab.setStyleSheet(self._TAB_STYLE)
-        # 왼쪽에 붙으므로 강조선도 왼쪽이 아니라 오른쪽에 그립니다
             tab.clicked.connect(lambda _=False, k=key: self._jump_to_section(k))
             layout.addWidget(tab)
             self.section_tabs[key] = tab
@@ -567,16 +651,19 @@ class DevelopPanel(QWidget):
         if section is None:
             return
         section.set_expanded(True)
-        # 펼치면서 레이아웃이 다시 잡히므로, 자리 계산이 끝난 뒤에 스크롤합니다
+        # Expanding re-lays the layout, so scroll only once the positions have
+        # been computed
         QTimer.singleShot(0, lambda: self._scroll_section_to_top(section))
 
     def _scroll_section_to_top(self, section) -> None:
-        """섹션 제목이 보이는 영역 **맨 위**에 오도록 스크롤합니다.
+        """Scrolls so the section title lands at the **very top** of the
+        visible area.
 
-        예전에는 ensureWidgetVisible을 썼습니다. 그건 '보이기만 하면 되는'
-        최소 스크롤이라, 섹션이 뷰포트보다 길면 제목이 위로 지나가 버리고
-        가운데쯤이 보입니다. 어느 섹션을 연 것인지 알 수 없습니다.
-        스크롤 위치를 직접 지정하면 항상 제목부터 보입니다.
+        ensureWidgetVisible was used before. That is the minimum scroll needed
+        to 'merely be visible', so when a section is longer than the viewport
+        the title runs off the top and roughly the middle is what you see. You
+        cannot tell which section you opened. Setting the scroll position
+        directly always shows the title first.
         """
         from PySide6.QtCore import QPoint
 
@@ -587,19 +674,40 @@ class DevelopPanel(QWidget):
         top = section.mapTo(content, QPoint(0, 0)).y()
         bar.setValue(min(top, bar.maximum()))
 
-    def _add_row(self, section: CollapsibleSection, key: str, *args, **kwargs) -> SliderRow:
+    def _add_row(self, section, key: str, *args, **kwargs) -> SliderRow:
+        """Adds a slider row.
+
+        `section` is anything that takes a widget - a CollapsibleSection or
+        one of the advanced groups below, which is how a helper control goes
+        under the fold without a second code path.
+        """
         row = SliderRow(*args, **kwargs)
         row.value_changed.connect(self._emit)
         self.rows[key] = row
         section.add_widget(row)
         return row
 
+    def _advanced_group(self, section: CollapsibleSection, title: str,
+                        tooltip: str = "") -> "_AdvancedGroup":
+        """A fold inside a section for the controls that fine-tune the ones
+        above them.
+
+        The Detail section had nine controls in a row, of which people reach
+        for three. Hiding the rest keeps them one click away instead of
+        making the section a wall.
+        """
+        group = _AdvancedGroup(title, tooltip)
+        section.add_widget(group.toggle)
+        section.add_widget(group.box)
+        return group
+
     def _build_basic(self) -> None:
         section = self._section("basic", tr("Basic"), "◐", expanded=True)
-        # 색온도는 절대 Kelvin입니다. 낮을수록 차갑고(파랑), 높을수록
-        # 따뜻합니다(주황). 기본값(as-shot)은 이미지를 열 때 채워 넣습니다.
-        # 상한 12000K면 촛불(~1800)부터 짙은 흐림(~10000)까지 실제 촬영 광원을
-        # 모두 덮으면서도 슬라이더 눈금이 촘촘해 미세 조정이 쉽습니다.
+        # Temperature is absolute Kelvin. Lower is cooler (blue), higher is
+        # warmer (orange). The default (as-shot) is filled in when the image is
+        # opened. An upper bound of 12000K covers every real shooting light
+        # source from candlelight (~1800) to heavy overcast (~10000) while
+        # keeping the slider steps fine enough for small adjustments.
         temp_row = self._add_row(
             section, "basic.temperature", tr("Temperature"), KELVIN_MIN, KELVIN_MAX,
             default=DEFAULT_KELVIN, suffix=" K",
@@ -613,12 +721,15 @@ class DevelopPanel(QWidget):
                       tooltip=tr("Positive is magenta, negative is green"))
         self._add_row(section, "basic.exposure", tr("Exposure"), -5, 5, decimals=2,
                       suffix=" EV", gradient="exposure",
-                      tooltip=tr("Multiplies the whole image to brighten it. "
-                                 "Raising it blows the highlights first"))
+                      tooltip=tr("Multiplies the whole image, the way a stop of "
+                                 "light does. Raising it blows the highlights "
+                                 "first - to lift only the middle, use "
+                                 "Brightness."))
         self._add_row(section, "basic.brightness", tr("Brightness"), -100, 100,
                       gradient="exposure",
-                      tooltip=tr("Adjusts only the midtones, leaving whites and blacks alone.\n"
-                                 "Better than exposure for lifting just the face of a backlit subject"))
+                      tooltip=tr("Bends the middle, holding white and black "
+                                 "where they are. This is the one for lifting "
+                                 "a backlit face without blowing the sky."))
         self._add_row(section, "basic.contrast", tr("Contrast"), -100, 100, gradient="contrast")
         self._add_row(section, "basic.highlights", tr("Highlights"), -100, 100,
                       gradient="highlights")
@@ -635,9 +746,10 @@ class DevelopPanel(QWidget):
         self._add_row(section, "basic.saturation", tr("Saturation"), -100, 100,
                       gradient="saturation")
 
-        # 디코드 단계 옵션이라 슬라이더가 아니라 체크박스입니다. 톤 슬라이더
-        # 아래에 두는 이유: 하이라이트가 날아갔을 때 사용자가 손대는 곳이
-        # 이 구역(하이라이트·화이트)이고, 그때 눈에 들어와야 합니다.
+        # A decode-stage option, so it is a checkbox rather than a slider. Why
+        # it sits below the tone sliders: when the highlights are blown, this
+        # area (Highlights, Whites) is where the user reaches, and that is when
+        # it has to catch the eye.
         self.highlight_recovery = QCheckBox(tr("Highlight recovery (RAW)"))
         self.highlight_recovery.setToolTip(tr(
             "Rebuilds blown highlights from the sensor channels that did not\n"
@@ -655,8 +767,9 @@ class DevelopPanel(QWidget):
         self.curve_editor = CurveEditor()
         self.curve_editor.points_changed.connect(self._on_curve_points)
 
-        # 채널은 콤보로 상태를 들고 있되(기존 코드·테스트 호환), 눈에 보이는
-        # 조작은 곡선 위의 버튼으로 합니다.
+        # The channel state is held in a combo (for compatibility with existing
+        # code and tests), but the visible control is the buttons above the
+        # curve.
         self.curve_channel = QComboBox()
         self.curve_channel.setVisible(False)
         for label, key in (
@@ -666,7 +779,8 @@ class DevelopPanel(QWidget):
             self.curve_channel.addItem(label, key)
         self.curve_channel.currentIndexChanged.connect(self._on_curve_channel)
 
-        # 곡선 위 버튼 행: 클리핑 토글 + 채널(밝기/R/G/B) + 초기화
+        # Button row above the curve: clipping toggle + channel (luminance/
+        # R/G/B) + reset
         button_row = QHBoxLayout()
         button_row.setSpacing(3)
 
@@ -702,7 +816,8 @@ class DevelopPanel(QWidget):
         reset_curve.setFixedSize(28, 24)
         reset_curve.setToolTip(tr("Reset this channel's curve"))
         reset_curve.clicked.connect(self._reset_curve_channel)
-        # 클리핑 버튼과 달리 폭이 고정이라, 전역 패딩을 빼야 ↺가 보입니다
+        # Unlike the clipping button this one has a fixed width, so the global
+        # padding has to come off for the ↺ to be visible
         reset_curve.setStyleSheet(_CURVE_BUTTON_STYLE + theme.COMPACT_BUTTON)
         button_row.addWidget(reset_curve)
         section.add_layout(button_row)
@@ -711,12 +826,13 @@ class DevelopPanel(QWidget):
 
         hint = QLabel(tr("Click to add · drag to move · right-click/double-click to delete"))
         hint.setStyleSheet(theme.hint_label())
-        # 영어로는 한 줄이 패널보다 넓습니다. 접어서 좁은 폭에서도 다 보이게
-        # 합니다(한국어는 짧아 원래 한 줄에 들어갑니다).
+        # In English one line is wider than the panel. Wrapping it keeps it all
+        # visible at narrow widths too (Korean is short enough to fit on one
+        # line as it is).
         hint.setWordWrap(True)
         section.add_widget(hint)
 
-        # 채널별 점을 따로 들고 있습니다. 편집기는 한 채널만 보여 줍니다.
+        # The points are held per channel. The editor only shows one channel.
         self._curve_points: dict[str, tuple] = {
             "rgb": (), "red": (), "green": (), "blue": ()
         }
@@ -727,12 +843,12 @@ class DevelopPanel(QWidget):
         self._add_row(section, "curve.darks", tr("Darks"), -100, 100, gradient="shadows")
         self._add_row(section, "curve.shadows", tr("Shadows"), -100, 100,
                       gradient="blacks")
-        # 파라메트릭 구간을 곡선 그래프에 반영합니다.
+        # Reflect the parametric bands on the curve graph.
         for key in ("curve.highlights", "curve.lights", "curve.darks", "curve.shadows"):
             self.rows[key].value_changed.connect(self._update_curve_parametric)
 
     def _update_curve_parametric(self, *_) -> None:
-        """파라메트릭 4구간 값을 곡선 편집기에 전달합니다."""
+        """Hands the four parametric band values to the curve editor."""
         self.curve_editor.set_parametric(
             int(self.rows["curve.shadows"].value()),
             int(self.rows["curve.darks"].value()),
@@ -741,21 +857,24 @@ class DevelopPanel(QWidget):
         )
 
     def _on_temperature_touched(self, _value: float) -> None:
-        """사용자가 색온도를 움직이면 절대값으로 저장하기 시작합니다."""
+        """Once the user moves the temperature, start storing it as an absolute
+        value."""
         if not self._loading:
             self._temperature_touched = True
 
     def set_as_shot_kelvin(self, kelvin: int) -> None:
-        """이미지를 열 때 as-shot 색온도를 슬라이더 기본/현재값으로 채웁니다.
+        """Fills the as-shot temperature into the slider's default and current
+        value when an image is opened.
 
-        아직 손대지 않은 상태면 슬라이더를 as-shot에 맞춰, 그 위치가
-        '변화 없음'이 되게 합니다.
+        While it is still untouched the slider is put at as-shot, so that
+        position means 'no change'.
         """
         self._as_shot_kelvin = int(kelvin)
         row = self.rows["basic.temperature"]
         row.default = float(kelvin)
-        # 트랙의 무채색 지점도 이 컷의 as-shot으로 옮겨 줍니다. 그래야
-        # 핸들이 놓인 자리가 "변화 없음"이라는 게 색으로 보입니다.
+        # Move the neutral point of the track to this frame's as-shot too. Only
+        # then does the colour show that where the handle sits means "no
+        # change".
         row.set_gradient(
             temperature_track_colors(self._as_shot_kelvin, KELVIN_MIN, KELVIN_MAX)
         )
@@ -763,10 +882,11 @@ class DevelopPanel(QWidget):
             row.set_value(float(kelvin), silent=True)
 
     def _on_curve_channel(self) -> None:
-        """채널 탭 전환 — 편집기에 그 채널의 점을 채웁니다."""
+        """Channel tab switch - fills the editor with that channel's points."""
         index = self.curve_channel.currentIndex()
         channel = self.curve_channel.currentData()
-        # 버튼으로 조작하든 코드로 바꾸든 채널 버튼 상태를 맞춰 줍니다.
+        # Whether driven from a button or from code, keep the channel button
+        # state in sync.
         button = self.curve_channel_buttons.button(index)
         if button is not None and not button.isChecked():
             button.setChecked(True)
@@ -785,19 +905,30 @@ class DevelopPanel(QWidget):
         self.curve_editor.reset()
 
     def set_curve_histogram(self, values) -> None:
-        """루페가 현재 이미지의 히스토그램을 넘겨줍니다."""
+        """The loupe hands over the current image's histogram."""
         self.curve_editor.set_histogram(values)
 
     def _build_detail(self) -> None:
         section = self._section("detail", tr("Detail"), "◈")
         self._add_row(section, "detail.sharpen_amount", tr("Sharpening"), 0, 150,
                       gradient="mono")
-        self._add_row(section, "detail.sharpen_radius", tr("Radius"), 0.5, 3.0, 1.0,
-                      decimals=1, gradient="mono")
 
-        # 노이즈 감소는 방식마다 남는 디테일과 걸리는 시간이 크게 다릅니다.
-        # 슬라이더 위에 방식을 먼저 두어, 무엇을 조절하고 있는지가 보이게
-        # 합니다.
+        # Everything below fine-tunes the three sliders above it, so it goes
+        # under a fold. Nine controls in a row made the section a wall and
+        # buried Sharpening / Noise reduction / Color noise reduction in it.
+        tuning = self._advanced_group(
+            section, tr("Fine tuning"),
+            tr("Sets the character of the sharpening and noise reduction "
+               "above. The defaults are measured ones - worth a look when a "
+               "particular photo needs it, not every time."))
+
+        self._add_row(tuning, "detail.sharpen_radius", tr("Sharpen radius"),
+                      0.5, 3.0, 1.0, decimals=1, gradient="mono",
+                      tooltip=tr("How wide an edge the sharpening works on."))
+
+        # Noise reduction differs greatly per method in the detail it leaves
+        # and the time it takes. Putting the method above the slider makes it
+        # visible what is being adjusted.
         algorithm_row = QHBoxLayout()
         algorithm_row.addWidget(QLabel(tr("Noise method")))
         self.noise_algorithm = QComboBox()
@@ -814,7 +945,7 @@ class DevelopPanel(QWidget):
         ))
         self.noise_algorithm.currentIndexChanged.connect(self._emit)
         algorithm_row.addWidget(self.noise_algorithm, 1)
-        section.add_layout(algorithm_row)
+        tuning.add_layout(algorithm_row)
 
         self._add_row(section, "detail.noise_reduction", tr("Noise reduction"), 0, 100,
                       gradient="mono",
@@ -822,7 +953,7 @@ class DevelopPanel(QWidget):
                                  "automatically to the photo's real noise, so the same\n"
                                  "value gives a similar result across different ISOs"))
         passes_row = self._add_row(
-            section, "detail.noise_passes", tr("Passes"), 1, 4, 1,
+            tuning, "detail.noise_passes", tr("Passes"), 1, 4, 2,
             tooltip=tr(
                 "Runs the noise reduction several times, weaker each pass.\n"
                 "For the same amount of noise removed, several gentle passes\n"
@@ -838,12 +969,14 @@ class DevelopPanel(QWidget):
         self._noise_passes_row = passes_row
         self.noise_algorithm.currentIndexChanged.connect(self._sync_noise_passes)
         self._sync_noise_passes()
-        # 강한 감소를 1패스로 걸면 디테일이 무너집니다(실측: 감소 70%에서
-        # 엣지 보존 1패스 74% vs 2패스 97%, 80%는 1패스로 도달 불가).
-        # 사용자가 강도를 그 영역으로 올리면 패스를 2로 **보이게** 올립니다 —
-        # 몰래 바꾸면 화면=결과가 깨지고, 슬라이더로 되돌릴 수도 있습니다.
+        # Applying a strong reduction in a single pass collapses detail
+        # (measured: at 70% removed, edge retention is 74% with 1 pass vs 97%
+        # with 2, and 80% cannot be reached with 1 pass at all).
+        # When the user raises the strength into that territory, the pass count
+        # is raised to 2 **visibly** - changing it silently would break what
+        # you see is what you get, and it can be put back with the slider.
         self.rows["detail.noise_reduction"].value_changed.connect(self._suggest_passes)
-        self._add_row(section, "detail.noise_detail", tr("Detail preservation"), 0, 100, 50,
+        self._add_row(tuning, "detail.noise_detail", tr("Detail preservation"), 0, 100, 50,
                       gradient="mono",
                       tooltip=tr("Restores the original where there is fine texture like\n"
                                  "hair or foliage. Flat sky or skin is left unaffected"))
@@ -851,21 +984,25 @@ class DevelopPanel(QWidget):
                       0, 100, gradient="mono",
                       tooltip=tr("Removes only colour mottling. It does not touch\n"
                                  "luminance, so there is no loss of detail"))
-        self._add_row(section, "detail.color_noise_radius", tr("Color noise radius"),
+        self._add_row(tuning, "detail.color_noise_radius", tr("Color noise radius"),
                       0, 100, 50, gradient="mono",
                       tooltip=tr("How large a colour blob to catch. Blobs grow larger at\n"
                                  "higher ISO. Raising it also bleeds true colour edges"))
-        self._add_row(section, "detail.color_noise_shadow", tr("Shadow color noise"),
-                      0, 100, 0, gradient="mono",
+        self._add_row(tuning, "detail.color_noise_shadow", tr("Shadow color noise"),
+                      0, 100, 100, gradient="mono",
                       tooltip=tr(
                           "Extra colour-noise suppression in dark areas only.\n"
                           "Colour blotches are worst in shadows (they get amplified\n"
                           "with the exposure), but matching the overall blur to the\n"
                           "shadows would bleed true colour edges in bright areas.\n\n"
-                          "Measured (3 real concert files, colour noise remaining):\n"
-                          "  uniform only:  dark 25~29% / bright 25~42%\n"
-                          "  with this on:  dark  6~15% / bright unchanged\n"
-                          "  bright colour edges: identical in both cases\n\n"
+                          "Measured on the shadows of five high-ISO files -\n"
+                          "colour noise left in the shadow:\n"
+                          "  slider        25    50    75   100\n"
+                          "  this at 0     68%   46%   38%   25%\n"
+                          "  this at 100   25%   15%   12%    9%\n"
+                          "Bright areas keep their colour throughout. The top\n"
+                          "of the slider spends colour in the dark instead\n"
+                          "(85% at the middle, 65% at the top).\n\n"
                           "Works together with colour noise reduction — it does\n"
                           "nothing while that is 0"))
         self._add_row(section, "detail.destripe", tr("Destripe"), 0, 100, 0,
@@ -879,7 +1016,7 @@ class DevelopPanel(QWidget):
                                  "  frames without banding are not detected and left alone\n\n"
                                  "Because it subtracts the same value from every row,\n"
                                  "horizontal detail is not damaged in principle"))
-        self._add_row(section, "detail.face_priority", tr("Face priority"), 0, 100, 85,
+        self._add_row(tuning, "detail.face_priority", tr("Face priority"), 0, 100, 85,
                       gradient="mono",
                       tooltip=tr("How much to hold back luminance noise reduction outside\n"
                                  "faces. At high ISO the grain that bothers you is usually\n"
@@ -891,34 +1028,40 @@ class DevelopPanel(QWidget):
                                  "100 — skin -34% / background detail -2%, twice as fast\n\n"
                                  "Ignored on photos with no face"))
 
-    #: 이 강도를 넘으면 1패스로는 디테일 손실이 커집니다 (settings.py의
-    #: noise_passes 실측표 참조 — 70%에서 보존율이 74%로 떨어짐).
+    #: Past this strength, even two passes give up edges (measured:
+    #: strength 80 goes 73~98% at two passes, 80~99% at three), so the
+    #: slider is nudged one step further. Below it the default of two
+    #: already holds the edges at 92~100%.
     PASS_PROMOTE_ABOVE = 70
 
     def _suggest_passes(self, *_args) -> None:
-        """강한 감소로 올리면 패스를 2로 올려 줍니다 (되돌릴 수 있음)."""
+        """Raises the pass count to 3 when the reduction is pushed high
+        (reversible). Two is already the default."""
         if self._loading:
             return
         passes_row = self.rows.get("detail.noise_passes")
         if passes_row is None or not self._noise_passes_row.isEnabled():
             return
         strength = self.rows["detail.noise_reduction"].value()
-        if strength > self.PASS_PROMOTE_ABOVE and passes_row.value() <= 1:
-            passes_row.set_value(2)
+        if strength > self.PASS_PROMOTE_ABOVE and passes_row.value() <= 2:
+            passes_row.set_value(3)
 
     def _sync_noise_passes(self, *_args) -> None:
-        """패스 수는 비국소 평균 계열에만 적용됩니다 — 다른 방식에서는 잠급니다.
+        """The pass count applies to the non-local-means family only - it is
+        locked for the other methods.
 
-        만질 수 있게 두면 적용되는 줄 알고 값을 맞추다 왜 아무 변화가
-        없는지 찾게 됩니다 (JPEG 잠금에서 이미 한 번 겪은 일입니다).
+        Left touchable, the user assumes it applies, sets a value, and then
+        goes hunting for why nothing changed (already lived through once with
+        the JPEG locking).
         """
         algorithm = self.noise_algorithm.currentData()
         supported = algorithm in (NoiseAlgorithm.NLMEANS, NoiseAlgorithm.NLMEANS_HQ)
         self._noise_passes_row.setEnabled(supported)
 
-    # ------------------------------------------------------------ 마스크
+    # ---------------------------------------------------------------- masks
 
-    # 선택한 마스크에 붙는 국소 조정 슬라이더 (필드, 라벨, 최소, 최대, 소수, 접미)
+    # Local adjustment sliders attached to the selected mask
+    # (field, label, minimum, maximum, decimals, suffix)
     @staticmethod
     def _mask_adjust_specs():
         return [
@@ -957,14 +1100,15 @@ class DevelopPanel(QWidget):
                 action.triggered.connect(
                     lambda _=False, key=preset.key: self._add_mask_preset(key)
                 )
-        # 브러시는 인식이 아니라 사용자가 직접 칠하는 것이라 따로 둡니다
+        # The brush is painted by the user rather than detected, so it is kept
+        # apart
         menu.addSection(tr("Manual"))
         brush_action = menu.addAction(tr("Brush (paint by hand)"))
         brush_action.setToolTip(tr("Drag over the image to paint just the area you want"))
         brush_action.triggered.connect(self._add_brush_mask)
 
         add_button.setMenu(menu)
-        self._mask_menu = menu  # 참조를 잡아 둬야 GC되지 않습니다
+        self._mask_menu = menu  # hold a reference or it gets garbage collected
         section.add_widget(add_button)
 
         hint = QLabel(tr("The face, eye and background presets are detected automatically on this frame"))
@@ -978,8 +1122,9 @@ class DevelopPanel(QWidget):
             "QListWidget { background: #232327; color: #ddd; border: 1px solid #3a3a40;"
             " border-radius: 3px; }"
         )
-        # 안내는 툴팁으로만 답니다. 여기에 라벨을 한 줄 더 넣으면 그 글자
-        # 폭이 패널 최소 폭을 밀어 올려, 좁은 화면에서 오른쪽이 잘립니다.
+        # The guidance goes in a tooltip only. Putting another label line here
+        # would push the panel's minimum width up by that text width, and on a
+        # narrow screen the right-hand side gets clipped.
         self.mask_list.setToolTip(tr(
             "Selecting a radial or linear mask shows handles on the image.\n"
             "Drag the centre to move, an edge point to resize, an outer point to rotate."
@@ -999,7 +1144,7 @@ class DevelopPanel(QWidget):
         controls_row.addWidget(self.mask_delete_button)
         section.add_layout(controls_row)
 
-        # 브러시 전용 조작. BRUSH 마스크를 골랐을 때만 켜집니다.
+        # Brush-only controls. They come on only when a BRUSH mask is selected.
         self.brush_box = QWidget()
         brush_layout = QVBoxLayout(self.brush_box)
         brush_layout.setContentsMargins(0, 2, 0, 2)
@@ -1032,9 +1177,10 @@ class DevelopPanel(QWidget):
         controls.setContentsMargins(0, 2, 0, 0)
         controls.setSpacing(1)
 
-        # 얼굴·눈 마스크가 누구에게 걸리는지 고릅니다. 예전에는 '면적이 가장
-        # 큰 얼굴' 하나로 고정이라, 앞줄 행인이 주인공보다 크게 잡히면 엉뚱한
-        # 사람이 밝아졌고 여러 명을 한꺼번에 손볼 방법도 없었습니다.
+        # Chooses who the face and eye masks apply to. It used to be fixed to
+        # the single 'largest-area face', so when a passer-by in the front row
+        # came out bigger than the main subject the wrong person was
+        # brightened, and there was no way to treat several people at once.
         self.face_target_box = QWidget()
         target_layout = QVBoxLayout(self.face_target_box)
         target_layout.setContentsMargins(0, 0, 0, 2)
@@ -1084,6 +1230,11 @@ class DevelopPanel(QWidget):
         self.mask_invert.toggled.connect(self._on_mask_geometry_changed)
         controls.addWidget(self.mask_invert)
 
+        # Refining the area - subtract from this mask, add to it, or keep only
+        # where they overlap. Only the parent's adjustments are used, so this
+        # is about the area alone.
+        self._build_mask_refine(controls)
+
         self._mask_adjust_rows: dict[str, SliderRow] = {}
         for field, label, minimum, maximum, decimals, suffix in self._mask_adjust_specs():
             row = SliderRow(label, minimum, maximum, default=0.0,
@@ -1092,8 +1243,144 @@ class DevelopPanel(QWidget):
             self._mask_adjust_rows[field] = row
             controls.addWidget(row)
 
+        # The per-mask curve stays **collapsed**. It is an advanced feature for
+        # gradation the sliders cannot reach, and leaving a curve editor
+        # expanded for every mask buries the panel in curves and pushes the
+        # commonly used sliders off screen.
+        self._build_mask_curve(controls)
+
         section.add_widget(self.mask_controls)
         self.mask_controls.setEnabled(False)
+
+    def _build_mask_refine(self, controls) -> None:
+        """The list of refine pieces for the area, plus add/remove."""
+        self.refine_box = QWidget()
+        layout = QVBoxLayout(self.refine_box)
+        layout.setContentsMargins(0, 4, 0, 2)
+        layout.setSpacing(2)
+
+        header = QHBoxLayout()
+        title = QLabel(tr("Refine area"))
+        title.setStyleSheet("color: #aaa;")
+        header.addWidget(title)
+        header.addStretch(1)
+
+        add_refine = QPushButton(tr("Add"))
+        add_refine.setToolTip(tr(
+            "Build this mask's area from several pieces:\n"
+            "Add — widen it · Subtract — take a part away ·\n"
+            "Intersect — keep only where both overlap"
+        ))
+        menu = QMenu(add_refine)
+        for mode, mode_label in ((MaskCombine.SUBTRACT, tr("Subtract")),
+                                 (MaskCombine.INTERSECT, tr("Intersect")),
+                                 (MaskCombine.ADD, tr("Add"))):
+            section_menu = menu.addMenu(mode_label)
+            for kind, kind_label in ((MaskType.RADIAL, tr("Radial")),
+                                     (MaskType.LINEAR, tr("Linear")),
+                                     (MaskType.BRUSH, tr("Brush")),
+                                     (MaskType.FACE, tr("Face")),
+                                     (MaskType.EYE, tr("Eye")),
+                                     (MaskType.BACKGROUND, tr("Background")),
+                                     (MaskType.SUBJECT, tr("Subject"))):
+                action = section_menu.addAction(kind_label)
+                action.triggered.connect(
+                    lambda _=False, k=kind, m=mode: self._add_refine(k, m))
+        add_refine.setMenu(menu)
+        self._refine_menu = menu          # hold a reference or it gets GC'd
+        header.addWidget(add_refine)
+
+        self.refine_delete = QPushButton(tr("Remove"))
+        self.refine_delete.clicked.connect(self._delete_refine)
+        header.addWidget(self.refine_delete)
+        layout.addLayout(header)
+
+        self.refine_list = QListWidget()
+        self.refine_list.setMaximumHeight(72)
+        self.refine_list.setStyleSheet(
+            "QListWidget { background: #232327; color: #ddd;"
+            " border: 1px solid #3a3a40; border-radius: 3px; }"
+        )
+        self.refine_list.setToolTip(tr(
+            "Pieces that shape this mask's area. The adjustments below apply\n"
+            "to the finished area, not to each piece."
+        ))
+        self.refine_list.itemChanged.connect(self._on_refine_item_changed)
+        self.refine_list.currentRowChanged.connect(
+            lambda _row: self._load_selected_refine())
+        layout.addWidget(self.refine_list)
+
+        self.refine_feather = SliderRow(tr("Piece feather"), 0, 100,
+                                        default=50, suffix=" %")
+        self.refine_size = SliderRow(tr("Piece range"), 0, 200, default=100,
+                                     suffix=" %")
+        self.refine_invert = QCheckBox(tr("Invert piece"))
+        for widget in (self.refine_feather, self.refine_size):
+            widget.value_changed.connect(self._on_refine_changed)
+            layout.addWidget(widget)
+        self.refine_invert.toggled.connect(self._on_refine_changed)
+        layout.addWidget(self.refine_invert)
+        controls.addWidget(self.refine_box)
+
+    def _build_mask_curve(self, controls) -> None:
+        """The per-mask curve - collapsed by default."""
+        from .curve_editor import CurveEditor
+
+        self.mask_curve_toggle = QPushButton(tr("Tone curve  ▸"))
+        self.mask_curve_toggle.setCheckable(True)
+        self.mask_curve_toggle.setStyleSheet(
+            "QPushButton { text-align: left; border: none; color: #aaa;"
+            " padding: 4px 0; } QPushButton:checked { color: #ddd; }"
+        )
+        self.mask_curve_toggle.setToolTip(tr(
+            "A tone curve for this mask's area only — for gradation the\n"
+            "sliders cannot reach. Same editor as the global curve."
+        ))
+        self.mask_curve_toggle.toggled.connect(self._on_mask_curve_toggled)
+        controls.addWidget(self.mask_curve_toggle)
+
+        self.mask_curve_box = QWidget()
+        curve_layout = QVBoxLayout(self.mask_curve_box)
+        curve_layout.setContentsMargins(0, 0, 0, 4)
+        curve_layout.setSpacing(2)
+
+        # The channels are the same set as the global curve - combinations like
+        # "cool down the background only" are the main use of a mask curve, so
+        # luminance alone would be handing over only half of it.
+        self.mask_curve_channel = QComboBox()
+        self.mask_curve_channel.setVisible(False)
+        for label, key in (("RGB", "rgb"), (tr("Red"), "red"),
+                           (tr("Green"), "green"), (tr("Blue"), "blue")):
+            self.mask_curve_channel.addItem(label, key)
+        self.mask_curve_channel.currentIndexChanged.connect(
+            self._on_mask_curve_channel)
+
+        channel_row = QHBoxLayout()
+        channel_row.setSpacing(3)
+        channel_row.addStretch(1)
+        self.mask_curve_buttons = QButtonGroup(self)
+        self.mask_curve_buttons.setExclusive(True)
+        for index, (label, color) in enumerate(
+            ((tr("RGB"), "#dddddd"), ("R", "#e06060"),
+             ("G", "#5cc264"), ("B", "#5c8cf0"))
+        ):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setFixedSize(34, 22)
+            button.setStyleSheet(_curve_channel_style(color))
+            button.clicked.connect(
+                lambda _=False, i=index: self.mask_curve_channel.setCurrentIndex(i))
+            self.mask_curve_buttons.addButton(button, index)
+            channel_row.addWidget(button)
+        self.mask_curve_buttons.button(0).setChecked(True)
+        curve_layout.addLayout(channel_row)
+
+        self.mask_curve = CurveEditor()
+        self.mask_curve.setMinimumHeight(150)
+        self.mask_curve.points_changed.connect(self._on_mask_curve_points)
+        curve_layout.addWidget(self.mask_curve)
+        controls.addWidget(self.mask_curve_box)
+        self.mask_curve_box.setVisible(False)
 
     def _selected_mask_index(self) -> int:
         return self.mask_list.currentRow()
@@ -1107,10 +1394,10 @@ class DevelopPanel(QWidget):
         self._emit()
 
     def _add_brush_mask(self) -> None:
-        """빈 브러시 마스크를 추가하고 바로 칠하기 모드로 들어갑니다."""
+        """Adds an empty brush mask and goes straight into painting mode."""
         mask = Mask(
             kind=MaskType.BRUSH,
-            adjust=LocalAdjustments(exposure=0.3),  # 칠하면 바로 보이도록 기본값
+            adjust=LocalAdjustments(exposure=0.3),  # so a stroke shows at once
             feather=40,
             label=tr("Brush"),
         )
@@ -1131,14 +1418,14 @@ class DevelopPanel(QWidget):
             self.mask_overlay_changed.emit()
 
     def brush_radius_ratio(self) -> float:
-        """붓 반지름 (이미지 짧은 변 대비 비율)."""
+        """Brush radius (as a ratio of the image's short edge)."""
         return max(0.005, self.brush_size.value() / 100.0 / 2.0)
 
     def is_erasing(self) -> bool:
         return self.brush_erase.isChecked()
 
     def set_brush_bitmap(self, bitmap: str) -> None:
-        """루페가 칠한 결과를 선택된 마스크에 반영합니다."""
+        """Applies what the loupe painted to the selected mask."""
         index = self._selected_mask_index()
         if not (0 <= index < len(self._masks)):
             return
@@ -1169,13 +1456,14 @@ class DevelopPanel(QWidget):
         if not active:
             self.brush_box.setVisible(False)
             if self.brush_paint.isChecked():
-                self.brush_paint.setChecked(False)  # 칠하기 모드도 함께 끕니다
+                self.brush_paint.setChecked(False)  # painting mode off too
             self.mask_shape_changed.emit()
             return
         mask = self._masks[index]
 
-        # 브러시 조작은 브러시 마스크에서만 보입니다. 다른 마스크로 넘어가면
-        # 칠하기 모드를 꺼야 엉뚱한 마스크에 칠하지 않습니다.
+        # The brush controls are visible only on a brush mask. Moving to
+        # another mask has to turn painting mode off, or you paint into the
+        # wrong mask.
         is_brush = mask.kind is MaskType.BRUSH
         self.brush_box.setVisible(is_brush)
         if not is_brush and self.brush_paint.isChecked():
@@ -1183,14 +1471,15 @@ class DevelopPanel(QWidget):
         previous = self._loading
         self._loading = True
         self.mask_size.set_value(float(mask.size), silent=True)
-        # 범위는 도형으로 만드는 마스크에만 의미가 있습니다. 선형·배경·브러시는
-        # 줄일 도형이 없으므로 아예 못 만지게 해 헷갈리지 않도록 합니다.
+        # Range only means something for masks built from a shape. Linear,
+        # background and brush have no shape to shrink, so it is made
+        # untouchable to avoid confusion.
         self.mask_size.setEnabled(mask.kind in (MaskType.FACE, MaskType.EYE, MaskType.RADIAL))
         self.mask_opacity.set_value(float(mask.opacity), silent=True)
         self.mask_feather.set_value(float(mask.feather), silent=True)
         self.mask_invert.setChecked(mask.invert)
 
-        # 얼굴 대상 선택은 얼굴·눈 마스크에서만 의미가 있습니다
+        # Choosing the face target only means something for face and eye masks
         is_face = mask.kind in (MaskType.FACE, MaskType.EYE)
         self.face_target_box.setVisible(is_face)
         if is_face:
@@ -1203,10 +1492,19 @@ class DevelopPanel(QWidget):
 
         for field, row in self._mask_adjust_rows.items():
             row.set_value(float(getattr(mask.adjust, field)), silent=True)
+        self.mask_curve.set_points(
+            self._mask_curve_points(self.mask_curve_channel.currentData()))
+        # If this mask has a curve on it, do not leave it collapsed - something
+        # changing the picture from a place you cannot see makes the cause
+        # impossible to find.
+        if not mask.adjust.curve.is_neutral() \
+                and not self.mask_curve_toggle.isChecked():
+            self.mask_curve_toggle.setChecked(True)
         self._loading = previous
-        # _loading과 무관하게 알립니다. 이건 값이 바뀌었다는 신호가 아니라
-        # "지금 화면에 뜬 마스크는 이것"이라는 표시라, 컷을 불러올 때야말로
-        # 반드시 나가야 합니다.
+        self._rebuild_refine_list(select=0 if mask.refine else None)
+        # Emitted regardless of _loading. This is not a signal that a value
+        # changed but a statement of "this is the mask now on screen", so
+        # loading a frame is precisely when it must go out.
         self.mask_shape_changed.emit()
 
     def _on_mask_selected(self, _row: int) -> None:
@@ -1245,14 +1543,14 @@ class DevelopPanel(QWidget):
             invert=self.mask_invert.isChecked(),
         )
         self._emit()
-        # 범위(size)는 방사형 윤곽선의 크기 그 자체입니다. 안 알리면
-        # 슬라이더만 움직이고 화면의 타원은 그대로 남습니다.
+        # Range (size) is the size of the radial outline itself. Without
+        # emitting, only the slider moves and the ellipse on screen stays put.
         self.mask_shape_changed.emit()
         if self.mask_overlay_check.isChecked():
             self.mask_overlay_changed.emit()
 
     def _on_mask_face_target_changed(self, *_) -> None:
-        """얼굴 마스크가 누구에게 걸릴지 바꿉니다."""
+        """Changes who the face mask applies to."""
         if self._loading:
             return
         index = self._selected_mask_index()
@@ -1266,7 +1564,7 @@ class DevelopPanel(QWidget):
         mask = self._masks[index]
         params = dict(mask.params)
         params["target"] = target
-        # 번호는 사람이 보기 편하게 1부터, 안에서는 0부터
+        # Numbered from 1 for the human, from 0 internally
         params["index"] = max(0, self.mask_face_index.value() - 1)
         self._masks[index] = replace(mask, params=params)
         self._emit()
@@ -1274,7 +1572,8 @@ class DevelopPanel(QWidget):
             self.mask_overlay_changed.emit()
 
     def set_face_count(self, count: int) -> None:
-        """이 컷에서 검출된 얼굴 수. 번호를 고르려면 몇 개인지 알아야 합니다."""
+        """How many faces were detected in this frame. To pick a number you
+        have to know how many there are."""
         self.mask_face_index.setMaximum(max(1, count))
         if count <= 0:
             self.face_count_label.setText(tr("No faces detected"))
@@ -1296,6 +1595,181 @@ class DevelopPanel(QWidget):
         self._masks[index] = replace(self._masks[index], adjust=adjust)
         self._emit()
 
+    # -------------------------------------------------------- refining areas
+
+    _REFINE_LABELS = {
+        MaskCombine.ADD: "＋", MaskCombine.SUBTRACT: "－",
+        MaskCombine.INTERSECT: "∩",
+    }
+
+    def _selected_refine_index(self) -> int:
+        return self.refine_list.currentRow()
+
+    def _add_refine(self, kind: MaskType, mode: MaskCombine) -> None:
+        index = self._selected_mask_index()
+        if not (0 <= index < len(self._masks)):
+            return
+        from dataclasses import replace
+
+        mask = self._masks[index]
+        piece = Mask(kind=kind, combine=mode, feather=50)
+        if kind is MaskType.RADIAL:
+            piece = replace(piece, params={"cx": 0.5, "cy": 0.5,
+                                           "rx": 0.25, "ry": 0.25})
+        elif kind is MaskType.LINEAR:
+            piece = replace(piece, params={"x0": 0.5, "y0": 0.0,
+                                           "x1": 0.5, "y1": 0.5})
+        self._masks[index] = replace(mask, refine=(*mask.refine, piece))
+        self._rebuild_refine_list(select=len(mask.refine))
+        self._emit()
+        if self.mask_overlay_check.isChecked():
+            self.mask_overlay_changed.emit()
+
+    def _delete_refine(self) -> None:
+        mask_index = self._selected_mask_index()
+        piece_index = self._selected_refine_index()
+        if not (0 <= mask_index < len(self._masks)):
+            return
+        from dataclasses import replace
+
+        mask = self._masks[mask_index]
+        if not (0 <= piece_index < len(mask.refine)):
+            return
+        pieces = list(mask.refine)
+        del pieces[piece_index]
+        self._masks[mask_index] = replace(mask, refine=tuple(pieces))
+        self._rebuild_refine_list(
+            select=min(piece_index, len(pieces) - 1) if pieces else None)
+        self._emit()
+        if self.mask_overlay_check.isChecked():
+            self.mask_overlay_changed.emit()
+
+    def _rebuild_refine_list(self, select: int | None = None) -> None:
+        mask_index = self._selected_mask_index()
+        pieces = (self._masks[mask_index].refine
+                  if 0 <= mask_index < len(self._masks) else ())
+        previous = self._loading
+        self._loading = True
+        self.refine_list.clear()
+        for piece in pieces:
+            mark = self._REFINE_LABELS.get(piece.combine, "＋")
+            item = QListWidgetItem(f"{mark}  {piece.kind.value}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if piece.enabled else Qt.Unchecked)
+            self.refine_list.addItem(item)
+        self._loading = previous
+        if select is not None and 0 <= select < len(pieces):
+            self.refine_list.setCurrentRow(select)
+        self._load_selected_refine()
+
+    def _load_selected_refine(self) -> None:
+        mask_index = self._selected_mask_index()
+        piece_index = self._selected_refine_index()
+        pieces = (self._masks[mask_index].refine
+                  if 0 <= mask_index < len(self._masks) else ())
+        active = 0 <= piece_index < len(pieces)
+        for widget in (self.refine_feather, self.refine_size,
+                       self.refine_invert, self.refine_delete):
+            widget.setEnabled(active)
+        if not active:
+            return
+        piece = pieces[piece_index]
+        previous = self._loading
+        self._loading = True
+        self.refine_feather.set_value(float(piece.feather), silent=True)
+        self.refine_size.set_value(float(piece.size), silent=True)
+        self.refine_size.setEnabled(
+            piece.kind in (MaskType.FACE, MaskType.EYE, MaskType.RADIAL))
+        self.refine_invert.setChecked(piece.invert)
+        self._loading = previous
+
+    def _on_refine_item_changed(self, item: QListWidgetItem) -> None:
+        if self._loading:
+            return
+        mask_index = self._selected_mask_index()
+        if not (0 <= mask_index < len(self._masks)):
+            return
+        from dataclasses import replace
+
+        mask = self._masks[mask_index]
+        piece_index = self.refine_list.row(item)
+        if not (0 <= piece_index < len(mask.refine)):
+            return
+        pieces = list(mask.refine)
+        pieces[piece_index] = replace(
+            pieces[piece_index], enabled=item.checkState() == Qt.Checked)
+        self._masks[mask_index] = replace(mask, refine=tuple(pieces))
+        self._emit()
+        if self.mask_overlay_check.isChecked():
+            self.mask_overlay_changed.emit()
+
+    def _on_refine_changed(self, *_) -> None:
+        if self._loading:
+            return
+        mask_index = self._selected_mask_index()
+        piece_index = self._selected_refine_index()
+        if not (0 <= mask_index < len(self._masks)):
+            return
+        from dataclasses import replace
+
+        mask = self._masks[mask_index]
+        if not (0 <= piece_index < len(mask.refine)):
+            return
+        pieces = list(mask.refine)
+        pieces[piece_index] = replace(
+            pieces[piece_index],
+            feather=int(self.refine_feather.value()),
+            size=int(self.refine_size.value()),
+            invert=self.refine_invert.isChecked(),
+        )
+        self._masks[mask_index] = replace(mask, refine=tuple(pieces))
+        self._emit()
+        if self.mask_overlay_check.isChecked():
+            self.mask_overlay_changed.emit()
+
+    # ---------------------------------------------------------- mask curves
+
+    def _on_mask_curve_toggled(self, shown: bool) -> None:
+        self.mask_curve_box.setVisible(shown)
+        self.mask_curve_toggle.setText(
+            tr("Tone curve  ▾") if shown else tr("Tone curve  ▸"))
+
+    def _on_mask_curve_channel(self, _index: int) -> None:
+        channel = self.mask_curve_channel.currentData()
+        self.mask_curve.set_channel(channel)
+        button = self.mask_curve_buttons.button(
+            self.mask_curve_channel.currentIndex())
+        if button is not None:
+            button.setChecked(True)
+        self.mask_curve.set_points(self._mask_curve_points(channel))
+
+    def _mask_curve_points(self, channel: str) -> tuple:
+        index = self._selected_mask_index()
+        if not (0 <= index < len(self._masks)):
+            return ()
+        curve = self._masks[index].adjust.curve
+        return {
+            "rgb": curve.points_rgb, "red": curve.points_red,
+            "green": curve.points_green, "blue": curve.points_blue,
+        }.get(channel, ())
+
+    def _on_mask_curve_points(self, points: tuple) -> None:
+        if self._loading:
+            return
+        index = self._selected_mask_index()
+        if not (0 <= index < len(self._masks)):
+            return
+        from dataclasses import replace
+
+        field = {"rgb": "points_rgb", "red": "points_red",
+                 "green": "points_green",
+                 "blue": "points_blue"}[self.mask_curve_channel.currentData()]
+        mask = self._masks[index]
+        curve = replace(mask.adjust.curve, **{field: points})
+        self._masks[index] = replace(
+            mask, adjust=replace(mask.adjust, curve=curve))
+        self._emit()
+
     def _delete_selected_mask(self) -> None:
         index = self._selected_mask_index()
         if not (0 <= index < len(self._masks)):
@@ -1309,20 +1783,23 @@ class DevelopPanel(QWidget):
             self.mask_overlay_changed.emit()
 
     def overlay_mask(self) -> "Mask | None":
-        """루페가 그릴 오버레이 마스크. 표시가 꺼져 있거나 선택이 없으면 None."""
+        """The overlay mask for the loupe to draw. None when the display is off
+        or nothing is selected."""
         if not self.mask_overlay_check.isChecked():
             return None
         index = self._selected_mask_index()
         return self._masks[index] if 0 <= index < len(self._masks) else None
 
     SHAPE_KINDS = (MaskType.RADIAL, MaskType.LINEAR)
-    """이미지 위에서 직접 끌 수 있는 마스크. 나머지는 인식이나 붓이 자리를 정합니다."""
+    """Masks that can be dragged directly on the image. For the rest,
+    detection or the brush decides the position."""
 
     def shape_mask(self) -> "Mask | None":
-        """이미지 위에 조작점을 띄울 마스크. 없으면 None.
+        """The mask whose handles go on the image. None if there is none.
 
-        영역 표시 체크와 무관합니다 — 조작점 자체가 보이니 무엇을 만지는지는
-        알 수 있고, 빨간 오버레이를 켜야만 움직일 수 있다면 그게 더 이상합니다.
+        Independent of the region display checkbox - the handles themselves are
+        visible so you can tell what you are grabbing, and having to turn the
+        red overlay on before you could move it would be the stranger thing.
         """
         index = self._selected_mask_index()
         if not (0 <= index < len(self._masks)):
@@ -1331,11 +1808,12 @@ class DevelopPanel(QWidget):
         return mask if mask.kind in self.SHAPE_KINDS else None
 
     def set_mask_params(self, params: dict, *, silent: bool = False) -> None:
-        """선택 마스크의 정규화 파라미터를 갈아 끼웁니다.
+        """Swaps in the normalised parameters of the selected mask.
 
-        끄는 동안에는 silent=True로 부릅니다. 매 픽셀마다 settings_changed를
-        내면 무거운 재렌더가 예약과 취소를 반복해 조작이 따라오지 못합니다
-        (크롭 드래그와 같은 이유). 손을 뗀 뒤 한 번만 알리면 됩니다.
+        Called with silent=True while dragging. Emitting settings_changed on
+        every pixel makes the heavy re-render schedule and cancel over and
+        over, and the control cannot keep up (the same reason as crop
+        dragging). One notification after the drag ends is enough.
         """
         index = self._selected_mask_index()
         if not (0 <= index < len(self._masks)):
@@ -1347,7 +1825,11 @@ class DevelopPanel(QWidget):
             self._emit()
 
     def _build_hsl(self) -> None:
-        section = self._section("hsl", tr("Color mixer"), "◎")
+        section = self._section(
+            "hsl", tr("Color mixer"), "◎",
+            tooltip=tr("Adjusts one colour band at a time - the reds, the blues. "
+                       "For tinting the shadows and highlights instead, use "
+                       "Color grading."))
 
         self.hsl_channel = QComboBox()
         self.hsl_channel.addItems([tr("Hue"), tr("Saturation"), tr("Luminance")])
@@ -1359,10 +1841,11 @@ class DevelopPanel(QWidget):
         self._refresh_hsl_gradients()
 
     def _refresh_hsl_gradients(self) -> None:
-        """밴드마다 그 색상대 고유의 트랙 색을 입힙니다.
+        """Gives each band the track colour of its own hue range.
 
-        전부 같은 무지개로 칠하면 지금 무엇을 만지는지 알 수 없습니다.
-        채널(색조/채도/광도)에 따라서도 의미가 달라 매번 다시 칠합니다.
+        Painted all with the same rainbow, you cannot tell what you are
+        touching. The meaning also differs by channel (hue/saturation/
+        luminance), so it is repainted each time.
         """
         channel = self._hsl_channel_key()
         for band in HSL_BANDS:
@@ -1371,10 +1854,15 @@ class DevelopPanel(QWidget):
             )
 
     def _build_color_grade(self) -> None:
-        section = self._section("color_grade", tr("Color grading"), "◑")
+        section = self._section(
+            "color_grade", tr("Color grading"), "◑",
+            tooltip=tr("Tints the shadows, midtones and highlights separately. "
+                       "For changing one colour wherever it appears, use "
+                       "Color mixer."))
 
-        # 색조와 채도를 슬라이더로 나눠 놓으면 "어느 방향으로 얼마나"가
-        # 안 잡힙니다. 휠 위의 한 점을 끄는 편이 훨씬 빠릅니다.
+        # Splitting hue and saturation into separate sliders makes "which
+        # direction, and how far" hard to grasp. Dragging a single point on a
+        # wheel is far quicker.
         self.grade_zones: dict[str, ColorGradeZoneWidget] = {}
 
         middle = ColorGradeZoneWidget(tr("Midtones"))
@@ -1438,8 +1926,9 @@ class DevelopPanel(QWidget):
         lens_row.addWidget(self.lens_override, 1)
         section.add_layout(lens_row)
 
-        # 번들 DB에 없는 신형·서드파티 렌즈는 사용자가 프로필을 넣어 넓힐 수
-        # 있습니다. 폴더가 어디인지 모르면 쓸 수 없으니 여기서 열어 줍니다.
+        # New or third-party lenses missing from the bundled DB can be covered
+        # by the user dropping in a profile. That is unusable if you do not
+        # know where the folder is, so it is opened from here.
         db_row = QHBoxLayout()
         open_db = QPushButton(tr("Lens profile folder"))
         open_db.setToolTip(tr("Drop lensfun XML here to widen the list of recognised gear"))
@@ -1456,8 +1945,9 @@ class DevelopPanel(QWidget):
         self.lens_db_label.setWordWrap(True)
         section.add_widget(self.lens_db_label)
 
-        # 새 기종은 라이브러리에 색 정보가 없어 현상 색이 카메라와 다릅니다.
-        # 이 PC에서 잰 보정값을 여기서 확인하고 지울 수 있게 합니다.
+        # For a new body the library has no colour information, so the
+        # developed colour differs from the camera's. The calibration values
+        # measured on this PC can be inspected and deleted here.
         self.calibration_button = QPushButton(tr("Manage camera color calibration"))
         self.calibration_button.setToolTip(tr(
             "View or delete this PC's calibration values, derived by comparing against the camera's built-in JPEG"
@@ -1470,14 +1960,14 @@ class DevelopPanel(QWidget):
         self.calibration_label.setWordWrap(True)
         section.add_widget(self.calibration_label)
 
-        # RAW가 아닐 때 왜 위 항목들이 잠겼는지 여기에 적습니다.
+        # Says here why the items above are locked when the source is not RAW.
         self.source_note = QLabel()
         self.source_note.setStyleSheet(theme.hint_label())
         self.source_note.setWordWrap(True)
         self.source_note.setVisible(False)
         section.add_widget(self.source_note)
 
-        self._camera = ("", "")   # set_camera로 채워집니다
+        self._camera = ("", "")   # filled in by set_camera
         self._is_raw = True
         self._refresh_calibration_label()
         self._refresh_lens_db_label()
@@ -1488,18 +1978,24 @@ class DevelopPanel(QWidget):
 
         self._add_row(section, "optics.distortion", tr("Distortion"), -100, 100, gradient="mono",
                       tooltip=tr("Negative corrects barrel (convex), positive corrects pincushion (concave)"))
-        self._add_row(section, "optics.vignetting", tr("Vignetting"), -100, 100,
-                      gradient="exposure",
-                      tooltip=tr("Positive brightens the corners. 100 raises "
-                                 "them 2.2 stops, and 50 is exactly half — "
-                                 "the scale is stops, not display values."))
+        # Named apart from the Effects vignette on purpose. The same word
+        # sat in both sections meaning opposite things - this one takes the
+        # lens's corner falloff out, that one puts darkening in.
+        self._add_row(section, "optics.vignetting", tr("Correct vignetting"),
+                      -100, 100, gradient="exposure",
+                      tooltip=tr("Evens out the corner darkening the lens itself "
+                                 "leaves. Positive brightens the corners: 100 "
+                                 "raises them 2.2 stops, 50 exactly half - the "
+                                 "scale is stops, not display values. To darken "
+                                 "the corners on purpose, use Vignette under "
+                                 "Effects."))
         self._add_row(section, "optics.defringe_purple", tr("Remove purple fringing"),
                       0, 100, gradient="mono")
         self._add_row(section, "optics.defringe_green", tr("Remove green fringing"),
                       0, 100, gradient="mono")
 
-        # 언저리 색은 렌즈와 장면마다 달라서 고정값으로는 잘 맞지 않습니다.
-        # 실제 언저리를 찍어 그 색조를 기준으로 삼습니다.
+        # The fringe colour differs per lens and per scene, so a fixed value
+        # rarely fits. Sampling the real fringing gives the reference hue.
         pick_row = QHBoxLayout()
         pick_row.addWidget(QLabel(tr("Sample colour")))
         for key, label in (("purple", tr("Purple")), ("green", tr("Green"))):
@@ -1529,7 +2025,8 @@ class DevelopPanel(QWidget):
                 cameras=cameras, lenses=lenses))
 
     def _open_lens_db_folder(self) -> None:
-        """탐색기로 렌즈 프로필 폴더를 엽니다 (없으면 만들어서)."""
+        """Opens the lens profile folder in the file browser (creating it if it
+        is missing)."""
         from PySide6.QtCore import QUrl
         from PySide6.QtGui import QDesktopServices
 
@@ -1538,7 +2035,7 @@ class DevelopPanel(QWidget):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(ensure_user_lens_db_dir())))
 
     def _reload_lens_db(self) -> None:
-        """XML을 넣은 뒤 다시 읽습니다. 목록도 새로 채웁니다."""
+        """Re-reads after XML has been dropped in. Refills the list too."""
         from ..core.develop.optics import available_lenses, reload_database
 
         cameras, lenses = reload_database()
@@ -1552,37 +2049,42 @@ class DevelopPanel(QWidget):
         )
 
     def set_camera(self, make: str, model: str) -> None:
-        """지금 보고 있는 사진의 바디. 보정 표시를 이 기종으로 좁힙니다."""
+        """The body of the photo currently shown. Narrows the calibration
+        display to this model."""
         self._camera = (make or "", model or "")
         self._refresh_calibration_label()
 
     def set_raw_source(self, is_raw: bool) -> None:
-        """원본이 RAW인지에 따라 센서 기반 항목을 잠급니다.
+        """Locks the sensor-based items depending on whether the source is RAW.
 
-        JPEG·HEIF에는 카메라가 이미 프로파일·기종 색·렌즈 보정을 적용해
-        구워 넣었습니다. 한 번 더 걸면 이중 보정이 됩니다. 그래서 이 항목들은
-        RAW가 아닐 때 **적용 자체가 안 됩니다**(raw_io.load_demosaiced 참고).
+        With JPEG and HEIF the camera has already applied and baked in the
+        profile, the model colour and the lens correction. Applying them once
+        more is a double correction. So for a non-RAW source these items are
+        **not applied at all** (see raw_io.load_demosaiced).
 
-        화면에서도 꺼 둡니다. 만질 수 있게 두면 적용되는 줄 알고 값을
-        맞추다가, 왜 아무 변화가 없는지 찾게 됩니다 — ROI 신뢰도에서 이미
-        한 번 겪은 일입니다.
+        They are turned off on screen too. Left touchable, the user assumes
+        they apply, sets values, and then goes hunting for why nothing changed
+        - already lived through once with the ROI trust.
 
-        색온도는 잠그지 않습니다. 절대 Kelvin 변환은 못 하지만 상대적인
-        따뜻/차갑게는 그대로 되고, 실제로 손댈 일이 있습니다.
+        Temperature is not locked. Absolute Kelvin conversion is impossible,
+        but relative warmer/cooler still works and there really are occasions
+        to reach for it.
         """
         self._is_raw = bool(is_raw)
 
         self.optics_auto.setEnabled(is_raw)
         if not is_raw:
             self.optics_auto.setChecked(False)
-        # 하이라이트 복원은 센서 데이터가 있어야 성립합니다 — JPEG·HEIF는
-        # 카메라가 이미 잘라서 구운 결과라 되살릴 채널이 없습니다.
+        # Highlight recovery only holds up with sensor data - JPEG and HEIF are
+        # already the camera's clipped, baked result, so there is no channel
+        # left to rebuild from.
         self.highlight_recovery.setEnabled(is_raw)
         if not is_raw:
             self.highlight_recovery.setChecked(False)
         self.calibration_button.setEnabled(is_raw)
-        # 카메라 룩 매칭도 센서 기반입니다 — JPEG·HEIF는 파일 자체가 이미
-        # 카메라 렌더라 맞출 대상이 따로 없습니다.
+        # Camera look matching is sensor-based too - with JPEG and HEIF the
+        # file itself is already the camera's rendering, so there is nothing
+        # separate to match against.
         self._sync_match_camera_button(is_raw)
 
         self.source_note.setText(
@@ -1595,10 +2097,12 @@ class DevelopPanel(QWidget):
         self._refresh_calibration_label()
 
     def _sync_match_camera_button(self, is_raw: bool) -> None:
-        """매칭 버튼의 활성 여부와 툴팁. 잠글 때는 이유를 툴팁으로 말합니다.
+        """Whether the match button is enabled, and its tooltip. When locking
+        it, the tooltip states the reason.
 
-        말없이 회색이면 고장으로 보입니다 — 자동 렌즈 보정에서 이미 겪은
-        일이라 여기서도 같은 규칙을 따릅니다.
+        Greyed out with nothing said, it reads as broken - already lived
+        through with the automatic lens correction, so the same rule is
+        followed here.
         """
         self.match_camera_button.setEnabled(is_raw)
         self.match_camera_button.setToolTip(
@@ -1615,16 +2119,16 @@ class DevelopPanel(QWidget):
         )
 
     def _refresh_calibration_label(self) -> None:
-        """**지금 사진의 기종** 보정만 보여 줍니다.
+        """Shows only the calibration for **the model of the current photo**.
 
-        예전에는 저장된 기종을 전부 나열했습니다. 소니로 찍은 사진을 보는데
-        'Canon EOS R6 Mark III: R 1.025 …'가 떠서, 이 사진에 그 값이 적용되는
-        것처럼 읽혔습니다. 실제로는 아무 상관이 없습니다.
+        It used to list every stored model. Looking at a photo shot on a Sony,
+        'Canon EOS R6 Mark III: R 1.025 …' would appear, and it read as if that
+        value applied to this photo. In fact it has nothing to do with it.
         """
         from ..core.develop import calibration as calib
 
-        # RAW가 아니면 보정값이 있어도 적용되지 않습니다. 값을 보여 주면
-        # 지금 걸려 있다고 읽힙니다.
+        # Without RAW the calibration is not applied even when one exists.
+        # Showing the value would read as it being in effect right now.
         if not getattr(self, "_is_raw", True):
             self.calibration_label.setText("")
             return
@@ -1654,10 +2158,10 @@ class DevelopPanel(QWidget):
         )
 
     def _manage_calibration(self) -> None:
-        """저장된 보정을 보여 주고, 원하면 지웁니다.
+        """Shows the stored calibrations and deletes one on request.
 
-        지우는 선택지가 있어야 합니다 — 라이브러리가 갱신되어 기종을 제대로
-        지원하게 되면 이 보정이 오히려 방해가 됩니다.
+        A delete option has to exist - once the library is updated and supports
+        the model properly, this calibration gets in the way instead.
         """
         from PySide6.QtWidgets import QInputDialog, QMessageBox
 
@@ -1709,7 +2213,7 @@ class DevelopPanel(QWidget):
             QMessageBox.warning(self, tr("Camera color calibration"), tr("Could not delete."))
 
     def _on_pick_toggled(self, key: str, checked: bool) -> None:
-        """스포이드 모드 전환. 한 번에 하나만 켭니다."""
+        """Switches the eyedropper mode. Only one is on at a time."""
         if checked:
             for other, button in self.defringe_pickers.items():
                 if other != key:
@@ -1717,7 +2221,7 @@ class DevelopPanel(QWidget):
         self.pick_mode_changed.emit(key if checked else "")
 
     def set_sampled_hue(self, key: str, hue: int) -> None:
-        """미리보기에서 찍은 색조를 반영합니다."""
+        """Applies the hue sampled from the preview."""
         if key == "purple":
             self._defringe_hues["purple"] = hue
         elif key == "green":
@@ -1736,7 +2240,7 @@ class DevelopPanel(QWidget):
         )
 
     def set_lens_info(self, summary: str, found: bool) -> None:
-        """루페가 조회한 렌즈 매칭 결과를 보여 줍니다."""
+        """Shows the lens matching result the loupe looked up."""
         self.lens_label.setText(
             f"{'✓' if found else '✗'} {summary}"
         )
@@ -1749,10 +2253,15 @@ class DevelopPanel(QWidget):
         self._add_row(section, "effects.grain_amount", tr("Grain"), 0, 100, gradient="mono")
         self._add_row(section, "effects.grain_size", tr("Grain size"), 1, 100, 25,
                       gradient="mono")
-        self._add_row(section, "effects.vignette_amount", tr("Vignetting"), -100, 100,
-                      gradient="exposure")
-        self._add_row(section, "effects.vignette_midpoint", tr("Vignette midpoint"), 0, 100, 50,
-                      gradient="mono")
+        self._add_row(section, "effects.vignette_amount", tr("Vignette"), -100, 100,
+                      gradient="exposure",
+                      tooltip=tr("Darkens the corners on purpose, to hold the eye "
+                                 "in the middle. To take out the darkening the "
+                                 "lens leaves, use Correct vignetting under "
+                                 "Optics."))
+        self._add_row(section, "effects.vignette_midpoint", tr("Vignette midpoint"),
+                      0, 100, 50, gradient="mono",
+                      tooltip=tr("How far out from the centre the darkening starts."))
 
     def _build_geometry(self) -> None:
         section = self._section("geometry", tr("Crop / straighten"), "⬚")
@@ -1845,8 +2354,9 @@ class DevelopPanel(QWidget):
     def _build_watermark(self) -> None:
         section = self._section("watermark", tr("Watermark"), "◇")
 
-        # 워터마크는 자체 프리셋을 씁니다. 색보정 프리셋과 섞으면 같은
-        # 워터마크를 여러 색감에 얹을 때마다 프리셋을 새로 만들어야 합니다.
+        # The watermark uses its own presets. Mixed into the colour adjustment
+        # presets, putting the same watermark on several looks would mean
+        # creating a new preset every time.
         self.watermark_preset_bar = PresetBar(
             watermark_presets(),
             collect=lambda: {"watermark": self.settings().to_dict()["watermark"]},
@@ -1892,7 +2402,7 @@ class DevelopPanel(QWidget):
         self.watermark_position = QComboBox()
         for position in WatermarkPosition:
             self.watermark_position.addItem(_position_label(position), position)
-        self.watermark_position.setCurrentIndex(3)  # 우하단
+        self.watermark_position.setCurrentIndex(3)  # bottom-right
         self.watermark_position.currentIndexChanged.connect(self._emit)
         position_row.addWidget(self.watermark_position, 1)
         section.add_layout(position_row)
@@ -1933,16 +2443,18 @@ class DevelopPanel(QWidget):
         )
         if not chosen.isValid():
             return
-        # 내부 표현은 OpenCV와 맞춰 BGR로 들고 있습니다
+        # The internal representation is BGR, to match OpenCV
         self._watermark_color = (chosen.blue(), chosen.green(), chosen.red())
         self._refresh_color_button()
         self._emit()
 
     def _apply_watermark_preset(self, data) -> None:
-        """워터마크 프리셋을 지금 보정 위에 얹습니다 — 워터마크만 바뀝니다.
+        """Lays a watermark preset over the current adjustments - only the
+        watermark changes.
 
-        프리셋 파일은 {"watermark": {...}} 한 조각만 담습니다. 통째로
-        DevelopSettings로 읽으면 나머지 항목이 전부 기본값으로 덮입니다.
+        The preset file holds just the one piece, {"watermark": {...}}. Read
+        wholesale as DevelopSettings, every other item is overwritten with the
+        defaults.
         """
         from dataclasses import replace as _replace
 
@@ -1996,7 +2508,7 @@ class DevelopPanel(QWidget):
         note.setStyleSheet(theme.hint_label("#7a9a7a"))
         section.add_widget(note)
 
-    # ------------------------------------------------------------ 상호작용
+    # --------------------------------------------------------- interaction
 
     def _browse_watermark(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -2011,10 +2523,12 @@ class DevelopPanel(QWidget):
         self._emit()
 
     def _on_hsl_channel(self) -> None:
-        """색조/채도/광도 탭 전환 — 슬라이더 값을 현재 채널로 다시 채웁니다.
+        """Hue/saturation/luminance tab switch - refills the slider values from
+        the current channel.
 
-        _loading을 무조건 False로 되돌리면 set_settings 도중에 호출됐을 때
-        남은 위젯 설정이 신호를 쏘게 됩니다. 이전 값을 복원해야 합니다.
+        Resetting _loading to False unconditionally makes the remaining widget
+        assignments fire signals when this is called in the middle of
+        set_settings. The previous value has to be restored.
         """
         previous = self._loading
         self._loading = True
@@ -2029,18 +2543,27 @@ class DevelopPanel(QWidget):
     def _hsl_channel_key(self) -> str:
         return ["hue", "saturation", "luminance"][self.hsl_channel.currentIndex()]
 
-    # ------------------------------------------------------------ 값 읽기/쓰기
+    # ----------------------------------------------- reading/writing values
 
     def _slider_values(self, section: str) -> dict:
-        """슬라이더 값을 해당 섹션의 필드 이름으로 모읍니다."""
+        """Collects the slider values under that section's field names."""
         values = {}
         for key, (target, field, cast, scale) in SLIDER_BINDINGS.items():
             if target == section:
                 values[field] = cast(self.rows[key].value() * scale)
         return values
 
-    def settings(self) -> DevelopSettings:
-        # 색온도는 손댔을 때만 절대값으로, 아니면 0(변화 없음)으로 저장합니다.
+    def settings(self, *, gated: bool = True) -> DevelopSettings:
+        """The panel's values.
+
+        With gated=False the section eyes are ignored and the widget values
+        come back as they stand. That view is what decides when an eye has
+        to wake up - asking the gated view would never work, because a
+        section that is off reports its defaults and so could never be seen
+        to change.
+        """
+        # Temperature is stored as an absolute value only once touched,
+        # otherwise as 0 (no change).
         temperature = (
             int(self.rows["basic.temperature"].value())
             if self._temperature_touched
@@ -2065,7 +2588,7 @@ class DevelopPanel(QWidget):
             noise_algorithm=self.noise_algorithm.currentData() or NoiseAlgorithm.NLMEANS,
         )
 
-        # 현재 보고 있는 채널 값을 상태에 먼저 반영합니다
+        # Push the currently shown channel's values into the state first
         self._sync_hsl_state()
         hsl = HSLSettings(bands=dict(self._hsl_state))
 
@@ -2123,9 +2646,12 @@ class DevelopPanel(QWidget):
             custom_text=self.strip_text.text(),
         )
 
-        # 눈 버튼이 꺼진 섹션은 기본값으로 바꿔 내보냅니다. 위젯 값은 그대로
-        # 두므로 다시 켜면 원래 값이 돌아옵니다.
+        # A section whose eye button is off goes out as the default values. The
+        # widget values are left alone, so turning it back on brings the
+        # original values back.
         def masked(key: str, value, default):
+            if not gated:
+                return value
             return value if self.sections[key].is_visible_section() else default
 
         return DevelopSettings(
@@ -2157,12 +2683,13 @@ class DevelopPanel(QWidget):
         self._loading = True
         grade, geometry = settings.color_grade, settings.geometry
 
-        # settings()와 같은 표를 반대 방향으로 사용합니다
+        # The same table settings() uses, run in the opposite direction
         for key, (section, field, _cast, scale) in SLIDER_BINDINGS.items():
             value = getattr(getattr(settings, section), field)
             self.rows[key].set_value(float(value) / scale, silent=True)
 
-        # 색온도: 0(변화 없음)이면 as-shot 위치로, 절대값이면 그 값으로.
+        # Temperature: 0 (no change) goes to the as-shot position, an absolute
+        # value goes to that value.
         kelvin = settings.basic.temperature
         self._temperature_touched = kelvin > 0
         self.rows["basic.temperature"].set_value(
@@ -2180,16 +2707,18 @@ class DevelopPanel(QWidget):
         if algorithm_index >= 0:
             self.noise_algorithm.setCurrentIndex(algorithm_index)
 
-        # RAW가 아니면 되살리지 않습니다 — optics_auto와 같은 이유입니다.
+        # Not restored when the source is not RAW - the same reason as
+        # optics_auto.
         self.highlight_recovery.setChecked(
             settings.basic.highlight_recovery and self._is_raw)
 
         optics = settings.optics
-        # RAW가 아니면 자동 렌즈 보정은 되살리지 않습니다. 프리셋에 켜진 채로
-        # 저장돼 있으면 잠긴 체크박스가 다시 켜졌고, 잠겨 있어도 isChecked()는
-        # True라 settings()가 auto_enabled=True를 돌려줬습니다 — 끌 수도 없는
-        # 상태로 이중 보정이 걸립니다. (core에서도 막지만 화면 표시도 맞아야
-        # 사용자가 무엇이 걸렸는지 알 수 있습니다.)
+        # Automatic lens correction is not restored when the source is not RAW.
+        # If a preset had been saved with it on, the locked checkbox came back
+        # on, and even locked isChecked() is True, so settings() handed back
+        # auto_enabled=True - a double correction applied in a state you cannot
+        # even turn off. (core blocks it too, but the screen has to agree or
+        # the user cannot tell what is applied.)
         self.optics_auto.setChecked(optics.auto_enabled and self._is_raw)
         self.optics_auto_distortion.setChecked(optics.auto_distortion)
         self.optics_auto_vignetting.setChecked(optics.auto_vignetting)
@@ -2251,21 +2780,85 @@ class DevelopPanel(QWidget):
         self._masks = list(settings.masks)
         self._rebuild_mask_list(select=0 if self._masks else None)
 
+        # The eyes come from the values themselves. A photo with nothing on
+        # it opens with every section switched off, which is what makes the
+        # "(off)" marks mean anything; a photo that has been edited opens
+        # with exactly the sections that hold values switched on.
+        #
+        # Switching them all off regardless would be silently destructive -
+        # an off section reports its defaults, so opening an edited photo
+        # would throw the edit away.
+        for key, section in self.sections.items():
+            section.set_section_visible(
+                self._section_has_values(key, settings, self._masks))
+
         self._loading = False
+        self._raw_state = self.settings(gated=False)
         self._update_section_markers()
 
-    # ------------------------------------------------------------ 알림
+    # ------------------------------------------------------- notification
+
+    _SECTION_FIELDS = {
+        "basic": "basic", "curve": "curve", "detail": "detail",
+        "hsl": "hsl", "color_grade": "color_grade", "effects": "effects",
+        "optics": "optics", "geometry": "geometry",
+        "watermark": "watermark", "metadata": "metadata",
+        "exif_strip": "exif_strip",
+    }
+
+    @staticmethod
+    def _section_has_values(key: str, settings: DevelopSettings, masks) -> bool:
+        """Whether this section holds anything other than its defaults."""
+        if key == "masks":
+            return any(not mask.is_neutral() for mask in masks)
+        value = getattr(settings, DevelopPanel._SECTION_FIELDS[key])
+        if key == "metadata":
+            return bool(value.enabled)
+        if key in ("exif_strip", "watermark"):
+            return bool(value.is_active())
+        if hasattr(value, "is_neutral"):
+            return not value.is_neutral()
+        return value != type(value)()
+
+    def _wake_edited_sections(self) -> None:
+        """Turns a section's eye on as soon as one of its values moves.
+
+        A section that is off hands back its defaults, so an edit made
+        inside it would be dropped on the way out. Waking it is what makes
+        "start off, switch on when you touch a dial" safe.
+        """
+        raw = self.settings(gated=False)
+        previous, self._raw_state = self._raw_state, raw
+        if previous is None:
+            return
+        for key in self.sections:
+            section = self.sections[key]
+            if section.is_visible_section():
+                continue
+            field = self._SECTION_FIELDS.get(key)
+            moved = (raw.masks != previous.masks if key == "masks"
+                     else getattr(raw, field) != getattr(previous, field))
+            if moved:
+                section.set_section_visible(True)
 
     def _emit(self, *_) -> None:
-        if self._loading:
+        if self._loading or self._waking:
             return
+        self._waking = True
+        try:
+            self._wake_edited_sections()
+        finally:
+            self._waking = False
         self._update_section_markers()
         self.preset_bar.mark_modified()
         self.settings_changed.emit()
 
     def _update_section_markers(self) -> None:
-        """손댄 섹션에 표시를 남깁니다. 접혀 있어도 뭘 만졌는지 보이게."""
-        settings = self.settings()
+        """Leaves a marker on the sections that were touched, so what was
+        changed is visible even while they are collapsed."""
+        # The ungated view, so a section that is switched off but holds
+        # values still shows its dot - "* (off)" is a real state.
+        settings = self.settings(gated=False)
         self.sections["basic"].mark_active(settings.basic != BasicSettings())
         self.sections["curve"].mark_active(not settings.curve.is_neutral())
         self.sections["detail"].mark_active(not settings.detail.is_neutral())
@@ -2279,7 +2872,8 @@ class DevelopPanel(QWidget):
         self.sections["watermark"].mark_active(settings.watermark.is_active())
         self.sections["metadata"].mark_active(settings.metadata.enabled)
 
-        # 손댄 섹션은 탭에도 표시합니다. 접혀 있어도 어디를 만졌는지 보입니다.
+        # Touched sections are marked on the tabs too, so where you changed
+        # something is visible even while they are collapsed.
         for key, tab in getattr(self, "section_tabs", {}).items():
             section = self.sections.get(key)
             active = bool(section and getattr(section, "_active", False))

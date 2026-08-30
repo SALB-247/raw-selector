@@ -1,7 +1,7 @@
-"""내보내기 옵션 대화상자.
+"""Export options dialog.
 
-같은 셀렉트 결과라도 목적에 따라 필요한 파일이 다르다 — 인쇄용 풀사이즈,
-SNS용 2048px, 클라이언트 확인용 저용량.
+The same culling result needs different files depending on the purpose -
+full size for print, 2048px for social, low weight for a client check.
 """
 
 from __future__ import annotations
@@ -33,51 +33,27 @@ from ..core.export_options import (
 from . import theme
 from .i18n import tr
 
-FORMAT_LABELS = {
-    ExportFormat.JPEG: "JPEG (권장)",
-    ExportFormat.PNG: "PNG (무손실, 용량 큼)",
-    ExportFormat.WEBP: "WebP",
-    ExportFormat.TIFF: "TIFF (무손실, 인쇄·재보정용)",
-}
-# HEIF/AVIF는 목록에 없습니다. 이 OpenCV 빌드에 인코더가 없어서
-# 저장 자체가 실패합니다(실측). RAW 옆의 .HIF 원본을 그대로 옮기는 것은
-# '함께 저장된 JPG/HIF/XMP도 내보내기'로 됩니다.
+# HEIF/AVIF are not in the list. This OpenCV build has no encoder for them,
+# so saving fails outright (measured). Moving the .HIF original that sits
+# beside the RAW as-is is handled by 'also export bundled JPG/HIF/XMP'.
 
-RESIZE_LABELS = {
-    ResizeMode.NONE: "원본 크기",
-    ResizeMode.LONG_EDGE: "긴 변 기준",
-    ResizeMode.PERCENT: "비율",
-}
+LONG_EDGE_PRESETS = (1080, 1920, 2048, 2560, 3000, 3840, 4000, 6000)
+"""Long-edge sizes that come up often.
 
-LONG_EDGE_PRESETS = (
-    (1080, "1080px · SNS 정사각/세로"),
-    (1920, "1920px · FHD"),
-    (2048, "2048px · 웹 게시용"),
-    (2560, "2560px · QHD"),
-    (3000, "3000px"),
-    (3840, "3840px · 4K/UHD"),
-    (4000, "4000px"),
-    (6000, "6000px · 인화 대비"),
-)
-"""자주 쓰는 긴 변 크기.
-
-매번 숫자를 손으로 치게 하면 2048을 2408로 잘못 넣는 일이 생깁니다.
-직접 입력도 그대로 됩니다 — 프리셋은 거들 뿐입니다.
+Making you type the number by hand every time leads to entering 2048 as
+2408. Typing a value directly still works - the presets only help along.
 """
 
-NAME_TOKENS = (
-    ("{name}", "원본 파일 이름"),
-    ("{index}", "일련번호 (0001…)"),
-    ("{grade}", "등급 (keep/review/reject)"),
-    ("{date}", "촬영 날짜"),
-    ("{time}", "촬영 시각"),
-    ("{score}", "점수"),
-)
+NAME_TOKENS = ("{name}", "{index}", "{grade}", "{date}", "{time}",
+               "{score}")
+"""Tokens the file-name template accepts. What each one means is shown by
+_name_token_description(), which is translated - the descriptions used to
+sit in this tuple and went stale there, unread."""
 
 
-# 콤보·토큰 라벨은 화면에 보이는 텍스트라 언어에 따라 달라집니다. 모듈 로드
-# 시점에 tr()로 굳히면 언어 전환이 안 되므로, 값을 함수 안에 둡니다
-# (gui/ordering_text.py와 같은 방식).
+# The combo and token labels are on-screen text, so they vary by language.
+# Freezing them with tr() at module load time stops language switching, so
+# the values live inside functions (the same way as gui/ordering_text.py).
 
 
 def _format_label(fmt: ExportFormat) -> str:
@@ -120,7 +96,7 @@ def _name_token_description(token: str) -> str:
 
 
 class ExportDialog(QDialog):
-    """내보내기 직전에 옵션을 정합니다."""
+    """Settles the options right before exporting."""
 
     def __init__(
         self,
@@ -136,9 +112,11 @@ class ExportDialog(QDialog):
         self.setWindowTitle(tr("Export options"))
         self.setMinimumWidth(460)
         self.options = options or ExportOptions()
-        # (위치 정보가 있는 컷, 전체). 장소별 폴더가 의미가 있는지 알려 줍니다.
+        # (shots that have location info, total). Tells you whether
+        # per-location folders mean anything.
         self._located, self._total = located
-        # 이 배치의 RAW 장수. None이면 모른다는 뜻이라 예전처럼 다 켭니다.
+        # How many RAW files are in this batch. None means we do not know,
+        # so everything stays on as it did before.
         self._raw_count = raw_count
         self.setStyleSheet(theme.dialog_style() + theme.GROUP_BOX)
 
@@ -175,13 +153,14 @@ class ExportDialog(QDialog):
         self._load()
         self._refresh_summary()
 
-    # ------------------------------------------------------------ 구성
+    # ------------------------------------------------------------ Build
 
     def _build_files_group(self) -> QGroupBox:
         box = QGroupBox(tr("Files"))
         form = QFormLayout(box)
 
-        # 어떤 등급을 내보낼지. 넘길 때는 keep만, 백업은 전부 — 목적마다 다릅니다.
+        # Which grades to export. keep only when handing over, all of them
+        # for a backup - it differs with the purpose.
         grade_row = QHBoxLayout()
         grade_row.setSpacing(10)
         self.grade_checks: dict[str, QCheckBox] = {}
@@ -210,7 +189,8 @@ class ExportDialog(QDialog):
         self.include_companions.toggled.connect(self._refresh_summary)
         form.addRow(self.include_companions)
 
-        # RAW가 없어서 위 두 항목이 잠겼을 때 이유를 적는 자리입니다.
+        # The place where the reason goes when the two items above are
+        # locked because there is no RAW.
         self.raw_note = QLabel()
         self.raw_note.setStyleSheet(theme.hint_label())
         self.raw_note.setWordWrap(True)
@@ -254,9 +234,9 @@ class ExportDialog(QDialog):
         self.quality.setSuffix(" %")
         form.addRow(tr("Quality"), self.quality)
 
-        # 비트 심도 — PNG·TIFF만 16을 받습니다. 형식을 바꾸면 곧바로
-        # 따라갑니다(잠긴 채로 16이 남아 있으면 요청한 것과 다른 파일이
-        # 나갑니다).
+        # Bit depth - only PNG and TIFF take 16. It follows along the moment
+        # the format changes (if 16 is left behind while locked, a file
+        # different from the one asked for goes out).
         self.bit_depth = QComboBox()
         self.bit_depth.addItem(tr("8-bit"), 8)
         self.bit_depth.addItem(tr("16-bit"), 16)
@@ -279,10 +259,11 @@ class ExportDialog(QDialog):
         self.resize_mode.currentIndexChanged.connect(self._on_resize_mode)
         resize_row.addWidget(self.resize_mode, 1)
 
-        # 자주 쓰는 크기는 골라 쓰고, 그 밖의 값은 옆 칸에 직접 넣습니다.
+        # Sizes that come up often are picked from the list, any other value
+        # is typed straight into the box beside it.
         self.long_edge_preset = QComboBox()
         self.long_edge_preset.addItem(tr("Custom"), 0)
-        for pixels, _ in LONG_EDGE_PRESETS:
+        for pixels in LONG_EDGE_PRESETS:
             self.long_edge_preset.addItem(_long_edge_preset_label(pixels), pixels)
         self.long_edge_preset.currentIndexChanged.connect(self._on_long_edge_preset)
         resize_row.addWidget(self.long_edge_preset, 1)
@@ -312,7 +293,7 @@ class ExportDialog(QDialog):
             self.resize_long_edge,
             self.resize_percent,
         )
-        # 요약 갱신은 아직 못 합니다 — 파일 이름 위젯이 뒤에 만들어집니다
+        # Cannot refresh the summary yet - the filename widgets come later
         self._sync_image_controls()
         return box
 
@@ -324,12 +305,13 @@ class ExportDialog(QDialog):
         self.pattern.textChanged.connect(self._refresh_summary)
         form.addRow(tr("Pattern"), self.pattern)
 
-        # 예전에는 쓸 수 있는 항목을 글자로만 적어 두었습니다. 중괄호까지
-        # 정확히 옮겨 적어야 해서 오타가 나기 쉬웠습니다. 눌러서 넣습니다.
+        # It used to write out the available items as text only. You had to
+        # copy them exactly, braces and all, so typos were easy. You press
+        # to insert them.
         tokens = QHBoxLayout()
         tokens.setSpacing(4)
         self.token_buttons = []
-        for token, _ in NAME_TOKENS:
+        for token in NAME_TOKENS:
             button = QPushButton(token)
             button.setToolTip(
                 tr("{description} — press to insert into the pattern").format(
@@ -349,22 +331,23 @@ class ExportDialog(QDialog):
         return box
 
     def _insert_token(self, token: str) -> None:
-        """커서 자리에 항목을 넣습니다. 넣고 나서도 계속 칠 수 있어야 합니다."""
+        """Inserts the item at the cursor. Typing has to carry on after it."""
         self.pattern.setFocus()
         self.pattern.insert(token)
         self._refresh_summary()
 
-    # ------------------------------------------------------------ 동작
+    # ------------------------------------------------------------ Behaviour
 
     def _on_apply_develop(self) -> None:
         self._sync_image_controls()
         self._refresh_summary()
 
     def _sync_image_controls(self) -> None:
-        """보정본을 안 만들면 형식·품질·크기는 쓰이는 데가 없습니다.
+        """With no developed images rendered, format/quality/size go unused.
 
-        그대로 활성 상태로 두면 여기서 고른 JPEG 품질이 내보낼 RAW에도
-        적용되는 줄 알게 됩니다. 실제로는 원본이 그대로 복사될 뿐입니다.
+        Leaving them enabled makes you think the JPEG quality picked here
+        also applies to the RAW being exported. In fact the original is
+        only copied as-is.
         """
         on = self.apply_develop.isChecked()
         for widget in self._image_widgets:
@@ -373,15 +356,17 @@ class ExportDialog(QDialog):
             label = self._image_form.labelForField(field)
             if label is not None:
                 label.setEnabled(on)
-        # 심도·색공간은 형식에 한 번 더 걸리므로 위 일괄 활성화 다음에 옵니다.
+        # Depth and colour space hang off the format once more, so they come
+        # after the blanket enable above.
         self._sync_bit_depth()
         self._sync_color_space()
 
     def _sync_color_space(self) -> None:
-        """ICC를 넣을 수 없는 형식이면 잠그고 sRGB로 되돌립니다.
+        """Locks it and falls back to sRGB for formats that cannot hold ICC.
 
-        변환만 하고 태그를 못 붙이면 뷰어가 sRGB로 읽어 **색이 틀어진
-        파일**이 나갑니다. 그럴 바에는 변환을 안 하는 것이 맞습니다.
+        Converting without being able to attach the tag means the viewer
+        reads it as sRGB and **a file with the colours off** goes out.
+        Rather than that, it is right not to convert at all.
         """
         fmt = ExportFormat(self.image_format.currentData())
         self.color_space.setEnabled(
@@ -401,11 +386,12 @@ class ExportDialog(QDialog):
                 "viewers without colour management show it washed out."))
 
     def _sync_bit_depth(self) -> None:
-        """형식이 16비트를 못 받으면 잠그고 8비트로 되돌립니다.
+        """Locks it and falls back to 8-bit when the format cannot take 16.
 
-        잠그기만 하고 값을 두면 잠긴 채로 16이 남아 요청과 다른 파일이
-        나갑니다 — cv2는 경고만 남기고 8비트로 떨굽니다(조용한 실패).
-        잠글 때는 이유를 툴팁으로 말합니다.
+        Locking it and leaving the value alone leaves 16 behind while locked
+        and a file different from the one asked for goes out - cv2 only
+        leaves a warning and drops to 8-bit (a silent failure). When it
+        locks, it says why in the tooltip.
         """
         fmt = ExportFormat(self.image_format.currentData())
         allowed = fmt.supports_16bit and self.apply_develop.isChecked()
@@ -432,17 +418,18 @@ class ExportDialog(QDialog):
         self._refresh_summary()
 
     def _on_long_edge_preset(self) -> None:
-        """프리셋을 고르면 숫자 칸에 그대로 넣습니다."""
+        """Picking a preset drops that number straight into the box."""
         pixels = self.long_edge_preset.currentData()
         if pixels:
             self.resize_long_edge.setValue(int(pixels))
         self._refresh_summary()
 
     def _on_long_edge_value(self) -> None:
-        """직접 친 값이 프리셋과 다르면 '직접 입력'으로 되돌립니다.
+        """Falls back to 'Custom' when the typed value differs from a preset.
 
-        3000 프리셋을 고른 뒤 2999로 고쳤는데 콤보가 계속 3000을 가리키면
-        어느 쪽이 실제 값인지 알 수 없습니다.
+        Pick the 3000 preset, change it to 2999, and if the combo still
+        points at 3000 there is no telling which of the two is the real
+        value.
         """
         index = self.long_edge_preset.findData(self.resize_long_edge.value())
         self.long_edge_preset.blockSignals(True)
@@ -451,13 +438,14 @@ class ExportDialog(QDialog):
         self._refresh_summary()
 
     def _sync_subfolder(self) -> None:
-        """등급을 하나만 내보내면 등급별로 나눌 것이 없습니다.
+        """With only one grade exported there is nothing to split by grade.
 
-        _keep 폴더 하나만 만들어 놓고 그 안에 전부 넣는 꼴이라, 폴더가 한 겹
-        늘 뿐 아무것도 나뉘지 않습니다.
+        It amounts to making a single _keep folder and putting everything in
+        it - one more layer of folder and nothing actually split.
         """
         chosen = [v for v, c in self.grade_checks.items() if c.isChecked()]
-        # 아무것도 안 고르면 전체(3등급)가 나갑니다 — 그때는 나눌 이유가 있습니다
+        # With nothing selected everything (all 3 grades) goes out - and then
+        # there is a reason to split
         single = len(chosen) == 1
         self.subfolder.setEnabled(not single)
         if single:
@@ -470,14 +458,16 @@ class ExportDialog(QDialog):
                 "to split them"))
 
     def _sync_raw_options(self) -> None:
-        """RAW가 한 장도 없으면 RAW 전용 옵션을 잠급니다.
+        """Locks the RAW-only options when there is not a single RAW.
 
-        JPEG·HIF만 있는 배치에서는 '원본 RAW도 함께'와 '짝 파일도'가 할 일이
-        없습니다. 켤 수 있게 두면 켜 놓고 결과가 그대로인 것을 보며 이유를
-        찾게 됩니다 — 조용히 무시하는 대신 왜 못 쓰는지 적어 둡니다.
+        In a batch of JPEG/HIF only, 'also export the original RAW' and 'also
+        the companion files' have nothing to do. Leaving them switchable
+        means you turn them on, see the result unchanged, and go hunting for
+        the reason - rather than ignoring them silently, we write down why
+        they cannot be used.
 
-        섞여 있으면(RAW + JPEG) 잠그지 않습니다. RAW 쪽에는 여전히 필요하고,
-        JPEG 쪽은 export가 파일 단위로 알아서 건너뜁니다.
+        When they are mixed (RAW + JPEG) it does not lock. The RAW side still
+        needs them, and on the JPEG side export skips per file on its own.
         """
         if self._raw_count is None or self._raw_count > 0:
             self.raw_note.setVisible(False)
@@ -495,11 +485,12 @@ class ExportDialog(QDialog):
         self.raw_note.setVisible(True)
 
     def _sync_place_option(self) -> None:
-        """위치 정보가 있는 컷이 없으면 장소로 나눌 것이 없습니다.
+        """With no shots carrying location, there is nothing to split by place.
 
-        켤 수는 있게 두되 몇 장에 위치가 있는지 알려 줍니다. 바디에 GPS가
-        없으면 아예 안 들어가는데(실측: A6700 300장 중 0장), 그것도 모르고
-        켜면 `_위치없음` 폴더 하나만 더 생깁니다.
+        It stays switchable, but says how many shots have a location. With no
+        GPS in the body nothing is recorded at all (measured: 0 of 300 shots
+        on the A6700), and turning it on without knowing that only adds one
+        more no-location folder (core/export.py NO_PLACE_FOLDER).
         """
         if self._located:
             self.subfolder_place.setToolTip(
@@ -517,7 +508,7 @@ class ExportDialog(QDialog):
             ))
 
     def _refresh_summary(self) -> None:
-        """무엇이 나갈지 한 줄로 알려 줍니다. 옵션 조합을 헷갈리기 쉽습니다."""
+        """Says in one line what goes out. Option combos confuse easily."""
         self._sync_subfolder()
         self._sync_place_option()
         self._sync_raw_options()
@@ -537,8 +528,9 @@ class ExportDialog(QDialog):
                 parts.append(
                     tr("{pct}% size").format(pct=self.resize_percent.value()))
         if self._raw_count == 0:
-            # RAW가 없는 배치에서 '원본 RAW 제외'는 틀린 말은 아니지만
-            # 무언가를 빼고 있다는 뜻으로 읽힙니다. 뺄 것이 없습니다.
+            # In a batch with no RAW, 'Original RAW excluded' is not wrong,
+            # but it reads as though something is being left out. There is
+            # nothing to leave out.
             pass
         elif self.copy_raw.isChecked() or self.move_files.isChecked():
             parts.append(tr("Original RAW included"))
@@ -591,9 +583,9 @@ class ExportDialog(QDialog):
             self.resize_mode.setCurrentIndex(index)
         self.resize_long_edge.setValue(options.resize_long_edge)
         self.resize_percent.setValue(options.resize_percent)
-        self._on_long_edge_value()   # 저장값이 프리셋에 있으면 그걸 가리킵니다
+        self._on_long_edge_value()   # points at the preset if the value is one
         self._on_resize_mode()
-        # setChecked는 값이 그대로면 toggled를 안 쏘므로 직접 맞춥니다
+        # setChecked fires no toggled if the value is unchanged, so sync here
         self._sync_image_controls()
 
         self.pattern.setText(options.filename_pattern)

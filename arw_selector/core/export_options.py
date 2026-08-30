@@ -1,11 +1,13 @@
-"""내보내기 옵션.
+"""Export options.
 
-같은 셀렉트 결과라도 목적에 따라 필요한 파일이 다르다 — 인쇄용 풀사이즈,
-SNS용 긴 변 2048px, 클라이언트 확인용 워터마크 저용량.
+Even from the same culling result, the files you need differ with the
+purpose - full size for print, 2048px on the long edge for social, a small
+watermarked file for a client to check.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
@@ -14,17 +16,19 @@ from pathlib import Path
 
 from .types import Grade, ImageRecord
 
+log = logging.getLogger(__name__)
+
 ALL_GRADES: tuple[str, ...] = tuple(grade.value for grade in Grade)
 
 
 class ExportFormat(str, Enum):
-    """현상 결과를 저장할 형식.
+    """The format to save the develop result in.
 
-    HEIF/AVIF는 **넣을 수 없습니다.** 이 OpenCV 빌드(5.0.0 pip 휠)에
-    인코더가 들어 있지 않아 `cv2.imwrite('x.heic', …)`가 예외를 던집니다
-    (실측). 넣으려면 pillow-heif 같은 의존성을 새로 들여야 합니다.
-    RAW 옆의 .HIF 원본을 **그대로 복사**하는 것은 include_companions로
-    이미 됩니다 — 그쪽은 인코더가 필요 없습니다.
+    HEIF/AVIF **cannot go in.** This OpenCV build (the 5.0.0 pip wheel)
+    carries no encoder for them, so `cv2.imwrite('x.heic', ...)` throws
+    (measured). Adding them would mean pulling in a new dependency such as
+    pillow-heif. **Copying as it is** the .HIF original next to the RAW is
+    already possible with include_companions - that path needs no encoder.
     """
 
     JPEG = "jpeg"
@@ -39,36 +43,43 @@ class ExportFormat(str, Enum):
 
     @property
     def supports_icc(self) -> bool:
-        """색 프로파일을 **화소를 건드리지 않고** 넣을 수 있는 형식인가.
+        """Whether the format can carry a colour profile **without touching
+        the pixels**.
 
-        WebP만 빠집니다 — ICC를 넣으려면 RIFF를 확장 형식(VP8X)으로 바꿔야
-        하는데, 그 손이 이 형식의 쓰임에 비해 큽니다. 다시 저장하는 방법도
-        있지만 재압축이라 화질이 떨어집니다(실측: JPEG을 PIL로 다시 저장하면
-        14,880 → 6,895바이트, 화소 최대 14레벨 차이).
+        Only WebP falls out - putting ICC in would mean turning the RIFF
+        into the extended form (VP8X), and that is a lot of work for what
+        this format is used for. Saving it again is an option too, but that
+        is a re-compression so the quality drops (measured: re-saving a
+        JPEG with PIL gave 14,880 -> 6,895 bytes, up to 14 levels of pixel
+        difference).
         """
         return self in (ExportFormat.JPEG, ExportFormat.PNG, ExportFormat.TIFF)
 
     @property
     def supports_16bit(self) -> bool:
-        """16비트로 저장할 수 있는 형식인가.
+        """Whether the format can be saved in 16 bits.
 
-        **JPEG·WebP에 uint16을 주면 조용히 8비트로 떨어집니다** — cv2가
-        경고만 남기고 진행합니다(실측: "Unsupported depth ... fallbacked
-        to CV_8U"). 화면에서 미리 잠가야 "16비트로 저장했는데 8비트가
-        나온다"가 되지 않습니다.
+        **Give uint16 to JPEG or WebP and it quietly drops to 8 bits** -
+        cv2 leaves a warning and carries on (measured: "Unsupported depth
+        ... fallbacked to CV_8U"). It has to be locked out on screen in
+        advance so you never get "I saved it as 16-bit and 8-bit came
+        out".
         """
         return self in (ExportFormat.PNG, ExportFormat.TIFF)
 
 
 class ExportColorSpace(str, Enum):
-    """내보낼 파일의 색공간.
+    """The colour space of the exported file.
 
-    **태그만 붙이는 것이 아니라 화소도 변환합니다** — 하나만 하면 뷰어가
-    다른 공간의 숫자로 읽어 색이 틀어집니다(core/develop/icc.py).
+    **It does not just attach the tag, it converts the pixels too** - do
+    only one and the viewer reads the numbers as belonging to a different
+    space and the colours go wrong (core/develop/icc.py).
 
-    sRGB는 화면·SNS 전달의 기본값입니다. Adobe RGB는 초록·시안 쪽이 넓어
-    인쇄 워크플로에서 쓰입니다 — 대신 색 관리를 하지 않는 뷰어에 올리면
-    채도가 빠져 보이므로, 그쪽으로 보낼 파일이 아니면 sRGB가 안전합니다.
+    sRGB is the default for the screen and for handing files over on
+    social. Adobe RGB is wider on the green and cyan side and is used in
+    print workflows - in exchange, loaded into a viewer that does no colour
+    management it looks desaturated, so unless the file is going there sRGB
+    is the safe choice.
     """
 
     SRGB = "srgb"
@@ -88,48 +99,55 @@ class ResizeMode(str, Enum):
 
 @dataclass
 class ExportOptions:
-    """내보내기 동작 전체."""
+    """The whole of the export behaviour."""
 
     move: bool = False
 
     include_companions: bool = False
-    """RAW 옆에 함께 저장된 JPG/HIF/XMP도 같이 내보낼지.
+    """Whether to export the JPG/HIF/XMP saved next to the RAW as well.
 
-    기본을 끕니다. RAW+HEIF로 찍으면 컷마다 파일이 두 배로 늘어나는데,
-    셀렉 결과로는 RAW만 필요한 경우가 대부분입니다. 필요한 사람이 켜는 편이
-    모르는 사이에 용량이 두 배가 되는 것보다 낫습니다.
+    Off by default. Shooting RAW+HEIF doubles the number of files per
+    frame, and for a culling result the RAW alone is usually all that is
+    needed. Better that whoever needs it turns it on than that the size
+    doubles without them knowing.
     """
 
     apply_develop: bool = True
 
     grades: tuple[str, ...] = ALL_GRADES
-    """내보낼 등급. ("keep",)이면 keep만 나갑니다.
+    """The grades to export. ("keep",) sends out keep only.
 
-    셀렉 결과를 넘길 때는 보통 keep만 필요하지만, 백업은 전부 필요합니다.
-    이동 모드와 조합하면 "reject만 다른 폴더로 치우기"도 됩니다.
+    Handing over a culling result usually needs keep alone, but a backup
+    needs all of it. Combined with move mode it also does "shift only the
+    rejects into another folder".
     """
 
     copy_raw: bool = True
-    """원본 RAW를 함께 내보낼지. 끄면 현상된 이미지만 나갑니다."""
+    """Whether to export the original RAW too. Off, only the developed
+    image goes out."""
 
     image_format: ExportFormat = ExportFormat.JPEG
     quality: int = 95
 
     bit_depth: int = 8
-    """저장 비트 심도. PNG·TIFF만 16을 받습니다(supports_16bit 참고).
+    """Bit depth to save at. Only PNG and TIFF take 16 (see
+    supports_16bit).
 
-    파이프라인은 원래 float32로 흐르므로 16을 골라도 계산이 달라지지 않고,
-    마지막 양자화만 바뀝니다. 실측으로 계조가 실제 보존되는 것을 확인했습니다
-    — 디모자이크 직후 채널당 고유 레벨 544만, 각 보정 단계 통과 후에도
-    477만~604만(8비트 상한은 256).
+    The pipeline flows in float32 to begin with, so choosing 16 does not
+    change the computation, only the final quantisation. Measured, the
+    tonal steps really are preserved - 5.44 million unique levels per
+    channel right after demosaic, and 4.77~6.04 million even after passing
+    each adjustment stage (the 8-bit ceiling is 256).
     """
 
     color_space: ExportColorSpace = ExportColorSpace.SRGB
-    """내보낼 파일의 색공간. 화소 변환 + ICC 임베드가 함께 갑니다.
+    """Colour space of the exported file. The pixel conversion and the ICC
+    embed go together.
 
-    WebP는 ICC를 넣을 수 없어(supports_icc) sRGB로 되돌립니다 — 변환만
-    하고 태그를 못 붙이면 뷰어가 sRGB로 읽어 **색이 틀어진 파일**이
-    나갑니다. 그럴 바에는 변환을 안 하는 것이 맞습니다.
+    WebP cannot carry ICC (supports_icc), so it is turned back to sRGB -
+    converting and then failing to attach the tag means the viewer reads it
+    as sRGB and **a file with the wrong colours** goes out. Better not to
+    convert at all than that.
     """
 
     resize_mode: ResizeMode = ResizeMode.NONE
@@ -137,25 +155,30 @@ class ExportOptions:
     resize_percent: int = 50
 
     filename_pattern: str = "{name}"
-    """파일명 규칙. {name} {index} {grade} {date} {score} 를 쓸 수 있습니다."""
+    """The filename rule. {name} {index} {grade} {date} {score} can be
+    used."""
 
     subfolder_by_grade: bool = True
-    """끄면 등급 폴더를 만들지 않고 한곳에 모읍니다."""
+    """Off, no grade folders are made and everything collects in one
+    place."""
 
     subfolder_by_place: bool = False
-    """GPS 위치가 같은 컷끼리 장소 폴더로 나눌지 (core/places.py).
+    """Whether to split frames with the same GPS location into place
+    folders (core/places.py).
 
-    기본을 끕니다. 바디에 GPS가 없으면 좌표가 아예 안 들어가서, 켜 두면
-    전부 `_위치없음` 한 폴더로 들어가 폴더만 하나 더 생깁니다
-    (실측: A6700 300장 중 GPS 있는 파일 0장). 위치가 있는 배치에서만
-    의미가 있습니다.
+    Off by default. If the body has no GPS the coordinates never go in at
+    all, so left on everything lands in the single "no location" folder
+    (export.NO_PLACE_FOLDER) and all it does is add one more folder
+    (measured: 0 of 300 A6700 frames had GPS). It only means something on a
+    batch that has locations.
 
-    장소가 바깥, 등급이 안쪽입니다 — 반대로 하면 같은 장소의 keep과 review가
-    멀리 떨어져 "이 장소 결과"를 한눈에 볼 수 없습니다.
+    Place is on the outside, grade on the inside - the other way round, the
+    keep and review of the same place sit far apart and you cannot see "the
+    result for this place" at a glance.
     """
 
     def __post_init__(self) -> None:
-        # 문자열로 들어와도 enum으로 맞춘다 (위젯 데이터 왕복 대비)
+        # coerce to the enum even if a string came in (widget round-trips)
         if not isinstance(self.image_format, ExportFormat):
             try:
                 self.image_format = ExportFormat(self.image_format)
@@ -173,17 +196,19 @@ class ExportOptions:
             except ValueError:
                 self.color_space = ExportColorSpace.SRGB
 
-        # 형식이 못 받는 심도·색공간은 여기서 되돌립니다. 대기열에 담아 둔 뒤
-        # 형식만 JPEG으로 바꾸는 경로가 있어, 화면 잠금만으로는 새지 않는다고
-        # 보장할 수 없습니다.
+        # Depths and colour spaces the format cannot take are reverted
+        # here. There is a path that queues something up and then changes
+        # only the format to JPEG, so the screen lock alone cannot
+        # guarantee nothing leaks through.
         self.bit_depth = 16 if self.bit_depth == 16 else 8
         if self.bit_depth == 16 and not self.image_format.supports_16bit:
             self.bit_depth = 8
         if not self.image_format.supports_icc:
             self.color_space = ExportColorSpace.SRGB
 
-        # 등급 목록은 문자열 하나로 들어오거나 모르는 값이 섞일 수 있습니다.
-        # 전부 걸러내 비면 '전체'로 되돌립니다 — 아무것도 안 나가는 것보다 낫습니다.
+        # The grade list may arrive as a single string or have unknown
+        # values mixed in. If filtering leaves it empty it reverts to
+        # 'all' - better than nothing going out at all.
         selected = self.grades
         if isinstance(selected, str):
             selected = (selected,)
@@ -191,11 +216,11 @@ class ExportOptions:
         self.grades = cleaned or ALL_GRADES
 
     def wants_grade(self, grade) -> bool:
-        """이 등급을 내보낼지."""
+        """Whether to export this grade."""
         return getattr(grade, "value", grade) in self.grades
 
     def target_long_edge(self, source_long_edge: int | None = None) -> int | None:
-        """현상 시 적용할 긴 변 픽셀. None이면 원본 크기."""
+        """Long-edge pixels to apply when developing. None is full size."""
         if self.resize_mode is ResizeMode.LONG_EDGE:
             return max(64, self.resize_long_edge)
         if self.resize_mode is ResizeMode.PERCENT and source_long_edge:
@@ -218,24 +243,56 @@ class ExportOptions:
 _INVALID_NAME = re.compile(r'[<>:"/\\|?*]')
 
 
+def _capture_time(record: ImageRecord) -> datetime:
+    """When the shot was taken, for {date} and {time}.
+
+    The analysis metadata is the fast path, but it is not always there -
+    the queue can hold shots that were never analysed in this session, and
+    a record restored from an old cache can carry none. Falling straight
+    back to "now" is the wrong answer: the user asks for {date} because
+    they want the *capture* date, and a filename quietly stamped with the
+    export date is indistinguishable from a correct one until much later.
+    So we read the file's EXIF before giving up.
+
+    The last resort is the file's own modification time, which for a card
+    straight out of the camera is the capture time. Only if even that
+    fails do we use now().
+    """
+    if record.metadata and record.metadata.capture_time:
+        return record.metadata.capture_time
+
+    try:
+        from .raw_io import read_metadata
+
+        meta = read_metadata(record.path)
+        if meta and meta.capture_time:
+            return meta.capture_time
+    except Exception:  # noqa: BLE001 - a filename must never stop an export
+        log.debug("촬영 시각을 EXIF에서 읽지 못했습니다: %s",
+                  record.path.name, exc_info=True)
+
+    try:
+        return datetime.fromtimestamp(record.path.stat().st_mtime)
+    except OSError:
+        return datetime.now()
+
+
 def format_filename(
     pattern: str, record: ImageRecord, index: int, suffix: str
 ) -> str:
-    """규칙에 따라 파일명을 만듭니다.
+    """Builds the filename according to the rule.
 
-    알 수 없는 치환자는 그대로 둔다 — 조용히 지우면 사용자가 오타를
-    알아차리지 못합니다.
+    An unknown placeholder is left as it is - delete it quietly and the
+    user never notices their typo.
     """
-    capture = None
-    if record.metadata and record.metadata.capture_time:
-        capture = record.metadata.capture_time
+    capture = _capture_time(record)
 
     values = {
         "name": record.path.stem,
         "index": f"{index:04d}",
         "grade": record.final_grade.value,
-        "date": (capture or datetime.now()).strftime("%Y%m%d"),
-        "time": (capture or datetime.now()).strftime("%H%M%S"),
+        "date": capture.strftime("%Y%m%d"),
+        "time": capture.strftime("%H%M%S"),
         "score": f"{record.score:.0f}",
     }
 
@@ -243,10 +300,12 @@ def format_filename(
     for key, value in values.items():
         result = result.replace("{" + key + "}", str(value))
 
-    # 앞뒤의 점과 공백을 떼어냅니다. 점으로 시작하면 이름 없는 숨김 파일이
-    # 되어(패턴 "."이면 결과가 그냥 ".jpg") 탐색기에서 보이지 않고, 끝의
-    # 점·공백은 Windows가 파일을 만들 때 말없이 잘라내 우리가 검사한 이름과
-    # 실제 이름이 어긋납니다. 가운데 점은 그대로 둡니다 — 사용자가 쓴 것입니다.
+    # Strip the dots and spaces off both ends. Starting with a dot makes it
+    # a nameless hidden file (with the pattern "." the result is just
+    # ".jpg") that Explorer does not show, and a trailing dot or space is
+    # silently trimmed by Windows when it creates the file, so the name we
+    # checked and the real name diverge. Dots in the middle are left alone
+    # - the user wrote those.
     result = _INVALID_NAME.sub("_", result).strip(" .")
     if not result:
         result = _INVALID_NAME.sub("_", record.path.stem).strip(" .")

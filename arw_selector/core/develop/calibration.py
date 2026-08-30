@@ -1,25 +1,31 @@
-"""새 기종의 색을 카메라 내장 JPEG에 맞춰 로컬에서 보정합니다.
+"""Calibrates the colour of a new camera model locally, against the
+camera's embedded JPEG.
 
-배경
-----
-LibRaw은 기종별 색 정보를 내장하고 있는데, 갓 나온 바디는 그 표에 없습니다.
-그러면 디모자이크 결과가 카메라가 만든 그림과 다르게 나옵니다 — 실측에서
-EOS R6 Mark III는 블랙 페데스탈이 어긋나 노란-초록으로 떴습니다.
+Background
+----------
+LibRaw carries colour information per model, and a body just out is not in
+that table. Then the demosaic result comes out different from the picture
+the camera made - measured, the EOS R6 Mark III had its black pedestal off
+and came up yellow-green.
 
-라이브러리가 갱신되기를 기다리는 대신, 카메라가 스스로 만든 JPEG을 정답지로
-삼아 이 PC에서 직접 보정값을 구합니다. 같은 장면을 카메라와 우리가 각각
-현상한 결과이므로, 둘의 채널 균형 차이가 곧 우리가 놓친 양입니다.
+Rather than waiting for the library to be updated, the calibration is
+derived here on this PC, using the JPEG the camera made itself as the
+ground truth. It is the same scene developed separately by the camera and
+by us, so the difference in channel balance between the two is exactly the
+amount we missed.
 
-무엇을 구하는가
---------------
-채널별 이득(gain) 세 개뿐입니다. 색을 "예쁘게" 만드는 것이 아니라 기준점을
-맞추는 것이라, 자유도가 높은 행렬을 추정하면 장면에 과적합됩니다. 여러 장의
-중앙값을 써서 한 장면의 색조에 끌려가지 않게 합니다.
+What is derived
+---------------
+Three channel gains, and nothing else. This is about matching a reference
+point rather than making the colour "pretty", so estimating a matrix with
+many degrees of freedom overfits to the scene. The median over several
+frames is used so it is not dragged by the colour cast of one scene.
 
-어디에 저장되는가
-----------------
-이 PC의 data/calibration/ 뿐입니다. 측정값은 개체·펌웨어·촬영 조건을 타므로
-남에게 옮길 만한 성질이 아닙니다.
+Where it is stored
+------------------
+Only in this PC's data/calibration/. The measurements depend on the
+individual unit, the firmware and the shooting conditions, so they are not
+the sort of thing to carry over to anyone else.
 """
 
 from __future__ import annotations
@@ -37,30 +43,34 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-#: 보정을 신뢰하려면 최소 이만큼은 재야 합니다. 한두 장은 그 장면의 색조를
-#: 카메라 특성으로 착각합니다.
+#: At least this many have to be measured for the calibration to be
+#: trusted. One or two frames mistake the colour cast of that scene for a
+#: property of the camera.
 MIN_SAMPLES = 4
 
-#: 이 이상은 정확도가 거의 안 오르고 시간만 듭니다.
+#: Past this, accuracy barely rises and it only costs time.
 MAX_SAMPLES = 12
 
-#: 이득이 이 범위를 벗어나면 측정이 잘못된 것으로 봅니다. 정상적인 기종 차이는
-#: 몇 %~수십 % 수준이고, 2배가 넘게 벌어지면 계산이나 표본이 잘못된 것입니다.
+#: A gain outside this range is taken as a bad measurement. A normal
+#: difference between camera models is a few % to a few tens of %, and a
+#: gap of more than 2x means the calculation or the sample is wrong.
 GAIN_LIMIT = (0.5, 2.0)
 
-#: 채널비가 이보다 덜 어긋나 있으면 보정할 게 없습니다. 굳이 값을 만들어
-#: 두면 다음 라이브러리 갱신 때 오히려 방해가 됩니다.
+#: If the channel ratios are off by less than this there is nothing to
+#: calibrate. Making a value anyway only gets in the way at the next
+#: library update.
 NEGLIGIBLE = 0.02
 
 _UNSAFE = re.compile(r'[<>:"/\\|?*\s]+')
 
 
 def camera_key(make: str | None, model: str | None) -> str:
-    """저장 키. 제조사와 모델을 합쳐 파일명으로 쓸 수 있게 다듬습니다."""
+    """The storage key. Joins make and model and cleans it up so it can be
+    used as a file name."""
     parts = [p.strip() for p in (make or "", model or "") if p and p.strip()]
     if not parts:
         return ""
-    # 캐논은 모델에 제조사를 이미 넣어 둡니다 ("Canon EOS R6 Mark III")
+    # Canon already puts the make in the model ("Canon EOS R6 Mark III")
     if len(parts) == 2 and parts[1].lower().startswith(parts[0].lower()):
         parts = [parts[1]]
     return _UNSAFE.sub("_", " ".join(parts)).strip("_")
@@ -68,25 +78,29 @@ def camera_key(make: str | None, model: str | None) -> str:
 
 @dataclass(frozen=True)
 class CameraCalibration:
-    """한 기종의 채널 이득."""
+    """The channel gains of one camera model."""
 
     camera: str
-    gain: tuple[float, float, float]  # B, G, R 순서 (OpenCV 채널 순서)
+    gain: tuple[float, float, float]  # B, G, R order (OpenCV channel order)
     samples: int = 0
     created: str = ""
     app_version: str = ""
     note: str = ""
-    #: 저장 파일 이름이 되는 키. `camera_key(make, model)`로 만든 값입니다.
+    #: The key that becomes the stored file name. Built by
+    #: `camera_key(make, model)`.
     #:
-    #: 이름(`camera`)에서 그때그때 다시 만들어 쓰면 안 됩니다. 읽을 때는
-    #: 제조사+모델로 키를 만드는데 쓸 때는 모델만 썼던 적이 있고, 그 둘이
-    #: 같아지는 것은 모델에 제조사가 이미 들어간 캐논뿐이었습니다. 소니·니콘·
-    #: 파나소닉·후지는 저장은 되지만 다시 읽히지 않아, 보정이 조용히 적용되지
-    #: 않고 폴더를 열 때마다 계산을 다시 권했습니다.
+    #: It must not be rebuilt from the name (`camera`) each time. There was
+    #: a period where reading built the key from make+model while writing
+    #: used the model alone, and the only case where those two come out the
+    #: same was Canon, which already has the make in the model. Sony,
+    #: Nikon, Panasonic and Fuji were stored but never read back, so the
+    #: calibration was quietly not applied and the calculation was
+    #: suggested again every time the folder was opened.
     key: str = ""
 
     def storage_key(self) -> str:
-        """저장·삭제에 쓸 키. 예전 파일에는 key가 없어 이름으로 물러섭니다."""
+        """The key for storing and deleting. Old files have no key, so it
+        falls back to the name."""
         return self.key or _UNSAFE.sub("_", self.camera).strip("_")
 
     def is_neutral(self) -> bool:
@@ -127,7 +141,7 @@ class CameraCalibration:
 
 
 def calibration_dir() -> Path:
-    """보정값 저장 폴더. 이 PC 안에만 둡니다."""
+    """The folder calibrations are stored in. Kept inside this PC only."""
     from ..appinfo import data_dir
 
     return data_dir() / "calibration"
@@ -138,24 +152,26 @@ def _path_for(key: str) -> Path:
 
 
 def load(key: str) -> CameraCalibration | None:
-    """저장된 보정값. 없거나 깨졌으면 None."""
+    """The stored calibration. None if it is missing or damaged."""
     if not key:
         return None
     path = _path_for(key)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        # JSONDecodeError만 잡으면 UTF-8이 아닌 파일에서 UnicodeDecodeError가
-        # 새어나갑니다. 둘 다 ValueError 아래라 한 번에 받습니다. 이 함수를
-        # 그대로 부르는 곳(gui/calibration_dialog.py)은 예외를 감싸지 않습니다.
+        # Catch only JSONDecodeError and a UnicodeDecodeError leaks out of
+        # a file that is not UTF-8. Both sit under ValueError, so they are
+        # caught in one go. The place that calls this function directly
+        # (gui/calibration_dialog.py) does not wrap exceptions.
         return None
     return CameraCalibration.from_dict(data)
 
 
 def save(calibration: CameraCalibration) -> Path | None:
-    """보정값을 저장하고 경로를 돌려줍니다.
+    """Stores the calibration and returns the path.
 
-    키는 `calibration.key`를 씁니다 — 읽을 때(`load`)와 같은 값이어야 합니다.
+    The key used is `calibration.key` - it has to be the same value as when
+    reading (`load`).
     """
     key = calibration.storage_key()
     if not key:
@@ -174,7 +190,8 @@ def save(calibration: CameraCalibration) -> Path | None:
 
 
 def remove(key: str) -> bool:
-    """보정값을 지웁니다. 라이브러리가 갱신되면 필요 없어집니다."""
+    """Deletes the calibration. It becomes unnecessary once the library is
+    updated."""
     try:
         _path_for(key).unlink()
         return True
@@ -183,7 +200,7 @@ def remove(key: str) -> bool:
 
 
 def stored_cameras() -> list[CameraCalibration]:
-    """저장된 보정값 전체."""
+    """Every stored calibration."""
     folder = calibration_dir()
     if not folder.is_dir():
         return []
@@ -192,22 +209,23 @@ def stored_cameras() -> list[CameraCalibration]:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            continue  # 깨진 파일 하나가 목록 전체를 막으면 안 됩니다
+            continue  # one damaged file must not block the whole list
         item = CameraCalibration.from_dict(data)
         if item is not None:
             result.append(item)
     return result
 
 
-# ---------------------------------------------------------------- 감지
+# ---------------------------------------------------------------- detection
 
 
 def looks_unsupported(path: Path) -> bool:
-    """LibRaw이 이 기종을 온전히 모르는 것으로 보이는지.
+    """Whether LibRaw appears not to fully know this camera model.
 
-    블랙 페데스탈을 놓쳤다는 것은 기종 표에 없다는 뜻이고, 그러면 색 정보도
-    같이 없을 가능성이 큽니다. 이 신호가 뜬 기종만 보정을 권합니다 —
-    잘 지원되는 기종까지 매번 물으면 성가시기만 합니다.
+    Missing the black pedestal means it is not in the model table, and then
+    the colour information is likely missing along with it. Calibration is
+    only suggested for models this signal fires on - asking every time even
+    for well-supported models is nothing but a nuisance.
     """
     import rawpy
 
@@ -222,7 +240,7 @@ def looks_unsupported(path: Path) -> bool:
 
 @dataclass
 class CalibrationNeed:
-    """보정이 필요해 보이는 기종과 그 표본."""
+    """A camera model that appears to need calibration, and its samples."""
 
     camera: str
     key: str
@@ -232,15 +250,19 @@ class CalibrationNeed:
 def find_uncalibrated(
     paths: Iterable[Path], limit: int = MAX_SAMPLES, force: bool = False
 ) -> CalibrationNeed | None:
-    """폴더에서 보정이 필요한 기종을 찾습니다.
+    """Finds a camera model in the folder that needs calibration.
 
-    자동 권유(force=False)는 조건이 셋입니다: 저장된 보정이 없고, LibRaw
-    지원이 불완전해 보이고, 표본이 충분할 것. 하나라도 아니면 아무 말도
-    하지 않습니다 — 잘 지원되는 기종까지 매번 물으면 성가시기만 합니다.
+    Suggesting it automatically (force=False) has three conditions: there
+    is no stored calibration, LibRaw support looks incomplete, and there
+    are enough samples. If even one of them fails it says nothing at all -
+    asking every time even for well-supported models is nothing but a
+    nuisance.
 
-    force=True는 사용자가 직접 요청한 경우입니다. 라이브러리가 아는 기종도,
-    이미 보정값이 있는 기종도 다시 잽니다. 라이브러리의 기본 색이 마음에
-    들지 않아 이 PC의 측정값을 우선하고 싶을 때 쓰라고 열어 둔 길입니다.
+    force=True is when the user asked for it directly. It measures again
+    even for a model the library knows and a model that already has a
+    calibration. It is a path left open for when the library's default
+    colour is not to the user's liking and they want this PC's measurements
+    to take precedence.
     """
     from ..raw_io import read_metadata
 
@@ -268,8 +290,9 @@ def find_uncalibrated(
         )
         if len(need.samples) >= limit:
             continue
-        # 내장 미리보기가 없는 파일은 정답지가 없어 잴 수 없습니다. 여기서
-        # 걸러 두지 않으면 계산을 시작한 뒤에야 "표본 부족"으로 실패합니다.
+        # A file with no embedded preview has no ground truth and cannot
+        # be measured. Without filtering here, it fails with "not enough
+        # samples" only after the calculation has started.
         if has_embedded_preview(path):
             need.samples.append(path)
 
@@ -279,44 +302,53 @@ def find_uncalibrated(
     return None
 
 
-# ---------------------------------------------------------------- 측정
+# ---------------------------------------------------------------- measurement
 
 
 NEUTRAL_SATURATION = 0.18
-"""이 채도 미만이면 '원래 무채색'으로 봅니다."""
+"""Below this saturation it is taken as 'neutral to begin with'."""
 
 MIN_NEUTRAL_PIXELS = 200
-"""무채색 화소가 이보다 적으면 못 믿습니다 — 전체 평균으로 물러섭니다."""
+"""Fewer neutral pixels than this cannot be trusted - it falls back to the
+whole-image mean."""
 
 
 def _neutral_means(
     camera_bgr: np.ndarray, ours_bgr: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """무채색에 가까운 화소만 골라 양쪽 채널 평균을 냅니다.
+    """Picks only the pixels close to neutral and takes the channel means
+    of both sides.
 
-    이미지 전체 평균으로 재면 피사체 색이 그대로 섞입니다. 붉은 옷이 화면을
-    채우면 "이 바디는 붉다"고 배우고, 다음 장면에서는 반대로 배웁니다. 그래서
-    장마다 값이 흔들리고, 그 흔들림이 곧 "장마다 색감이 다르다"가 됩니다.
+    Measure with the whole-image mean and the subject's colour is mixed
+    straight in. Fill the frame with red clothing and it learns "this body
+    is red", and learns the opposite on the next scene. So the value shakes
+    from frame to frame, and that shaking is exactly "the colour differs
+    from frame to frame".
 
-    회색 벽·흰 셔츠·콘크리트처럼 **원래 색이 없어야 할 곳**만 보면, 남는
-    차이는 피사체가 아니라 바디와 현상의 차이입니다.
+    Look only at the places that **should have no colour to begin with** -
+    a grey wall, a white shirt, concrete - and the remaining difference is
+    not the subject but the difference between the body and our develop.
 
-    실측(R6M3 10장):
-    - 장별 흔들림 0.0122 → 0.0071 (41.6%↓, R 47%↓ B 61%↓, G는 비슷)
-    - **학습에 안 쓴 사진으로 검증**(5장으로 구해 나머지 5장에 적용,
-      60회 분할): 남은 색 차이 0.0428 → 0.0355 (17.1%↓)
+    Measured (R6M3, 10 frames):
+    - Frame-to-frame shake 0.0122 -> 0.0071 (41.6% down, R 47% down,
+      B 61% down, G about the same)
+    - **Verified on photos not used to fit** (derived from 5 frames and
+      applied to the other 5, 60 splits): remaining colour difference
+      0.0428 -> 0.0355 (17.1% down)
 
-    두 번째가 중요합니다. 같은 사진으로 구하고 같은 사진으로 재면 전체
-    평균 방식이 항상 이깁니다 — 그 지표에 맞춰 구한 값이니까요. 실제
-    쓰임새는 '모르는 사진에 적용'이므로 그쪽으로 재야 합니다.
+    The second one is what matters. Derive on the same photos and measure
+    on the same photos and the whole-image mean method always wins -
+    because the value was derived to fit that metric. The real use is
+    'apply to a photo it has not seen', so that is what has to be measured.
 
-    기준은 카메라 JPEG에서 잡습니다 — 정답 쪽에서 골라야 우리 결과의
-    치우침이 선택에 끼어들지 않습니다.
+    The reference is taken from the camera JPEG - picking from the ground
+    truth side keeps the bias in our own result out of the selection.
     """
     hsv = cv2.cvtColor(camera_bgr, cv2.COLOR_BGR2HSV)
     saturation = hsv[:, :, 1].astype(np.float32) / 255.0
     value = hsv[:, :, 2].astype(np.float32) / 255.0
-    # 너무 어둡거나 날아간 곳은 채널 비율을 믿을 수 없습니다
+    # Places that are too dark or blown out cannot be trusted for their
+    # channel ratios
     mask = (saturation < NEUTRAL_SATURATION) & (value > 0.15) & (value < 0.92)
     if int(np.count_nonzero(mask)) < MIN_NEUTRAL_PIXELS:
         return None
@@ -327,10 +359,11 @@ def _neutral_means(
 
 
 def _channel_means(image_bgr: np.ndarray) -> np.ndarray:
-    """채널 평균. 극단 화소는 빼고 잽니다.
+    """The channel means. Extreme pixels are left out of the measurement.
 
-    포화된 하이라이트와 뭉갠 섀도우는 채널이 함께 잘려 있어 균형 정보가
-    없습니다. 그대로 넣으면 밝은 장면일수록 이득이 1에 가까워집니다.
+    Saturated highlights and crushed shadows have their channels clipped
+    together, so they carry no balance information. Put them in as they
+    are and the brighter the scene, the closer the gain gets to 1.
     """
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     usable = (gray > 20) & (gray < 235)
@@ -342,15 +375,18 @@ def _channel_means(image_bgr: np.ndarray) -> np.ndarray:
 
 
 def embedded_preview(path: Path) -> np.ndarray | None:
-    """카메라가 만든 내장 미리보기(BGR). 이것이 정답지입니다.
+    """The embedded preview the camera made (BGR). This is the ground
+    truth.
 
-    형식이 두 가지입니다:
-      - JPEG   : 대부분의 기종. 바이트열로 옵니다.
-      - BITMAP : 비압축 RGB 배열. 일부 기종·변환기가 이렇게 넣습니다.
+    There are two formats:
+      - JPEG   : most models. Comes as a byte string.
+      - BITMAP : an uncompressed RGB array. Some models and converters put
+                 it in this way.
 
-    아예 없는 파일도 있습니다(변환기가 미리보기를 떼어 낸 DNG 등).
-    그때는 이 파일로는 보정할 수 없으므로 None을 돌려주고, 부르는 쪽이
-    다른 파일로 넘어갑니다.
+    There are also files with none at all (a DNG whose converter stripped
+    the preview, and so on). In that case this file cannot be used for
+    calibration, so None is returned and the caller moves on to another
+    file.
     """
     import rawpy
 
@@ -361,26 +397,28 @@ def embedded_preview(path: Path) -> np.ndarray | None:
                 return cv2.imdecode(
                     np.frombuffer(thumb.data, np.uint8), cv2.IMREAD_COLOR
                 )
-            # BITMAP은 이미 디코드된 RGB 배열입니다
+            # BITMAP is an already-decoded RGB array
             array = np.asarray(thumb.data)
             if array.ndim != 3 or array.shape[2] < 3:
                 return None
             return cv2.cvtColor(array[:, :, :3], cv2.COLOR_RGB2BGR)
-    except Exception:  # noqa: BLE001 - 없거나 깨진 파일은 그냥 건너뜁니다
+    except Exception:  # noqa: BLE001 - missing or damaged files are skipped
         return None
 
 
 def has_embedded_preview(path: Path) -> bool:
-    """이 파일로 보정을 잴 수 있는지 (미리보기 유무)."""
+    """Whether calibration can be measured from this file (does it have a
+    preview)."""
     return embedded_preview(path) is not None
 
 
 def sample_gain(path: Path) -> np.ndarray | None:
-    """한 장에서 채널 이득을 구합니다. 실패하면 None.
+    """Derives the channel gains from one frame. None on failure.
 
-    카메라 JPEG과 우리 현상 결과를 같은 크기로 줄여 채널 평균을 비교합니다.
-    밝기 자체는 카메라의 톤 커브가 섞여 있어 맞출 수 없으므로, 전체 밝기로
-    나눠 **균형만** 봅니다.
+    The camera JPEG and our develop result are reduced to the same size and
+    their channel means compared. Brightness itself cannot be matched
+    because the camera's tone curve is mixed into it, so it is divided by
+    the overall brightness and **only the balance** is looked at.
     """
     from ..raw_io import load_demosaiced, to_display
 
@@ -389,17 +427,21 @@ def sample_gain(path: Path) -> np.ndarray | None:
         return None
 
     try:
-        # 프로파일은 의도적인 색 연출이라 빼고, 순수 현상만 견줍니다.
-        # calibration=False가 중요합니다 — 이미 저장된 보정을 먹인 결과로
-        # 다시 보정값을 구하면 자기 자신을 되먹여 값이 계속 밀려납니다.
+        # The profile is deliberate colour styling, so it is left out and
+        # only the plain develop is compared. calibration=False matters -
+        # derive a calibration again from a result that already has the
+        # stored calibration applied and it feeds back on itself and the
+        # value keeps drifting.
         ours = load_demosaiced(
             path, half_size=True, apply_profile=False, calibration=False
         )
     except Exception:  # noqa: BLE001
         return None
-    # 카메라 JPEG은 sRGB입니다. 우리 값은 작업 공간(넓은 색역)이라 그대로
-    # 견주면 공간이 섞입니다 — 무채색은 두 공간에서 같아 게인 자체는 거의
-    # 안 움직이지만, 무채색이 없는 장면의 폴백(전체 평균)은 통째로 어긋납니다.
+    # The camera JPEG is sRGB. Our value is in the working space (a wide
+    # gamut), so comparing them as they are mixes the two spaces - neutrals
+    # are the same in both spaces so the gain itself barely moves, but the
+    # fallback for a scene with no neutrals (the whole-image mean) is off
+    # wholesale.
     ours = to_display(ours)
 
     size = (320, 213)
@@ -408,8 +450,9 @@ def sample_gain(path: Path) -> np.ndarray | None:
 
     pair = _neutral_means(camera_small, ours_small)
     if pair is None:
-        # 무채색이 거의 없는 장면(단색 조명, 꽉 찬 원색)은 전체 평균으로
-        # 물러섭니다. 정확도는 떨어지지만 아무 값도 못 내는 것보다 낫습니다.
+        # A scene with almost no neutrals (single-colour lighting, a frame
+        # filled with a primary) falls back to the whole-image mean. It is
+        # less accurate, but better than producing no value at all.
         camera_mean = _channel_means(camera_small)
         ours_mean = _channel_means(ours_small)
     else:
@@ -417,7 +460,7 @@ def sample_gain(path: Path) -> np.ndarray | None:
     if np.any(ours_mean <= 1.0) or np.any(camera_mean <= 1.0):
         return None
 
-    # 밝기를 뺀 균형만 비교합니다
+    # Compare only the balance, with brightness taken out
     camera_ratio = camera_mean / camera_mean.mean()
     ours_ratio = ours_mean / ours_mean.mean()
     gain = camera_ratio / ours_ratio
@@ -436,13 +479,14 @@ def measure(
     app_version: str = "",
     key: str = "",
 ) -> CameraCalibration | None:
-    """여러 장에서 이 기종의 채널 이득을 구합니다.
+    """Derives this model's channel gains from several frames.
 
-    장마다 이득을 재고 **중앙값**을 씁니다. 평균은 한 장이 이상해도 끌려가는데,
-    중앙값은 절반이 멀쩡하면 버팁니다 — 역광이나 단색 장면이 섞여도 됩니다.
+    The gain is measured per frame and the **median** is used. A mean is
+    dragged by even one odd frame, whereas a median holds up as long as
+    half are sound - a backlit or single-colour scene may be mixed in.
 
-    시간이 걸립니다(장당 1~2초). 부르는 쪽이 진행률을 보여 주고 취소를
-    받을 수 있게 콜백을 둡니다.
+    It takes time (1~2 seconds per frame). Callbacks are provided so the
+    caller can show progress and accept a cancellation.
     """
     selected = list(paths)[:MAX_SAMPLES]
     total = len(selected)
@@ -463,7 +507,8 @@ def measure(
         return None
 
     median = np.median(np.stack(gains), axis=0)
-    # 이득의 곱이 1이 되게 정규화합니다 — 밝기는 건드리지 않고 균형만 바꿉니다.
+    # Normalised so the product of the gains is 1 - brightness is left
+    # alone and only the balance changes.
     median = median / float(np.exp(np.mean(np.log(median))))
 
     drift = float(np.max(np.abs(median - 1.0)))
@@ -489,7 +534,8 @@ def measure(
 
 
 def apply(image_bgr: np.ndarray, calibration: CameraCalibration | None) -> np.ndarray:
-    """보정 이득을 곱합니다. 없거나 중립이면 그대로 돌려줍니다."""
+    """Multiplies by the calibration gains. Returns the input as it is if
+    there is none or it is neutral."""
     if calibration is None or calibration.is_neutral():
         return image_bgr
     gain = np.array(calibration.gain, dtype=np.float32)

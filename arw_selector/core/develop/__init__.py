@@ -1,10 +1,11 @@
-"""보정.
+"""Adjustments.
 
-미리보기에서 값을 맞추고 → 프리셋으로 저장하고 → 다른 사진에 일괄
-적용하고 → 내보낼 때 반영하는 흐름.
+The flow: set the values in the preview -> save them as a preset -> apply
+them to other photos in bulk -> have them take effect on export.
 
-파라미터 정의는 settings.py, 실제 픽셀 연산은 engine.py에 있습니다.
-미리보기와 내보내기는 같은 engine.apply_settings를 씁니다.
+The parameter definitions are in settings.py and the actual pixel work is
+in engine.py. The preview and the export use the same
+engine.apply_settings.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from .settings import (
     HSLSettings,
     LocalAdjustments,
     Mask,
+    MaskCombine,
     MaskType,
     MetadataSettings,
     NoiseAlgorithm,
@@ -58,6 +60,7 @@ __all__ = [
     "OpticsSettings",
     "ExifStripSettings",
     "Mask",
+    "MaskCombine",
     "MaskType",
     "LocalAdjustments",
     "EXIF_FIELDS",

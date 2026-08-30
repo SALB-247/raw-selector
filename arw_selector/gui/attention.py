@@ -1,16 +1,19 @@
-"""다음에 누를 버튼을 점멸로 알려 줍니다.
+"""Points out the next button to press by flashing it.
 
-처음 연 사용자는 창에 버튼이 열 개 넘게 있는데 그중 무엇이 시작점인지
-알 수 없습니다. 폴더를 연 뒤에도 마찬가지로 "이제 분석을 눌러야 한다"는
-것이 화면에 드러나 있지 않습니다.
+A user opening it for the first time has more than ten buttons in the window
+and no way to tell which of them is the starting point. After opening a
+folder it is the same - nothing on screen says "now Analyse has to be
+pressed".
 
-**멈추지 않는 점멸은 안 하느니만 못합니다.** 계속 깜빡이면 시선을 계속
-빼앗기고, 정작 급한 알림과 구분이 안 됩니다. 그래서 셋 중 하나라도
-일어나면 즉시 멈춥니다.
+**A flash that does not stop is worse than no flash at all.** Blinking on and
+on keeps stealing the eye, and it stops being distinguishable from the notice
+that really is urgent. So it stops the moment any one of three things
+happens.
 
-  - 정해진 횟수를 채움
-  - 사용자가 그 버튼을 누름
-  - 버튼이 비활성으로 바뀜 (누를 수 없는 것을 가리키고 있을 이유가 없습니다)
+  - the set number of flashes is reached
+  - the user presses that button
+  - the button turns disabled (there is no reason to be pointing at
+    something that cannot be pressed)
 """
 
 from __future__ import annotations
@@ -21,17 +24,20 @@ from PySide6.QtWidgets import QAbstractButton
 from . import theme
 
 PULSE_INTERVAL_MS = 550
-"""한 번 깜빡이는 간격. 더 빠르면 초조해 보이고, 느리면 눈에 안 띕니다."""
+"""The interval of one blink. Faster looks anxious, slower does not catch the
+eye."""
 
 PULSE_COUNT = 6
-"""깜빡일 횟수. 약 3.3초입니다 — 눈에 들어오되 거슬리기 전에 끝납니다."""
+"""How many times it blinks. About 3.3 seconds - long enough to register, and
+over before it grates."""
 
 
 class ButtonPulse(QObject):
-    """버튼 하나를 정해진 횟수만 점멸시킵니다.
+    """Flashes one button, and only the set number of times.
 
-    같은 버튼에 다시 걸면 이전 점멸을 취소하고 새로 시작합니다. 겹치면
-    타이머 둘이 서로 스타일을 덮어써서 원래 모양으로 못 돌아갑니다.
+    Applied to the same button again it cancels the previous flashing and
+    starts afresh. Overlapped, the two timers overwrite each other's style
+    and it never gets back to its original look.
     """
 
     def __init__(self, button: QAbstractButton, parent: QObject | None = None) -> None:
@@ -45,15 +51,16 @@ class ButtonPulse(QObject):
         self._timer.setInterval(PULSE_INTERVAL_MS)
         self._timer.timeout.connect(self._tick)
 
-        # 누르면 목적을 달성한 것이므로 더 깜빡일 이유가 없습니다.
+        # A press means the point has been made, so there is no reason to go
+        # on blinking.
         button.clicked.connect(self.stop)
 
-    # ------------------------------------------------------------ 조작
+    # ------------------------------------------------------------ Controls
 
     def start(self, count: int = PULSE_COUNT) -> None:
         if not self._button.isEnabled():
-            return  # 누를 수 없는 버튼을 가리키면 사용자만 헷갈립니다
-        self._remaining = max(1, count) * 2  # 켜기/끄기 한 쌍
+            return  # pointing at a button that cannot be pressed only confuses
+        self._remaining = max(1, count) * 2  # an on/off pair
         self._on = False
         self._tick()
         self._timer.start()
@@ -68,10 +75,11 @@ class ButtonPulse(QObject):
     def running(self) -> bool:
         return self._timer.isActive()
 
-    # ------------------------------------------------------------ 내부
+    # ------------------------------------------------------------ Internals
 
     def _tick(self) -> None:
-        # 도중에 비활성이 되면(예: 분석이 이미 시작됨) 즉시 멈춥니다.
+        # If it turns disabled part way through (e.g. the analysis has
+        # already started) it stops at once.
         if not self._button.isEnabled() or self._remaining <= 0:
             self.stop()
             return
@@ -87,4 +95,4 @@ class ButtonPulse(QObject):
         try:
             self._button.setStyleSheet(self._original)
         except RuntimeError:
-            pass  # 위젯이 이미 파괴됨 — 되돌릴 대상이 없습니다
+            pass  # the widget is already destroyed - nothing to restore

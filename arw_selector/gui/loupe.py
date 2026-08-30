@@ -1,8 +1,9 @@
-"""루페 / 미리보기 창.
+"""Loupe / preview window.
 
-더블클릭으로 열리고, 여기서 바로 보정까지 합니다. 판정 근거(ROI)를 확인하고
-등급을 바꾸고 다음 컷으로 넘어가는 것까지 한 창에서 끝나야, 수백 장을
-검토하는 흐름이 끊기지 않습니다.
+Opens on a double-click, and does the develop work right here. Checking the
+grading evidence (ROI), changing the grade, and stepping to the next shot all
+have to finish inside one window, or the flow of reviewing hundreds of frames
+keeps breaking.
 """
 
 from __future__ import annotations
@@ -56,64 +57,74 @@ _FULL_CROP = {
 }
 
 PREVIEW_LONG_EDGE = 1400
-"""미리보기 렌더 해상도. 더 키우면 슬라이더 반응이 눈에 띄게 둔해집니다."""
+"""Preview render resolution. Raise it and the sliders get visibly duller."""
 
 _AF_UNREAD = object()
-"""AF 상자를 아직 안 읽었다는 표식. None(파일에 없음)과 구분해야 매 렌더마다
-파일을 다시 뒤지지 않습니다."""
+"""Marker for "the AF box has not been read yet". It has to be distinct from
+None (not in the file) so we do not dig through the file on every render."""
 
 FINAL_LONG_EDGE = 2200
-"""최종 미리보기 표시 해상도. 디모자이크는 원본으로 하되 표시는 이 크기로."""
+"""Full Render display size. Demosaic uses the original; display uses this."""
 
 
 from .workers import silent_disconnect as _silent_disconnect  # noqa: E402
 
 log = logging.getLogger(__name__)
 
-#: 창이 닫힌 뒤에도 아직 도는 렌더 스레드를 붙잡아 두는 곳.
+#: Where render threads still running after the window closed are held on to.
 #:
-#: Qt는 **실행 중인 QThread가 파괴될 때** qFatal로 프로세스를 죽입니다.
-#: cancel()은 플래그만 세우는데, 워커가 rawpy 디모자이크(수 초짜리 단일 C
-#: 호출) 안에 있으면 그 플래그를 볼 지점이 없습니다. 그래서 "취소하고
-#: 잠깐 기다린 뒤 닫기"는 기다림이 모자라는 순간 그대로 크래시가 됩니다
-#: (실측: 렌더 도중 창을 12번 여닫으니 재현).
+#: Qt kills the process with qFatal **when a running QThread is destroyed**.
+#: cancel() only raises a flag, and when the worker is inside the rawpy
+#: demosaic (a single C call lasting seconds) there is no point at which it
+#: can see that flag. So "cancel, wait a moment, then close" becomes a crash
+#: the moment the wait falls short (measured: reproduced by opening and
+#: closing the window 12 times mid-render).
 #:
-#: 기다리는 대신 참조를 여기로 옮깁니다. 창은 즉시 닫히고, 스레드는 제
-#: 속도로 끝난 뒤 스스로 빠집니다. 파괴되는 시점에는 이미 멈춰 있습니다.
+#: Instead of waiting, we move the reference here. The window closes at once,
+#: and the thread drops itself after finishing at its own pace. By the time
+#: it is destroyed it has already stopped.
 _RUNNING_RENDERS: set = set()
 
-#: 지금 이 프로세스에서 돌고 있는 Full Render 스레드.
+#: The Full Render thread running in this process right now.
 #:
-#: **동시에 하나만** 돌아야 합니다. 27MP RAW 한 장을 풀 해상도로 디모자이크
-#: 하는 데 실측 2.8GB가 듭니다(R6M3). 두 개가 겹치면 5.5GB — 8GB PC에서는
-#: OS와 앱 몫까지 더해 한계를 넘고, 사용자에게는 "크래시"로 보입니다.
+#: **Only one may run at a time.** Demosaicing a single 27MP RAW at full
+#: resolution takes a measured 2.8GB (R6M3). Two overlapping is 5.5GB - on an
+#: 8GB PC that crosses the limit once the OS and the app are added, and to
+#: the user it looks like "a crash".
 #:
-#: 겹치는 경로는 평범합니다: 버튼을 껐다 켜면 `_abandon_render`가 돌던
-#: 워커를 놓아주지만 **멈추지는 못합니다**(rawpy 디모자이크는 중간에 끊을
-#: 지점이 없습니다). 그 상태에서 새 워커를 띄우면 곧바로 두 개가 됩니다.
-#: 그래서 시작 전에 여기를 보고, 비어 있을 때만 출발합니다.
+#: The path to overlap is ordinary: toggle the button off and on and
+#: `_abandon_render` releases the running worker, but it **cannot stop it**
+#: (the rawpy demosaic has no point at which it can be interrupted). Start a
+#: new worker in that state and there are immediately two. So we look here
+#: before starting, and only set off when it is empty.
 _FULL_RENDER_SLOT: set = set()
 
 FULL_RENDER_LOCKOUT_MS = 3000
-"""Full Render를 켠 뒤 버튼을 다시 누를 수 있게 되기까지의 최소 시간.
+"""Minimum time before the button can be pressed again after Full Render is
+switched on.
 
-껐다 켜기를 연타하면 무거운 렌더가 겹칩니다. 실제로 그걸로 크래시
-리포트가 올라왔습니다. 잠깐 잠가서 연타 자체를 막습니다.
+Hammering it off and on overlaps heavy renders. A crash report actually came
+in from exactly that. A brief lock stops the hammering itself.
 """
 
 
 def _map_scene_points(points: np.ndarray, geometry,
                       scene_hw: tuple[int, int]) -> np.ndarray:
-    """장면(기하 전) 정규화 좌표를 표시(기하 후) 정규화 좌표로.
+    """Scene (pre-geometry) normalised coordinates -> display (post-geometry)
+    normalised coordinates.
 
-    ROI·얼굴·눈·AF 좌표는 전부 분석 이미지(자르기 전) 기준입니다. 화면은
-    기하가 적용된 결과라, 변환 없이 그리면 크롭·회전이 걸린 컷에서 상자가
-    엉뚱한 자리에 갑니다 — 예전에는 그래서 기하가 걸리면 아예 숨겼습니다.
+    ROI, face, eye, and AF coordinates are all relative to the analysis image
+    (before cropping). The screen is the result with geometry applied, so
+    drawing them without converting puts the boxes in the wrong place on a
+    shot with a crop or a rotation - which is why they used to be hidden
+    outright whenever geometry was applied.
 
-    engine.apply_geometry와 **같은 순서**(회전 → 반전 → 수평보정 → 크롭)를
-    좌표에 적용합니다. 수평보정은 warpAffine이 쓰는 행렬의 역을 그대로
-    씁니다 — 부호를 손으로 유도하지 않고 cv2에서 꺼내야 이미지와 좌표가
-    갈리지 않습니다. 둘의 일치는 마커 픽셀 테스트로 고정합니다.
+    The **same order** as engine.apply_geometry (rotate -> flip -> straighten
+    -> crop) is applied to the coordinates. Straighten uses the matrix
+    cv2.getRotationMatrix2D returns exactly as it comes, in the forward
+    direction - the signs have to come out of cv2 rather than be derived by
+    hand, or the image and the coordinates diverge. Their agreement is
+    pinned down by a marker pixel test (see the straighten branch below).
     """
     import cv2 as _cv2
 
@@ -121,7 +132,7 @@ def _map_scene_points(points: np.ndarray, geometry,
     height, width = float(scene_hw[0]), float(scene_hw[1])
 
     for _ in range(int(geometry.rotate_quarters) % 4):
-        # cv2.ROTATE_90_CLOCKWISE: (x, y) → (1-y, x), 프레임은 (h, w) 교환
+        # cv2.ROTATE_90_CLOCKWISE: (x, y) -> (1-y, x), frame swaps (h, w)
         out = np.stack([1.0 - out[:, 1], out[:, 0]], axis=1)
         height, width = width, height
 
@@ -133,9 +144,10 @@ def _map_scene_points(points: np.ndarray, geometry,
     if geometry.straighten:
         matrix = _cv2.getRotationMatrix2D(
             (width / 2, height / 2), float(geometry.straighten), 1.0)
-        # warpAffine(WARP_INVERSE_MAP 없이)은 이 행렬을 **원본 점 → 결과 점**
-        # 방향으로 씁니다. 처음에 역행렬로 짚었다가 마커 픽셀 테스트가
-        # 잡았습니다 — 이 방향은 문서 기억이 아니라 그 테스트가 근거입니다.
+        # warpAffine (without WARP_INVERSE_MAP) uses this matrix in the
+        # **source point -> result point** direction. I first reached for the
+        # inverse and the marker pixel test caught it - this direction rests
+        # on that test, not on remembered documentation.
         pixels = out * np.array([width, height])
         ones = np.ones((len(pixels), 1))
         moved = np.hstack([pixels, ones]) @ matrix.T
@@ -152,10 +164,10 @@ def _map_scene_points(points: np.ndarray, geometry,
 
 def _map_scene_box(box_px: tuple, geometry, scene_hw: tuple[int, int],
                    out_wh: tuple[int, int]) -> tuple | None:
-    """분석 좌표 상자를 표시 픽셀 상자로. 화면 밖이면 None.
+    """Analysis-coordinate box -> display pixel box. None if off-screen.
 
-    수평보정이 걸리면 상자가 기울어지는데, 표시용이므로 네 코너를 변환해
-    감싸는 축정렬 상자로 근사합니다.
+    Straighten tilts the box, but this is for display, so the four corners
+    are transformed and approximated by the axis-aligned box enclosing them.
     """
     x, y, w, h = box_px
     corners = np.array([[x, y], [x + w, y], [x, y + h], [x + w, y + h]],
@@ -166,26 +178,29 @@ def _map_scene_box(box_px: tuple, geometry, scene_hw: tuple[int, int],
     x0, y0 = mapped.min(axis=0)
     x1, y1 = mapped.max(axis=0)
     if x1 <= 0.0 or y1 <= 0.0 or x0 >= 1.0 or y0 >= 1.0:
-        return None                      # 잘려 나간 영역 — 그릴 것이 없습니다
+        return None                      # cropped away - nothing to draw
     out_w, out_h = out_wh
     return (x0 * out_w, y0 * out_h, (x1 - x0) * out_w, (y1 - y0) * out_h)
 
 
 _WORKER_SIGNALS = ("source_ready", "done", "failed", "finished")
-"""렌더 워커가 창으로 보내는 신호 전부. 정리할 때 하나도 빠뜨리면 안 됩니다.
+"""Every signal the render worker sends to the window. Cleanup must not miss
+a single one.
 
-source_ready가 빠져 있으면 은퇴시킨 워커가 나중에 디모자이크 원본을 창에
-밀어 넣어, 다음 렌더가 낡은 화소를 재사용합니다(_keep_demosaic 참고).
+If source_ready is left out, a retired worker later pushes its demosaic
+source into the window and the next render reuses stale pixels (see
+_keep_demosaic).
 """
 
 
 def _disconnect_worker(worker) -> None:
-    """워커의 신호를 전부 끊습니다. 없는 신호는 건너뜁니다.
+    """Disconnects every signal on the worker. Missing signals are skipped.
 
-    이름으로 찾는 이유는 정리 경로가 **어떤 경우에도 예외를 내면 안 되기**
-    때문입니다. 속성으로 바로 쓰면 신호 하나가 없는 객체에서 AttributeError가
-    나고, 그 순간 뒤따르는 정리(취소·참조 보관)가 통째로 건너뛰어집니다 —
-    도는 스레드를 놓치는 바로 그 상황입니다.
+    They are looked up by name because the cleanup path **must never raise,
+    under any circumstance**. Reaching for them as attributes raises
+    AttributeError on an object that lacks one signal, and at that moment the
+    cleanup that follows (cancel, keeping the reference) is skipped wholesale
+    - which is exactly the situation where a running thread gets lost.
     """
     for name in _WORKER_SIGNALS:
         signal = getattr(worker, name, None)
@@ -194,13 +209,13 @@ def _disconnect_worker(worker) -> None:
 
 
 def _detach_until_finished(worker) -> None:
-    """창과 분리해 스레드가 끝날 때까지 살려 둡니다."""
+    """Detaches from the window and keeps the thread alive until it ends."""
     _RUNNING_RENDERS.add(worker)
     worker.finished.connect(lambda: _RUNNING_RENDERS.discard(worker))
 
 
 def full_render_in_flight() -> bool:
-    """지금 어느 창에서든 Full Render가 돌고 있는가."""
+    """Whether a Full Render is running right now, in any window."""
     for worker in list(_FULL_RENDER_SLOT):
         try:
             if worker.isRunning():
@@ -212,10 +227,10 @@ def full_render_in_flight() -> bool:
 
 
 def wait_for_detached_renders(timeout_ms: int = 30000) -> None:
-    """앱을 끄기 전에 남은 렌더를 기다립니다.
+    """Waits for the remaining renders before the app shuts down.
 
-    여기서는 정말로 기다려야 합니다 — 인터프리터가 끝나면 객체가 사라지고,
-    그때 도는 중이면 같은 크래시가 납니다.
+    Here we really do have to wait - once the interpreter ends the objects
+    disappear, and if one is running at that point the same crash follows.
     """
     for worker in list(_RUNNING_RENDERS):
         try:
@@ -230,7 +245,7 @@ def _remap_box(
     box: tuple[float, float, float, float] | None,
     region: tuple[float, float, float, float],
 ) -> tuple[float, float, float, float] | None:
-    """정규화 상자를 잘라낸 영역 기준 좌표로. 영역 밖이면 None."""
+    """Normalised box -> coordinates inside the cut region. None if outside."""
     if box is None:
         return None
     left, top, right, bottom = region
@@ -246,25 +261,26 @@ def _remap_box(
 
 
 class FinalRenderWorker(QThread):
-    """RAW를 실제로 디모자이크해 최종 화질 미리보기를 만듭니다.
+    """Actually demosaics the RAW to build the Full Render preview.
 
-    24MP 현상은 몇 초 걸릴 수 있어 메인 스레드를 막지 않도록 분리합니다.
+    Developing 24MP can take several seconds, so it is split off to keep the
+    main thread unblocked.
 
-    실측(R6M3 27MP): 디모자이크 5.1초, 보정 3.4초. **시간의 60%가
-    디모자이크**이고 rawpy는 이미지 전체 단위라 쪼갤 수 없습니다. 그래서
-    확대할 때마다 처음부터 다시 하면 매번 8.5초가 듭니다.
+    Measured (R6M3 27MP): demosaic 5.1s, adjustments 3.4s. **60% of the time
+    is demosaic**, and rawpy works on whole images so it cannot be split up.
+    Starting over on every zoom would therefore cost 8.5s each time.
 
-    두 가지로 줄입니다.
+    Two things cut that down.
 
-    1. 디모자이크 결과를 창이 들고 있다가 넘겨줍니다(`source`). 같은 컷을
-       확대·이동하는 동안에는 5.1초를 다시 쓰지 않습니다.
-    2. 확대한 상태면 **화면에 보이는 영역만** 보정합니다. 4배 확대에서
-       보정이 3.4초 → 0.22초가 됩니다(실측).
+    1. The window holds the demosaic result and hands it back (`source`).
+       While zooming and panning the same shot, the 5.1s is not spent again.
+    2. When zoomed in, only **the region visible on screen** is adjusted. At
+       4x zoom the adjustments go from 3.4s -> 0.22s (measured).
     """
 
-    done = Signal(object)     # 완성된 BGR 이미지
+    done = Signal(object)     # the finished BGR image
     failed = Signal(str)
-    source_ready = Signal(object)  # 디모자이크 원본 (다음 렌더에서 재사용)
+    source_ready = Signal(object)  # demosaic source (reused by next render)
 
     def __init__(self, path: Path, settings: DevelopSettings, wb,
                  target_long_edge: int = FINAL_LONG_EDGE, generation: int = 0,
@@ -274,29 +290,31 @@ class FinalRenderWorker(QThread):
                  metadata=None, base_kelvin: int = 0):
         super().__init__()
         self._base_kelvin = base_kelvin
-        """넘겨받은 source가 이미 디모자이크된 색온도(0 = as-shot).
+        """The colour temperature the handed-over source was already
+        demosaiced at (0 = as-shot).
 
-        source 없이 직접 디모자이크할 때도 이 값으로 합니다 — 그래야 화면과
-        Full Render가 같은 베이스 위에서 같은 게인을 씁니다.
+        Demosaicing directly, without a source, uses this value as well -
+        that is what makes the screen and the Full Render apply the same
+        gains on the same base.
         """
         self._main_face_box = main_face_box
-        # 렌즈 자동 보정은 기종·렌즈 이름으로 프로필을 찾습니다. 안 넘기면
-        # 조용히 원본이 나와서, 화면에는 걸린 보정이 Full Render에서만
-        # 사라집니다.
+        # Automatic lens correction finds its profile by camera and lens
+        # name. Without it the source comes back silently uncorrected, so a
+        # correction visible on screen disappears in the Full Render only.
         self._metadata = metadata
         self._path = path
         self._settings = settings
-        self._wb = wb  # (camera, daylight) 또는 None
+        self._wb = wb  # (camera, daylight) or None
         self._target = max(1, int(target_long_edge))
         self.generation = generation
         self._source = source
-        """이미 디모자이크해 둔 원본. 있으면 그 단계를 건너뜁니다."""
+        """An already demosaiced source. If present, that stage is skipped."""
         self.region = region
-        """보정할 영역 (left, top, right, bottom, 0~1). None이면 전체."""
+        """The region to adjust (left, top, right, bottom, 0~1). None = all."""
         self._cancelled = False
 
     def cancel(self) -> None:
-        """결과를 버리게 표시합니다. 스레드를 강제로 죽이지는 않습니다."""
+        """Marks the result to be discarded. Does not force-kill the thread."""
         self._cancelled = True
 
     def run(self) -> None:
@@ -308,14 +326,15 @@ class FinalRenderWorker(QThread):
             face_box = self._main_face_box
             image = self._source
             if image is None:
-                # 라이브 프리뷰(half)와 같은 방식이되 풀 해상도로 디모자이크합니다.
+                # Same way as the live preview (half), but demosaiced at
+                # full resolution.
                 image = load_demosaiced(
                     self._path,
                     target_kelvin=self._base_kelvin or None,
                     highlight_recovery=self._settings.basic.highlight_recovery)
                 if self._cancelled:
                     return
-                # 창이 들고 있다가 다음 확대·이동 때 넘겨줍니다
+                # The window holds it and hands it back on the next zoom/pan
                 self.source_ready.emit(image)
 
             if self._cancelled:
@@ -324,53 +343,64 @@ class FinalRenderWorker(QThread):
             settings = self._settings
             scene_hw = None
             if self.region is not None:
-                # **자르기 전에** 광학 보정을 겁니다. 왜곡·비네팅은 화면 중심과
-                # 크기 기준이라, 조각에 걸면 그 조각을 프레임 전체로 알고
-                # 계산합니다(실측 평균 25.9레벨, 모서리 +52.7). 돌려받은
-                # settings는 광학이 중립이라 아래 apply_settings에서 두 번
-                # 걸리지 않습니다.
+                # Apply optical correction **before cutting**. Distortion and
+                # vignetting are computed from the frame centre and size, so
+                # applying them to a piece treats that piece as the whole
+                # frame (measured 25.9 levels on average, +52.7 at the
+                # corners). The settings that come back have optics
+                # neutralised, so apply_settings below does not apply them a
+                # second time.
                 image, settings = engine.apply_optics_stage(
                     image, settings, self._path, self._metadata)
                 if self._cancelled:
                     return
 
-                # 보이는 영역만. 자른 뒤 자르기 설정을 그대로 두면 두 번
-                # 잘리므로, 여기서는 기하 보정을 중립으로 두고 보냅니다.
+                # The visible region only. Leaving the crop settings in place
+                # after cutting would crop twice, so geometry is passed on
+                # neutralised here.
                 height, width = image.shape[:2]
                 left, top, right, bottom = self.region
                 x0 = max(0, min(width - 1, int(left * width)))
                 y0 = max(0, min(height - 1, int(top * height)))
                 x1 = max(x0 + 1, min(width, int(right * width)))
                 y1 = max(y0 + 1, min(height, int(bottom * height)))
-                frame_hw = (height, width)          # 자르기 전 장면 크기
+                frame_hw = (height, width)          # scene size before crop
                 image = _np.ascontiguousarray(image[y0:y1, x0:x1])
-                # 주 피사체 좌표도 잘라낸 조각 기준으로 다시 잡습니다. 안 그러면
-                # 확대할 때만 마스크가 엉뚱한 얼굴로 옮겨 갑니다.
+                # The main-subject coordinates are re-based on the cut piece
+                # too. Otherwise the mask moves to the wrong face, but only
+                # when zoomed in.
                 face_box = _remap_box(face_box, (left, top, right, bottom))
 
             piece_long = max(image.shape[:2])
-            # 화면에 실제로 보이는 해상도까지만 줄입니다. resize_long_edge는
-            # 확대하지 않으므로, target이 원본보다 크면 원본 그대로 갑니다.
+            # Shrink only as far as the resolution actually visible on
+            # screen. resize_long_edge never enlarges, so if the target is
+            # larger than the source, the source goes through unchanged.
             image = resize_long_edge(image, self._target)
             if self._cancelled:
                 return
             if self.region is not None:
-                # 조각이 장면 전체라면 가졌을 크기. 이걸 안 넘기면 선명도·
-                # 텍스처·클래리티 반지름이 조각 크기로 계산되어, 확대한
-                # 미리보기가 내보내기보다 1/줌배 약하게 걸립니다 — 하필
-                # 선명도를 확인하려고 확대하는 자리에서 어긋납니다.
+                # The size the piece would have had as the whole scene.
+                # Without passing this, the sharpness, texture, and clarity
+                # radii are computed from the piece size, so the zoomed
+                # preview applies them 1/zoom weaker than the export - and it
+                # goes wrong at exactly the place you zoom in to check
+                # sharpness.
                 shrink = max(image.shape[:2]) / max(1, piece_long)
                 scene_hw = (max(1, round(frame_hw[0] * shrink)),
                             max(1, round(frame_hw[1] * shrink)))
-            # **워터마크와 정보 띠는 빼고 보정만 합니다.** 화면에 올리는 쪽
-            # (_on_final_ready → _apply_display_overlays)이 그 둘을 다시
-            # 얹으므로, 여기서 구우면 두 번 들어갑니다 — 실측으로 세로가
-            # 132px 늘고 같은 문구가 두 줄이 됐습니다. 빠른 미리보기 경로
-            # (_render)는 처음부터 이렇게 하고 있었는데 이 워커만 빠져
-            # 있었고, 그래서 Full Render를 켤 때만 증상이 났습니다.
-            # output_space="srgb": 보정은 작업 공간에서 걸리지만 이 결과는 화면으로
-            # 갑니다. 엔진이 양자화 전에 sRGB로 옮겨야 뷰포트가 내보내기와
-            # 같은 색이 됩니다 — to_display는 uint8을 그대로 통과시킵니다.
+            # **Adjustments only - no watermark, no info strip.** The side
+            # that puts it on screen (_on_final_ready ->
+            # _apply_display_overlays) lays those two on again, so baking
+            # them here puts them in twice - measured, the height grew by
+            # 132px and the same text ran on two lines. The fast preview path
+            # (_render) had been doing it this way from the start; only this
+            # worker was missing it, which is why the symptom appeared only
+            # with Full Render on.
+            # output_space="srgb": the adjustments are applied in the working
+            # space, but this result goes to the screen. The engine has to
+            # move it to sRGB before quantising for the viewport to be the
+            # same colour as the export - to_display passes uint8 straight
+            # through.
             result = engine.apply_settings(
                 image,
                 replace(settings, watermark=WatermarkSettings(),
@@ -388,50 +418,55 @@ class FinalRenderWorker(QThread):
 
 
 CLIP_BLINK_MS = 550
-"""클리핑 표시 점멸 주기. 가만히 칠해 두면 사진 원래 색과 구분이 안 됩니다."""
+"""Clipping overlay blink period. Painted steadily it cannot be told apart
+from the photo's own colour."""
 
 CLIP_HIGHLIGHT_LEVEL = 250
 CLIP_SHADOW_LEVEL = 5
-"""클리핑으로 볼 화소값.
+"""The pixel values counted as clipped.
 
-254/2로 잡으면 8비트로 내린 뒤 정확히 그 값에 닿은 화소만 잡혀서, 눈으로는
-분명히 날아간 영역인데 표시가 거의 안 뜹니다. 실제로 "켜도 안 보인다"는
-리포트가 여기서 나왔습니다. 조금 안쪽으로 잡아야 경고 구실을 합니다.
+Set to 254/2, only pixels landing on exactly those values after the drop to 8
+bits are caught, so a region plainly blown to the eye barely raises any
+overlay. A report of "I turn it on and see nothing" came from exactly this.
+Pulling them a little inward is what makes them work as a warning.
 """
 
 
 def clip_overlay(
     image_bgr: np.ndarray, show_shadow: bool, show_highlight: bool
 ) -> np.ndarray:
-    """클리핑된 화소를 색으로 덮어 표시합니다 (Lightroom과 같은 방식).
+    """Marks clipped pixels by painting over them (the way Lightroom does).
 
-    하이라이트가 날아간 곳(어느 채널이든 상한 이상)은 빨강, 섀도우가 뭉개진
-    곳(모든 채널 하한 이하)은 파랑으로 칠합니다. 원본은 건드리지 않습니다.
+    Blown highlights (any channel at or above the upper level) are painted
+    red, crushed shadows (every channel at or below the lower level) blue.
+    The source is left untouched.
     """
     result = image_bgr.copy()
     if show_highlight:
         blown = image_bgr.max(axis=2) >= CLIP_HIGHLIGHT_LEVEL
-        result[blown] = (0, 0, 255)  # BGR 빨강
+        result[blown] = (0, 0, 255)  # BGR red
     if show_shadow:
         crushed = image_bgr.max(axis=2) <= CLIP_SHADOW_LEVEL
-        result[crushed] = (255, 0, 0)  # BGR 파랑
+        result[crushed] = (255, 0, 0)  # BGR blue
     return result
 
 
 def clip_counts(image_bgr: np.ndarray) -> tuple[int, int]:
-    """(뭉개진 화소 수, 날아간 화소 수). 표시가 왜 안 뜨는지 알려면 필요합니다."""
+    """(crushed pixel count, blown pixel count). Needed to explain why the
+    overlay is not showing."""
     crushed = int(np.count_nonzero(image_bgr.max(axis=2) <= CLIP_SHADOW_LEVEL))
     blown = int(np.count_nonzero(image_bgr.max(axis=2) >= CLIP_HIGHLIGHT_LEVEL))
     return crushed, blown
 
 
 def bgr_to_pixmap(image: np.ndarray) -> QPixmap:
-    """OpenCV BGR ndarray를 QPixmap으로. 복사본을 만들어야 버퍼가 살아 있습니다.
+    """OpenCV BGR ndarray -> QPixmap. A copy is what keeps the buffer alive.
 
-    QImage는 바이트열을 uint8 3채널로 해석합니다(bytesPerLine=3*width). float
-    배열을 그대로 넘기면 4바이트 값을 화소로 잘못 읽어 화면 전체가 컬러
-    노이즈가 됩니다. 파이프라인 중간값은 float이므로 여기서 반드시 8비트로
-    맞춥니다 — 호출부가 빠뜨려도 안전해야 합니다.
+    QImage reads the byte run as uint8 with 3 channels (bytesPerLine=3*width).
+    Hand it a float array as-is and it misreads 4-byte values as pixels,
+    turning the whole screen into colour noise. Intermediate pipeline values
+    are float, so they are forced to 8 bits here - this has to be safe even
+    when the caller forgets.
     """
     if image.dtype != np.uint8:
         image = np.clip(image, 0.0, 255.0).astype(np.uint8)
@@ -442,16 +477,17 @@ def bgr_to_pixmap(image: np.ndarray) -> QPixmap:
 
 
 class LoupeDialog(QDialog):
-    """미리보기 + 보정 + 컷 이동.
+    """Preview + develop + moving between shots.
 
-    records를 함께 넘기면 같은 목록 안에서 앞뒤로 이동할 수 있습니다.
+    Pass records along as well and you can step back and forth within the
+    same list.
     """
 
     records_changed = Signal()
     queue_requested = Signal(list)
     export_requested = Signal(list)
-    record_switched = Signal(object, object)  # (이전 경로, 새 경로)
-    main_face_changed = Signal(object)  # 주 피사체를 바꾼 레코드
+    record_switched = Signal(object, object)  # (previous path, new path)
+    main_face_changed = Signal(object)  # record whose main subject changed
 
     def __init__(
         self,
@@ -462,101 +498,122 @@ class LoupeDialog(QDialog):
         analyze_config: AnalyzeConfig | None = None,
     ):
         super().__init__(parent)
-        # 주 피사체를 바꾸면 판정을 다시 돌립니다 — 그때 배치와 같은 설정을
-        # 써야 점수가 어긋나지 않습니다. 안 넘어오면 기본값(배치도 기본값을
-        # 썼다면 일치)으로 둡니다.
+        # Changing the main subject re-runs the scoring - it has to use the
+        # same settings the batch did or the scores diverge. If none comes
+        # in, we leave the defaults (which match if the batch used defaults
+        # too).
         self._analyze_config = analyze_config or AnalyzeConfig()
-        # fast=True면 내장 JPEG으로 즉시 엽니다(빠른 미리보기용). False면 RAW를
-        # 디모자이크해 정확한 색·계조로 엽니다(보정용, 여는 데 조금 더 걸림).
+        # fast=True is preview mode: the adjust panel is hidden so the image
+        # gets the whole window. The picture itself is identical - both modes
+        # demosaic the RAW (_load_base), never the embedded JPEG, so the
+        # colour and gradation you judge in preview are the ones develop
+        # starts from.
         self._fast = fast
         self.records = records or [record]
         self.index = self.records.index(record) if record in self.records else 0
         self.record = self.records[self.index]
 
         self._source: np.ndarray | None = None
-        self._wb = None  # raw_io.WhiteBalance — 절대 색온도 변환용
-        self._final_worker = None  # 최종 미리보기 렌더 스레드
-        # 취소했지만 아직 도는 워커들. 참조를 놓으면 Qt가 프로세스를 죽입니다.
+        self._wb = None  # raw_io.WhiteBalance - for absolute Kelvin
+        self._final_worker = None  # the Full Render thread
+        # Workers cancelled but still running. Drop the reference and Qt
+        # kills the process.
         self._retired_workers: list[FinalRenderWorker] = []
         self._waiting_for_slot = False
-        """앞 렌더가 끝나기를 기다리는 중인지. 겹쳐 돌리지 않기 위한 표시."""
+        """Whether we are waiting for the previous render to finish. A marker
+        that keeps renders from overlapping."""
 
         self._clip_base: np.ndarray | None = None
-        """클리핑 칠하기 직전의 이미지. 점멸할 때 여기서만 다시 칠합니다."""
+        """The image just before the clipping paint. Blinking repaints only
+        from here."""
         self._clip_blink_on = True
 
         self._roi_reference_width = 0
-        """roi·faces 좌표의 기준 폭. 그릴 때 이미지 폭과 나눠 배율을 냅니다."""
+        """Reference width for the roi and faces coordinates. Drawing divides
+        the image width by it to get the scale."""
 
         self._eye_contours: list[np.ndarray] | None = None
-        """이 컷의 눈 윤곽(분석 좌표계). 컷을 바꾸거나 주 피사체를 바꾸면 비웁니다."""
+        """This shot's eye contours (analysis coordinates). Cleared when the
+        shot or the main subject changes."""
 
         self._af_box: object = _AF_UNREAD
-        """이 컷의 카메라 AF 상자(분석 좌표계). _AF_UNREAD=아직 안 읽음,
-        None=파일에 없음, (x,y,w,h)=있음. 캐시된 레코드엔 없어 표시 때 읽습니다."""
+        """This shot's camera AF box (analysis coordinates). _AF_UNREAD = not
+        read yet, None = not in the file, (x,y,w,h) = present. Cached records
+        do not carry it, so it is read at display time."""
 
         self._demosaic_cache = None
         self._demosaic_path: Path | None = None
-        """직전 Full Render의 디모자이크 결과. 확대·이동 때 재사용합니다."""
+        """The demosaic result of the last Full Render. Reused on zoom/pan."""
 
         self._rendered_frame = (False, False)
-        """직전 렌더의 표시 프레임 결정 — (크롭 편집 중, 마스크 편집 중).
+        """The last render's display-frame decision - (crop editing, mask
+        editing).
 
-        마스크·크롭 편집에 들어가면 화면이 기하를 풀고 다른 프레임을
-        보여 줍니다. 그 순간 진행 중이던 Full Render는 **이전 프레임으로**
-        만든 것이라, 도착하면 장면 좌표 조작점 밑을 잘린 그림으로 덮습니다 —
-        이 재설계가 없애려던 어긋남이 그 몇 초 창에서 되살아납니다.
-        값 편집이 낡은 렌더를 즉시 접는 것(_on_settings_changed)과 같은
-        취급이 필요하고, 전환을 알아채려면 직전 결정을 들고 있어야 합니다.
+        Entering mask or crop editing makes the screen release geometry and
+        show a different frame. A Full Render in flight at that moment was
+        built **with the previous frame**, so on arrival it covers what is
+        under the scene-coordinate handles with a cropped picture - the
+        mismatch this redesign set out to remove comes back to life in that
+        window of a few seconds. It needs the same treatment as a value edit
+        folding a stale render immediately (_on_settings_changed), and
+        spotting the transition means holding on to the previous decision.
         """
 
         self._display_geometry = GeometrySettings()
-        """지금 화면에 실제로 적용된 기하.
+        """The geometry actually applied to the screen right now.
 
-        ROI·얼굴 오버레이는 분석(자르기 전) 좌표라 이 기하로 옮겨 그립니다.
-        panel.settings()를 그때그때 읽으면 안 됩니다 — 크롭 모드·마스크
-        편집 중에는 화면이 기하를 일부/전부 풀고 그려지므로(_render), 표시에
-        쓴 값과 어긋납니다.
+        The ROI and face overlays are in analysis (pre-crop) coordinates, so
+        they are moved through this geometry to be drawn. Reading
+        panel.settings() on the spot is wrong - during crop mode and mask
+        editing the screen is drawn with geometry partly or wholly released
+        (_render), so it diverges from the values used for display.
         """
 
         self._locked = False
-        """내보내기가 도는 동안 편집을 막습니다 (set_locked).
+        """Blocks editing while an export is running (set_locked).
 
-        set_locked에서만 만들어지고 있었습니다. 지금까지는 쓰기만 하고
-        읽는 곳이 없어 드러나지 않았는데, _settle_white_balance가 읽기
-        시작하면서 한 번도 잠근 적 없는 창에서 AttributeError가 됩니다.
+        It used to be created only inside set_locked. That stayed hidden as
+        long as it was written and never read, but once _settle_white_balance
+        started reading it, a window that had never been locked raised
+        AttributeError.
         """
 
         self._base_kelvin = 0
-        """미리보기 베이스를 디모자이크할 때 쓴 목표 색온도 (0 = as-shot).
+        """The target colour temperature used when demosaicing the preview
+        base (0 = as-shot).
 
-        화이트밸런스는 센서 선형값에 거는 연산이라, 현상된 값에 채널 게인을
-        곱하는 것은 근사입니다 — as-shot에서 멀수록 벌어집니다(실측 183
-        mired에서 평균 9.2레벨, 화소의 64%가 5레벨 초과).
+        White balance is an operation on sensor-linear values, so multiplying
+        channel gains onto developed values is an approximation - the further
+        from as-shot, the wider it opens up (measured: 9.2 levels on average
+        at 183 mired, with 64% of pixels over 5 levels).
 
-        그래서 슬라이더가 멈추면 그 색온도로 다시 디모자이크합니다. 끄는
-        동안에는 옛 베이스 위의 게인이 미리보기를 맡습니다 — 재디모자이크가
-        40배 느립니다(0.03초 대 1.23초).
+        So when the slider settles we demosaic again at that colour
+        temperature. While it is being dragged, gains on the old base carry
+        the preview - re-demosaicing is 40x slower (0.03s against 1.23s).
         """
 
         self._base_highlight = False
-        """미리보기 베이스를 디모자이크할 때 쓴 하이라이트 복원 값.
+        """The highlight recovery value used when demosaicing the preview
+        base.
 
-        디코드 단계 옵션이라 슬라이더들과 달리 베이스 자체를 다시 만들어야
-        반영됩니다. 패널 값과 어긋난 것을 이 값으로 알아챕니다."""
+        It is a decode-stage option, so unlike the sliders it only takes
+        effect once the base itself is rebuilt. This value is how we notice
+        it has diverged from the panel's."""
 
         self._final_region: tuple[float, float, float, float] | None = None
-        """마지막 Full Render가 만든 영역. 전체가 아니면 화면 맞춤이 달라집니다."""
-        self._degraded = False  # 디모자이크 실패로 JPEG 폴백 중인지
+        """The region the last Full Render built. If it is not the whole
+        frame, fitting to the screen works differently."""
+        self._degraded = False  # on the JPEG fallback after demosaic failed
         self._degraded_reason = ""
-        """왜 폴백했는지. 알 수 있으면 화면에 그대로 보여 줍니다."""
+        """Why we fell back. If we can tell, we show it on screen as-is."""
         self._dirty = False
 
-        # 비모달로 띄웁니다. 모달이면 보정하는 동안 메인 창이 멈춰서
-        # 격자를 보거나 다른 컷을 열 수 없습니다.
-        # 최소화/최대화 버튼을 명시해야 합니다. QDialog 기본은 닫기 버튼만
-        # 달려 있어(WS_MAXIMIZEBOX 없음) 윈도우 스냅(에어로 스냅)이 걸리지
-        # 않습니다 — 화면 가장자리로 끌어도 반쪽 배치가 되지 않습니다.
+        # Shown non-modal. Modal would freeze the main window while
+        # developing, so you could not look at the grid or open another shot.
+        # The minimise/maximise buttons have to be spelled out. A QDialog
+        # carries only the close button by default (no WS_MAXIMIZEBOX), so
+        # window snapping (Aero Snap) does not engage - dragging to the
+        # screen edge never gives the half-screen layout.
         self.setWindowFlags(
             Qt.Window
             | Qt.WindowSystemMenuHint
@@ -567,9 +624,11 @@ class LoupeDialog(QDialog):
         self.setModal(False)
         self.setAttribute(Qt.WA_DeleteOnClose)
 
-        # 화면보다 큰 창으로 열면 창 관리자가 줄여 놓는데, 그때 스플리터가
-        # 패널 최소 폭을 못 맞춰 오른쪽이 잘린 채로 뜹니다. 처음부터 화면
-        # 안에 들어가는 크기로 엽니다 (FHD 100%에서 실제로 겪은 문제).
+        # Opening a window larger than the screen makes the window manager
+        # shrink it, and at that point the splitter cannot hold the panel's
+        # minimum width, so it comes up with the right side cut off. Open at
+        # a size that fits inside the screen from the start (a problem
+        # actually hit at FHD 100%).
         available = QApplication.primaryScreen()
         if available is not None:
             geometry = available.availableGeometry()
@@ -584,55 +643,59 @@ class LoupeDialog(QDialog):
         self._build_ui()
         self._build_shortcuts()
 
-        # 패널 폭은 스플리터가 정하지만, 창 자체가 패널 최소보다 좁아지면
-        # 오른쪽(값 박스·리셋 버튼)이 잘립니다. 레이아웃이 요구하는 최소를
-        # 창 최소로 삼아 그 아래로는 못 줄이게 막습니다. 폰트 메트릭에 따라
-        # 값이 달라지므로 하드코딩하지 않고 레이아웃에서 가져옵니다.
-        # 세로는 패널이 스크롤되므로 적당히 잡습니다.
+        # The splitter decides the panel width, but if the window itself gets
+        # narrower than the panel's minimum, the right side (value boxes,
+        # reset buttons) is cut off. We take the minimum the layout asks for
+        # as the window minimum, so it cannot shrink below that. The value
+        # varies with the font metrics, so it is read from the layout rather
+        # than hardcoded. The height is set loosely, since the panel scrolls.
         self.layout().activate()
         self.setMinimumSize(self.layout().minimumSize().width(), 640)
 
-        # 창을 열어 둔 채 프로그램을 끄면 closeEvent가 안 불립니다. 그러면
-        # 도는 워커가 파괴되어 Qt가 프로세스를 죽입니다(0xc0000409).
-        # 종료 직전에 한 번 더 정리할 기회를 잡아 둡니다.
+        # Quitting the program with the window still open never calls
+        # closeEvent. A running worker is then destroyed and Qt kills the
+        # process (0xc0000409). We take one more chance to clean up just
+        # before shutdown.
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._shutdown_workers)
 
-        # 슬라이더를 끌 때마다 렌더링하면 버벅입니다. 잠깐 멈추면 그립니다.
+        # Rendering on every slider drag stutters. We draw once it pauses.
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(120)
         self._render_timer.timeout.connect(self._render)
 
-        # 색온도가 멈추면 그 값으로 다시 디모자이크합니다. Full Render보다
-        # 먼저(600ms) 돌아야 합니다 — Full Render가 옛 베이스로 만들어지면
-        # 곧바로 버려집니다.
+        # When the colour temperature settles we demosaic again at that
+        # value. It has to run before the Full Render (600ms) - a Full Render
+        # built on the old base is thrown away immediately.
         self._settle_timer = QTimer(self)
         self._settle_timer.setSingleShot(True)
         self._settle_timer.setInterval(600)
         self._settle_timer.timeout.connect(self._settle_white_balance)
 
-        # Full Render는 조작이 멈춘 뒤에만 돌립니다. 매 조작마다 풀 해상도로
-        # 현상하면 슬라이더를 못 움직입니다.
+        # Full Render only runs once the controls stop. Developing at full
+        # resolution on every input would make the sliders unusable.
         self._final_generation = 0
         self._full_render_timer = QTimer(self)
         self._full_render_timer.setSingleShot(True)
         self._full_render_timer.setInterval(800)
         self._full_render_timer.timeout.connect(self._show_final_preview)
 
-        # 켠 직후 버튼을 잠그는 타이머. 연타하면 무거운 렌더가 겹쳐서
-        # 메모리가 두 배가 되고, 작은 PC는 그 지점에서 죽습니다.
+        # Timer that locks the button right after it is switched on.
+        # Hammering it overlaps heavy renders, doubling memory, and a small
+        # PC dies at that point.
         self._full_render_lock = QTimer(self)
         self._full_render_lock.setSingleShot(True)
         self._full_render_lock.timeout.connect(self._release_full_render_button)
 
-        # 앞 렌더가 끝나기를 기다렸다 출발하기 위한 재시도 타이머
+        # Retry timer for waiting out the previous render before setting off
         self._slot_timer = QTimer(self)
         self._slot_timer.setSingleShot(True)
         self._slot_timer.timeout.connect(self._retry_when_slot_free)
 
-        # 클리핑 점멸. 가만히 칠해 두면 원래 그런 색인지 경고인지 모릅니다.
+        # Clipping blink. Painted steadily you cannot tell the warning from
+        # the colour that was already there.
         self._clip_blink_timer = QTimer(self)
         self._clip_blink_timer.timeout.connect(self._blink_clip_overlay)
 
@@ -648,7 +711,7 @@ class LoupeDialog(QDialog):
         self.info.setWordWrap(True)
         layout.addWidget(self.info)
 
-        # 잠긴 이유를 말해 주지 않으면 사용자는 프로그램이 멈춘 줄 압니다
+        # Without saying why it is locked, the user thinks the program hung
         self.lock_notice = QLabel()
         self.lock_notice.setWordWrap(True)
         self.lock_notice.setStyleSheet(
@@ -659,10 +722,11 @@ class LoupeDialog(QDialog):
         self.lock_notice.setVisible(False)
         layout.addWidget(self.lock_notice)
 
-        # 이미지와 보정 패널 사이를 사용자가 끌어 조절할 수 있게 합니다.
-        # 폭을 고정해 두면 내용이 조금만 늘어도 오른쪽이 말없이 잘립니다
-        # (실제로 세 번 겪었습니다). 스플리터는 최소치만 지키고 나머지는
-        # 창 크기와 사용자 조작에 맡깁니다.
+        # Lets the user drag the divide between the image and the develop
+        # panel. With a fixed width, the slightest growth in content cuts the
+        # right side off silently (hit three times in practice). The splitter
+        # holds only the minimum and leaves the rest to the window size and
+        # what the user does.
         self.body_splitter = QSplitter(Qt.Horizontal)
         self.body_splitter.setChildrenCollapsible(False)
         self.body_splitter.setHandleWidth(6)
@@ -687,9 +751,10 @@ class LoupeDialog(QDialog):
         self.histogram = HistogramWidget()
         right.addWidget(self.histogram)
 
-        # 예전에는 히스토그램 좌·우 상단 모서리의 9px짜리 삼각형이 이 토글
-        # 이었습니다. 어두운 회색이라 있는 줄도 몰랐고, 22px 코너를 정확히
-        # 눌러야 해서 눌러도 안 눌렸습니다. 글자가 있는 버튼으로 꺼냅니다.
+        # These toggles used to be the 9px triangles in the histogram's top
+        # left and right corners. Dark grey, so nobody knew they were there,
+        # and you had to hit a 22px corner exactly, so pressing them often
+        # did nothing. We pull them out as buttons with text on them.
         clip_row = QHBoxLayout()
         clip_row.setSpacing(4)
         clip_row.setContentsMargins(0, 0, 0, 0)
@@ -718,7 +783,7 @@ class LoupeDialog(QDialog):
         self.histogram.clipping_changed.connect(self._on_clipping)
         self.histogram.overlay_toggled.connect(self._sync_clip_buttons)
 
-        # 순환 import를 피하려고 여기서 가져옵니다
+        # Imported here to avoid a circular import
         from .develop_panel import DevelopPanel
 
         self.panel = DevelopPanel()
@@ -739,14 +804,15 @@ class LoupeDialog(QDialog):
 
         container = QWidget()
         container.setLayout(right)
-        # 고정이 아니라 최소만 정합니다. 모자라면 사용자가 스플리터를 끌어
-        # 넓히면 되고, 창이 커지면 이미지 쪽이 늘어납니다.
+        # A minimum, not a fixed width. If it is too narrow the user can drag
+        # the splitter wider, and when the window grows the image side grows.
         container.setMinimumWidth(self.panel.minimumWidth())
         self.body_splitter.addWidget(container)
-        self.body_splitter.setStretchFactor(0, 1)   # 이미지가 남는 공간을 가져갑니다
+        self.body_splitter.setStretchFactor(0, 1)   # image takes the slack
         self.body_splitter.setStretchFactor(1, 0)
-        # 미리보기 모드에서는 보정 패널을 숨겨 이미지를 크게 봅니다.
-        # (색은 보정 모드와 똑같이 디모자이크로 정확합니다.)
+        # In preview mode the develop panel is hidden so the image can be
+        # seen large. (Colour is demosaic-accurate, exactly as in develop
+        # mode.)
         if self._fast:
             container.setVisible(False)
 
@@ -771,16 +837,18 @@ class LoupeDialog(QDialog):
 
         row.addStretch(1)
 
-        # 단축키는 라벨이 아니라 툴팁에 답니다. 표시 항목이 셋으로 늘면서
-        # "(B)" 같은 꼬리표까지 넣으면 이 줄만으로 창 최소 폭이 1004px가 되어,
-        # 900px 화면에서 우측 패널이 잘립니다(실측).
+        # Shortcuts go in the tooltip, not the label. With the overlay
+        # toggles grown to three, adding tails like "(B)" as well pushes the
+        # window's minimum width to 1004px from this row alone, which cuts
+        # off the right panel on a 900px screen (measured).
         self.before_after = QCheckBox(tr("Original"))
         self.before_after.setToolTip(tr("Shows the image before develop (B)"))
         self.before_after.toggled.connect(self._render)
         row.addWidget(self.before_after)
 
-        # 원본 위에 그리는 것이 늘어나면서 한 스위치로 묶어 두기 어려워졌습니다.
-        # 초점 영역만 보고 싶은데 얼굴 상자가 같이 나오면 정작 초점을 못 봅니다.
+        # As more got drawn over the image, keeping it all under one switch
+        # became untenable. If you only want the focus region but the face
+        # boxes come along with it, you cannot actually see the focus.
         self.show_roi = QCheckBox(tr("Focus"))
         self.show_roi.setChecked(True)
         self.show_roi.setToolTip(tr("The region used for grading — green box (F)"))
@@ -884,27 +952,28 @@ class LoupeDialog(QDialog):
 
         return footer
 
-    # ------------------------------------------------------------ 줌
+    # ------------------------------------------------------------ Zoom
 
     def zoom_to_focus(self) -> None:
-        """판정에 쓴 ROI를 화면 가득 채웁니다."""
+        """Fills the screen with the ROI used for scoring."""
         if not (self.record.focus and self.record.focus.roi):
             return
         if not self.panel.settings().geometry.is_neutral():
-            # 크롭이 걸리면 좌표계가 달라져 ROI 위치를 신뢰할 수 없습니다
+            # A crop changes the coordinate system, so the ROI position
+            # cannot be trusted
             return
         self.preview.zoom_to_roi(self.record.focus.roi, self._roi_scale)
         self._on_zoom(self.preview.zoom())
 
     def _on_zoom(self, zoom: float) -> None:
         self.zoom_label.setText(f"{zoom * 100:.0f}%")
-        # 확대하면 더 정밀한 해상도가 필요합니다. 확대를 멈춘 뒤 다시 그립니다.
+        # Zooming in needs a finer resolution. We redraw once zooming stops.
         self._schedule_full_render()
 
-    # ------------------------------------------------------------ 대기열 / 내보내기
+    # ---------------------------------------------------------- Queue / export
 
     def add_to_queue(self) -> None:
-        """현재 컷을 대기열에 담습니다. 부모 창이 대기열을 들고 있습니다."""
+        """Puts the current shot in the queue. The parent window holds it."""
         self._commit_settings()
         self.queue_requested.emit([self.record])
 
@@ -935,10 +1004,10 @@ class LoupeDialog(QDialog):
     def _toggle_before_after(self) -> None:
         self.before_after.setChecked(not self.before_after.isChecked())
 
-    # ------------------------------------------------------------ 컷 이동
+    # --------------------------------------------------------- Shot navigation
 
     def step(self, delta: int) -> None:
-        """앞뒤 컷으로 이동합니다. 목록 끝에서는 멈춥니다."""
+        """Moves to the previous/next shot. Stops at the ends of the list."""
         target = self.index + delta
         if not (0 <= target < len(self.records)):
             return
@@ -946,16 +1015,16 @@ class LoupeDialog(QDialog):
         previous_path = self.record.path
         self.index = target
         self.record = self.records[target]
-        # 컷을 옮기면 들고 있던 디모자이크 원본(약 390MB)은 쓸모가 없습니다
+        # Moving shots makes the held demosaic source (about 390MB) useless
         self._drop_demosaic()
         self._load_current()
         self.record_switched.emit(previous_path, self.record.path)
 
     def _commit_settings(self) -> None:
-        """지금 화면의 보정값을 현재 레코드에 저장합니다.
+        """Saves the develop values now on screen into the current record.
 
-        컷을 옮기기 전에 반드시 불러야 합니다. 안 그러면 방금 맞춘 값이
-        조용히 사라집니다.
+        This must be called before moving to another shot. Otherwise the
+        values just dialled in disappear silently.
         """
         if not self._dirty:
             return
@@ -970,38 +1039,44 @@ class LoupeDialog(QDialog):
         self.panel.set_settings(self.record.develop or DevelopSettings())
         self._dirty = False
         basic = (self.record.develop or DevelopSettings()).basic
-        # 저장된 색온도가 있으면 **처음부터 그 색온도로** 디모자이크합니다.
-        # as-shot으로 열었다가 나중에 맞추면 두 번 디모자이크하게 되고, 그
-        # 사이의 화면은 근사라 내보내기와 다릅니다 — 슬라이더를 건드리지
-        # 않으면 영영 그 상태로 남습니다.
+        # If a colour temperature was saved, demosaic **at that temperature
+        # from the start**. Opening at as-shot and matching later means
+        # demosaicing twice, and the screen in between is an approximation
+        # that differs from the export - and if the slider is never touched
+        # it stays that way forever.
         kelvin = int(basic.temperature) if basic.temperature > 0 else 0
         if is_editable_image(self.record.path):
-            kelvin = 0      # 센서 데이터가 없어 디모자이크가 무시합니다
+            kelvin = 0      # no sensor data, so the demosaic ignores it
         self._load_base(basic.highlight_recovery, kelvin)
         self._load_context()
 
     def _load_base(self, highlight_recovery: bool, kelvin: int = 0) -> None:
-        """미리보기 베이스(디모자이크)를 만듭니다.
+        """Builds the preview base (demosaic).
 
-        하이라이트 복원은 디코드 단계 옵션이라, 토글될 때도 여기로 다시
-        들어옵니다 — 슬라이더처럼 LUT만 다시 그려서는 반영되지 않습니다.
+        Highlight recovery is a decode-stage option, so toggling it comes
+        back through here as well - redrawing only the LUT, the way a slider
+        does, does not carry it.
 
-        kelvin은 화이트밸런스를 센서 선형에서 걸기 위한 목표 색온도입니다
-        (0 = as-shot). 슬라이더가 멈춘 뒤에만 들어옵니다(_base_kelvin 참고).
+        kelvin is the target colour temperature for applying white balance in
+        sensor linear (0 = as-shot). It only arrives after the slider settles
+        (see _base_kelvin).
         """
         self._base_highlight = highlight_recovery
-        # 성공했을 때만 세웁니다. 아래 폴백은 카메라가 구운 JPEG이라 센서
-        # 선형 WB가 안 걸린 상태인데, 걸렸다고 해 두면 게인이 1이 되어
-        # 화이트밸런스가 통째로 사라집니다.
+        # Set only on success. The fallback below is a camera-baked JPEG,
+        # which has no sensor-linear WB applied; claiming that it does makes
+        # the gains 1 and the white balance disappears entirely.
         self._base_kelvin = 0
         try:
-            # 보정 화면은 RAW를 실제로 디모자이크한 중립 이미지를 씁니다.
-            # 내장 JPEG은 카메라 픽처스타일(대비·채도·톤)이 이미 구워져 있어
-            # 보정을 끈 상태에서도 실제 RAW와 크게 달라집니다. 셀렉 그리드는
-            # 속도 때문에 JPEG을 쓰지만, 여기서는 정확도가 우선입니다.
-            # 미리보기든 보정이든 오직 RAW 디모자이크만 씁니다 — 내장 JPEG은
-            # 색·계조가 카메라 렌더라 여기서는 절대 쓰지 않습니다. 반응 속도를
-            # 위해 half-size로 합니다(최종 미리보기 버튼은 풀 해상도).
+            # The develop view uses a neutral image actually demosaiced from
+            # the RAW. The embedded JPEG already has the camera picture style
+            # (contrast, saturation, tone) baked in, so even with every
+            # adjustment off it differs greatly from the real RAW. The
+            # culling grid uses JPEG for speed, but here accuracy comes
+            # first.
+            # Preview or develop, only the RAW demosaic is used - the
+            # embedded JPEG's colour and gradation are a camera render, so it
+            # is never used here. Done at half-size for responsiveness (the
+            # Full Render button goes to full resolution).
             full = load_demosaiced(self.record.path, half_size=True,
                                    target_kelvin=kelvin or None,
                                    highlight_recovery=highlight_recovery)
@@ -1011,9 +1086,10 @@ class LoupeDialog(QDialog):
             self._degraded = False
             self._degraded_reason = ""
         except Exception as demosaic_exc:  # noqa: BLE001
-            # 디모자이크가 아예 실패하는 파일(손상, 완전 미지원)은 아무것도
-            # 못 보여주는 것보다 내장 JPEG으로라도 보여 주는 편이 낫습니다.
-            # 색·계조는 정확하지 않으므로 표시로 알립니다.
+            # For files where the demosaic fails outright (corrupt, wholly
+            # unsupported), showing the embedded JPEG at least beats showing
+            # nothing. Colour and gradation are not accurate, so we say so on
+            # screen.
             try:
                 full = load_preview(self.record.path)
                 self._source = resize_long_edge(full, PREVIEW_LONG_EDGE)
@@ -1031,19 +1107,22 @@ class LoupeDialog(QDialog):
                 )
 
     def _load_context(self) -> None:
-        """컷이 바뀔 때의 나머지 — WB 기준점, 렌즈 조회, 오버레이 상태.
+        """The rest of switching shots - WB reference, lens lookup, overlay
+        state.
 
-        _load_base와 달리 **컷마다 한 번**입니다. 하이라이트 복원 토글로
-        베이스만 다시 만들 때는 여기를 다시 돌지 않습니다 — 렌즈 후보
-        콤보를 다시 채우면 사용자가 고른 값이 날아갑니다.
+        Unlike _load_base this runs **once per shot**. Rebuilding only the
+        base from a highlight recovery toggle does not come back through here
+        - refilling the lens candidate combo would throw away what the user
+        picked.
         """
         self._maybe_warn_stale_roi()
 
-        # 절대 색온도 변환에 쓸 화이트밸런스를 읽고, 슬라이더 기본값을
-        # 이 컷의 as-shot 색온도로 맞춥니다. **못 읽으면(JPEG·HEIF) 기본값으로
-        # 되돌립니다** — 안 되돌리면 직전 RAW의 as-shot이 남아, 다음 JPEG
-        # 컷에서 슬라이더를 한 칸만 건드려도 그 기준점 대비 큰 색 이동
-        # (실측 R×0.77·B×1.40)이 걸립니다.
+        # Read the white balance for absolute Kelvin conversion and set the
+        # slider default to this shot's as-shot colour temperature. **If it
+        # cannot be read (JPEG, HEIF), fall back to the default** - without
+        # that, the previous RAW's as-shot stays behind, and on the next JPEG
+        # shot nudging the slider a single step applies a large colour move
+        # against that reference (measured Rx0.77, Bx1.40).
         from .develop_panel import DEFAULT_KELVIN
 
         self._wb = read_white_balance(self.record.path)
@@ -1052,31 +1131,34 @@ class LoupeDialog(QDialog):
         else:
             self.panel.set_as_shot_kelvin(DEFAULT_KELVIN)
 
-        # 렌즈 프로필이 잡히는지 미리 알려 줍니다. DB에 없는 렌즈가 흔해서
-        # (실측: 탐론 A069 미등록) 자동 보정을 켜기 전에 알아야 합니다.
+        # Tell up front whether a lens profile was found. Lenses missing from
+        # the DB are common (measured: Tamron A069 not registered), so this
+        # has to be known before automatic correction is switched on.
         from ..core.develop.optics import available_lenses, find_lens
 
         match = find_lens(self.record.metadata)
         self.panel.set_lens_info(match.summary, match.found)
 
-        # 색 보정 표시는 이 사진의 기종 것만 보여야 합니다
+        # The colour calibration display must show only this shot's camera
         meta = self.record.metadata
         self.panel.set_camera(
             getattr(meta, "camera_make", "") or "",
             getattr(meta, "camera_model", "") or "",
         )
 
-        # JPEG·HEIF는 카메라가 프로파일·기종 색·렌즈 보정을 이미 적용한
-        # 결과입니다. 센서 기반 항목을 잠급니다 (set_raw_source 참고).
+        # JPEG and HEIF are the result of the camera already applying the
+        # profile, the camera colour, and the lens correction. Sensor-based
+        # items are locked (see set_raw_source).
         from ..core.raw_io import is_editable_image
 
         self.panel.set_raw_source(not is_editable_image(self.record.path))
 
-        # 얼굴 마스크에서 번호를 고르려면 몇 개가 잡혔는지 알아야 합니다
+        # Picking an index in the face mask needs to know how many were found
         focus = self.record.focus
         self.panel.set_face_count(len(focus.faces) if focus else 0)
 
-        # 자동 조회가 실패했을 때 직접 고를 수 있도록 후보를 채웁니다.
+        # Fill in the candidates so one can be picked by hand when the
+        # automatic lookup fails.
         if not self.panel.lens_override.count():
             maker = None
             if self.record.metadata and self.record.metadata.camera_model:
@@ -1084,15 +1166,16 @@ class LoupeDialog(QDialog):
                 maker = "Sony" if model.startswith("ILCE") else None
             self.panel.lens_override.addItems(["", *available_lenses(maker=maker)])
 
-        # 초점 정보는 캐시에서 옵니다. 없으면 표시 자체를 끕니다.
+        # Focus data comes from the cache. Without it, the toggles go off.
         has_focus = self.record.focus is not None and self.record.focus.roi is not None
         has_faces = bool(self.record.focus and self.record.focus.faces)
         self.show_roi.setEnabled(has_focus)
         self.show_faces.setEnabled(has_faces)
         self.show_eyes.setEnabled(has_faces)
-        # AF는 파일이 기록했을 때만 의미가 있지만, 그 여부는 파일을 읽어야
-        # 압니다(_source가 비동기라 여기선 아직 없음). 메타가 있으면 켜 두고,
-        # 없으면 그릴 게 없다는 것만 툴팁이 설명합니다.
+        # AF only means anything when the file recorded it, but knowing that
+        # means reading the file (_source is async, so it is not here yet).
+        # If there is metadata we leave it enabled, and when there is nothing
+        # to draw the tooltip is what explains it.
         self.show_af.setEnabled(self.record.metadata is not None)
         self.focus_zoom_button.setEnabled(has_focus)
         self.preview.reset_view()
@@ -1101,25 +1184,29 @@ class LoupeDialog(QDialog):
             tr("The region used for grading — green box (F)") if has_focus
             else tr("This shot has no analysis data")
         )
-        self._eye_contours = None  # 컷이 바뀌면 다시 잽니다
-        self._af_box = _AF_UNREAD  # 컷이 바뀌면 다시 읽습니다
+        self._eye_contours = None  # re-measured when the shot changes
+        self._af_box = _AF_UNREAD  # re-read when the shot changes
 
-        # 환경설정에서 켰다면 보정이 전혀 없는 컷에 한해 카메라 룩을
-        # 시작점으로 깝니다. _render() 전에 해야 첫 화면부터 맞은 값입니다.
+        # If it is switched on in preferences, lay the camera look down as a
+        # starting point, but only on shots with no develop at all. It has to
+        # happen before _render() for the first frame to show matched values.
         self._maybe_auto_camera_match()
 
         self._refresh_header()
         self._render()
 
-    # ------------------------------------------------------------ 카메라 룩 매칭
+    # ---------------------------------------------------- Camera look matching
 
     def _fit_camera_match(self) -> DevelopSettings | None:
-        """현재 컷의 카메라 룩 매칭 설정을 계산합니다. 못 하면 None.
+        """Computes the camera look match settings for the current shot.
+        None if it cannot.
 
-        내장 JPEG(카메라 렌더)을 정답지로 노출·톤 곡선·채도를 피팅해
-        **슬라이더에 올라가는 보통 값**으로 돌려줍니다(core/develop/
-        camera_look.py). 어떤 실패도 창을 막으면 안 됩니다 — 시작점 편의
-        기능이 열기 자체를 방해하면 본말이 뒤집힙니다.
+        Fits exposure, tone curve, and saturation against the embedded JPEG
+        (the camera render) as the answer key, and returns them as **ordinary
+        values that go onto the sliders** (core/develop/camera_look.py). No
+        failure may block the window - a convenience that sets a starting
+        point getting in the way of opening at all turns the point on its
+        head.
         """
         from ..core.develop import camera_look
         from ..core.raw_io import is_editable_image
@@ -1129,24 +1216,27 @@ class LoupeDialog(QDialog):
             return None
         try:
             target = load_preview(self.record.path)
-            # working=self._source: 피팅·검증을 실제 화면 경로(작업 공간
-            # 적용 → sRGB 변환)로 돌립니다. 표시값 위에서만 피팅하면 커브가
-            # 실제로 걸리는 공간과 어긋나 색이 남습니다(실측 R/G 12%).
+            # working=self._source: runs the fit and the check through the
+            # real screen path (working space applied -> sRGB conversion).
+            # Fitting on display values alone leaves the curve out of step
+            # with the space it is actually applied in, and colour is left
+            # behind (measured R/G 12%).
             return camera_look.match_settings(
                 to_display(self._source), target, base=self.panel.settings(),
                 wb=self._wb.engine_wb if self._wb else None,
                 working=self._source,
             )
-        except Exception:  # noqa: BLE001 - 프리뷰가 없거나 깨진 파일도 있습니다
+        except Exception:  # noqa: BLE001 - preview may be absent or broken
             log.debug("카메라 룩 매칭 실패: %s", self.record.path.name,
                       exc_info=True)
             return None
 
     def _match_camera_look(self) -> None:
-        """'카메라 JPEG에 맞추기' 버튼 — 피팅 결과를 슬라이더 값으로 올립니다.
+        """The 'Match camera JPEG' button - puts the fit onto the sliders.
 
-        노출·채도·톤 곡선만 바꾸고 디테일·마스크·크롭 등 나머지 편집은
-        그대로 둡니다(camera_look.match_settings의 계약).
+        It changes only exposure, saturation, and the tone curve, leaving the
+        rest of the edits - detail, masks, crop - alone (the contract of
+        camera_look.match_settings).
         """
         matched = self._fit_camera_match()
         if matched is None:
@@ -1162,23 +1252,26 @@ class LoupeDialog(QDialog):
             )
             return
         self.panel.set_settings(matched)
-        # 프리셋 이름이 남아 있으면 화면 값이 그 프리셋인 줄 압니다
+        # A leftover preset name makes the on-screen values read as that
+        # preset
         self.panel.preset_bar.mark_modified()
         self._on_settings_changed()
 
     def _maybe_auto_camera_match(self) -> None:
-        """환경설정의 '카메라 룩으로 시작'이 켜져 있으면 자동 적용합니다.
+        """Applies automatically if 'Start from camera look' is on in
+        preferences.
 
-        **그 컷에 보정이 하나라도 있으면 절대 건드리지 않습니다.** 자동
-        기능이 사용자의 편집을 덮으면 신뢰가 끝장납니다. 미리보기 전용
-        창(fast)은 패널이 없으므로 제외합니다.
+        **If the shot carries even one adjustment, it is never touched.** An
+        automatic feature overwriting the user's edits is the end of trust.
+        Preview-only windows (fast) have no panel, so they are excluded.
         """
         from ..core import state
 
         if self._fast or not state.camera_match_on_open():
             return
-        # 내보내기가 도는 동안(set_locked)에는 어떤 경로로도 record.develop을
-        # 바꾸면 안 됩니다 — 컷 이동으로 _load_current가 다시 돌아도 마찬가지.
+        # While an export is running (set_locked), record.develop must not be
+        # changed by any path - including _load_current running again from a
+        # shot change.
         if getattr(self, "_locked", False):
             return
         current = self.record.develop
@@ -1189,8 +1282,9 @@ class LoupeDialog(QDialog):
             return
         self.panel.set_settings(matched)
         self.panel.preset_bar.mark_modified()
-        # 시작점도 저장돼야 화면=결과가 맞습니다 — 창을 그냥 닫아도 지금
-        # 보이는 값 그대로 내보내기에 쓰입니다.
+        # The starting point has to be saved too for what you see to be what
+        # you get - close the window without doing anything else and the
+        # values now on screen are exactly what the export uses.
         self._dirty = True
 
     def _refresh_header(self) -> None:
@@ -1217,9 +1311,10 @@ class LoupeDialog(QDialog):
             text += ("<br><span style='color:#999'>"
                      + " / ".join(render_all(record.reasons)) + "</span>")
         if getattr(self, "_degraded", False):
-            # 사유를 알 수 있으면 알려 줍니다. "실패"라고만 하면 파일이
-            # 깨진 줄 알지만, 실제로는 멀쩡한 RAW인데 제조사 독점 압축이라
-            # 못 푸는 경우가 있습니다(니콘 고효율 등).
+            # Say why if we can tell. Just "failed" reads as a broken file,
+            # but often the RAW is perfectly fine and merely uses a vendor
+            # proprietary compression we cannot decode (Nikon High
+            # Efficiency and the like).
             reason = self._degraded_reason or tr(
                 "RAW demosaic failed — showing the embedded JPEG"
                 " (colour and tone may not be accurate)"
@@ -1234,52 +1329,56 @@ class LoupeDialog(QDialog):
         for grade, button in self.grade_buttons.items():
             button.setChecked(record.final_grade == grade)
 
-    # ------------------------------------------------------------ 렌더링
+    # ------------------------------------------------------------ Rendering
 
     def _on_settings_changed(self) -> None:
         self._dirty = True
 
-        # 하이라이트 복원은 디코드 단계 옵션이라 LUT 재적용으로는 반영되지
-        # 않습니다 — 베이스(half 디모자이크)를 다시 만듭니다. 컷을 열 때와
-        # 같은 blocking 호출(0.5~2초)이고, 토글은 슬라이더처럼 연타되는
-        # 조작이 아니라서 그대로 둡니다. Full Render 캐시도 옛 값으로 만든
-        # 것이므로 함께 버립니다.
+        # Highlight recovery is a decode-stage option, so reapplying the LUT
+        # does not carry it - the base (half demosaic) is rebuilt. It is the
+        # same blocking call as opening a shot (0.5~2s), and a toggle is not
+        # hammered the way a slider is, so it is left as it is. The Full
+        # Render cache was built with the old value too, so it goes as well.
         flag = self.panel.settings().basic.highlight_recovery
         if flag != self._base_highlight and self._source is not None \
                 and not self._degraded:
             self._drop_demosaic()
             self._load_base(flag, self._base_kelvin)
 
-        # 색온도도 디코드 단계입니다. 다만 슬라이더라 연타되므로 곧바로
-        # 다시 디모자이크하면(1.2초) 조작이 멈춥니다. 손을 뗄 때까지 기다렸다가
-        # 한 번만 합니다 — 그때까지는 옛 베이스 위의 게인이 미리보기를 맡습니다.
+        # Colour temperature is a decode stage too. But it is a slider, so it
+        # gets hammered, and demosaicing again right away (1.2s) would stall
+        # the interaction. We wait until the hand comes off and do it once -
+        # until then, gains on the old base carry the preview.
         #
-        # RAW일 때만 겁니다. JPEG·HEIF는 디모자이크할 것이 없어 타이머가 떠도
-        # _settle_white_balance가 곧바로 되돌아 나옵니다.
+        # Only applied for RAW. JPEG and HEIF have nothing to demosaic, so
+        # even if the timer fires _settle_white_balance returns immediately.
         if (self._source is not None and not self._degraded
                 and self._wb is not None):
             self._settle_timer.start()
 
-        # 렌더가 200ms쯤 걸립니다. 알려주지 않으면 멈춘 줄 압니다.
+        # A render takes about 200ms. Without saying so it looks hung.
         self.preview.set_busy(True)
         self._render_timer.start()
 
-        # 값이 바뀌면 진행 중인 Full Render 결과는 이미 낡았습니다. 곧바로
-        # 멈추고 빠른 미리보기로 돌아갑니다. 예전에는 취소만 하고 다시
-        # 예약해서, 슬라이더를 계속 움직이는 동안 무거운 렌더가 뜨고
-        # 지기를 반복하며 조작이 무거워졌습니다.
+        # Once a value changes, an in-flight Full Render's result is already
+        # stale. We stop it at once and fall back to the fast preview. It
+        # used to only cancel and reschedule, so while the slider kept
+        # moving, heavy renders rose and fell over and over and the
+        # interaction got heavy.
         self._stop_full_render_for_edit()
         self._schedule_full_render()
 
     def _settle_white_balance(self) -> None:
-        """색온도가 멈췄습니다. 그 값으로 센서 선형에서 다시 디모자이크합니다.
+        """The colour temperature settled. Demosaic again at that value, in
+        sensor linear.
 
-        여기까지 오면 화면의 화이트밸런스가 근사에서 정확으로 바뀝니다 —
-        실측 오차 5.8~9.2레벨이 0.00이 됩니다(_wb_gain 참고). 그림이
-        살짝 달라지는데, 그 폭이 곧 근사가 틀렸던 양입니다.
+        Getting here turns the screen's white balance from approximate into
+        exact - a measured error of 5.8~9.2 levels becomes 0.00 (see
+        _wb_gain). The picture shifts slightly, and that shift is precisely
+        how wrong the approximation was.
 
-        RAW가 아니면 할 일이 없습니다. 편집 가능 이미지는 디모자이크 자체가
-        없고, 화이트밸런스도 그림 위의 게인이 전부입니다.
+        Nothing to do if it is not RAW. Editable images have no demosaic at
+        all, and their white balance is nothing but gains on the picture.
         """
         from ..core.raw_io import is_editable_image
 
@@ -1290,13 +1389,14 @@ class LoupeDialog(QDialog):
 
         wanted = int(self.panel.settings().basic.temperature)
         if wanted <= 0:
-            wanted = 0                      # as-shot으로 되돌립니다
+            wanted = 0                      # back to as-shot
         if wanted == self._base_kelvin:
             return
 
-        # 1.2초쯤 멈춥니다(half 재디모자이크). 컷을 열 때·하이라이트 복원을
-        # 토글할 때와 같은 블로킹 호출이고, 손을 뗀 뒤 한 번만 돕니다.
-        # 알려주지 않으면 멈춘 줄 압니다.
+        # This stalls for about 1.2s (half re-demosaic). It is the same
+        # blocking call as opening a shot or toggling highlight recovery, and
+        # it runs once, after the hand comes off. Without saying so it looks
+        # hung.
         self.preview.set_busy(True)
         self._drop_demosaic()
         self._load_base(self._base_highlight, wanted)
@@ -1304,12 +1404,14 @@ class LoupeDialog(QDialog):
         self._schedule_full_render()
 
     def set_locked(self, locked: bool, reason: str = "") -> None:
-        """편집을 잠급니다. 내보내기가 도는 동안 씁니다.
+        """Locks editing. Used while an export is running.
 
-        내보내기 워커는 이 레코드들의 `develop`과 등급을 한 장씩 읽어 갑니다.
-        그 사이에 값을 바꾸면 앞 장은 옛 설정으로, 뒷 장은 새 설정으로 나가
-        같은 배치에서 색이 갈립니다. 되돌리기 로그도 실제와 어긋납니다.
-        막을 수 없는 일이 아니라 막아야 하는 일입니다.
+        The export worker reads these records' `develop` and grades one shot
+        at a time. Change a value in between and the earlier shots go out
+        with the old settings and the later ones with the new, so colour
+        splits within a single batch. The undo log stops matching reality
+        too. This is not something that cannot be prevented; it is something
+        that must be.
         """
         self._locked = locked
         self.panel.setEnabled(not locked)
@@ -1329,10 +1431,11 @@ class LoupeDialog(QDialog):
         self.lock_notice.setVisible(bool(locked and reason))
 
     def _stop_full_render_for_edit(self) -> None:
-        """편집이 들어오면 Full Render를 즉시 접고 프리뷰 상태로 되돌립니다.
+        """On an edit, folds the Full Render at once and returns to preview.
 
-        모드 자체는 켜 둡니다 — 손을 떼면 _full_render_timer가 다시
-        고화질로 그려 줍니다. 여기서 끄는 것은 '지금 돌고 있는 작업'뿐입니다.
+        The mode itself stays on - once the hand comes off,
+        _full_render_timer draws at full quality again. What is switched off
+        here is only 'the job running right now'.
         """
         if (self._final_worker is None and not self._waiting_for_slot
                 and not self._full_render_timer.isActive()):
@@ -1352,10 +1455,11 @@ class LoupeDialog(QDialog):
         self._render()
 
     def _ratio_value(self, ratio) -> float | None:
-        """비율 설정을 실제 숫자로.
+        """Ratio setting -> an actual number.
 
-        ORIGINAL은 원본 종횡비라 이미지를 봐야 정해집니다. 고정 표에 없어서
-        예전에는 조용히 '자유'처럼 동작했습니다.
+        ORIGINAL is the source aspect ratio, so it takes looking at the image
+        to decide. It is not in the fixed table, so it used to behave quietly
+        like 'free'.
         """
         from ..core.develop import CropRatio
 
@@ -1365,10 +1469,10 @@ class LoupeDialog(QDialog):
         return ratio.value_ratio if ratio else None
 
     def _on_crop_dragged(self, left: float, top: float, right: float, bottom: float) -> None:
-        """이미지 위에서 끈 결과를 슬라이더에 반영합니다.
+        """Reflects the result of a drag on the image onto the sliders.
 
-        렌더는 여기서 하지 않는다 — 드래그 중 매 픽셀마다 다시 그리면
-        따라오지 못합니다. 놓는 순간(crop_finished)에 한 번만 그립니다.
+        No render happens here - redrawing on every pixel of the drag cannot
+        keep up. We draw once, at the moment of release (crop_finished).
         """
         for key, value in (
             ("geo.crop_left", left * 100.0), ("geo.crop_top", top * 100.0),
@@ -1392,7 +1496,7 @@ class LoupeDialog(QDialog):
             self._refresh_header()
 
     def _on_color_picked(self, rx: float, ry: float) -> None:
-        """미리보기에서 찍은 지점의 색조를 패널에 전달합니다."""
+        """Passes the hue at the point picked in the preview to the panel."""
         target = getattr(self, "_pick_target", "")
         if not target or self._source is None:
             return
@@ -1413,11 +1517,12 @@ class LoupeDialog(QDialog):
         self._refresh_clip_label()
 
     def _refresh_clip_label(self) -> None:
-        """경고 문구와 실제 화소 비율.
+        """The warning text and the actual pixel percentages.
 
-        예전에는 클리핑 여부가 **바뀔 때만** 문구를 갱신했습니다. 그래서
-        표시를 켠 순간에는 아무 안내도 없었고, 화면에 색이 안 보이면
-        고장인지 정말 클리핑이 없는 건지 구분할 방법이 없었습니다.
+        The text used to be refreshed **only when** the clipping state
+        changed. So there was no message at the moment the overlay was
+        switched on, and when no colour appeared on screen there was no way
+        to tell a fault from genuinely having no clipping.
         """
         shadow, highlight = getattr(self, "_clip_flags", (False, False))
         warnings = []
@@ -1441,11 +1546,14 @@ class LoupeDialog(QDialog):
         self.clip_label.setText(" · ".join(warnings))
 
     def _mask_editing_active(self) -> bool:
-        """마스크를 보거나 만지는 중인가 — 그동안 화면은 장면 프레임입니다.
+        """Whether a mask is being viewed or handled - while it is, the
+        screen shows the scene frame.
 
-        도형 조작점이 떠 있거나, 브러시로 칠하는 중이거나, 빨간 영역 표시가
-        켜져 있으면 참입니다. 마스크 좌표가 전부 장면(자르기 전) 기준이라
-        이때 잘린 프레임을 보여 주면 잡는 좌표부터 어긋납니다(_render 참고).
+        True when the shape handles are up, when the brush is painting, or
+        when the red region overlay is on. Mask coordinates are all relative
+        to the scene (before cropping), so showing the cropped frame at this
+        point puts the grabbed coordinates out of step from the start (see
+        _render).
         """
         if getattr(self.preview, "_shape_kind", None) is not None:
             return True
@@ -1457,11 +1565,12 @@ class LoupeDialog(QDialog):
         if self._source is None:
             return
 
-        # 표시 프레임 결정이 바뀌었으면(마스크·크롭 편집 진입/이탈) 진행
-        # 중인 Full Render를 접습니다. 그 렌더는 이전 프레임으로 만든
-        # 것이라 도착하는 순간 편집 중인 화면을 덮습니다. 모든 전환
-        # 경로(_sync_mask_shape, 영역 표시 토글, 브러시, 크롭 모드)가
-        # 여기를 지나므로 이 한 곳에서 알아챕니다.
+        # If the display-frame decision changed (entering/leaving mask or
+        # crop editing), fold the in-flight Full Render. That render was
+        # built with the previous frame, so the moment it arrives it covers
+        # the screen being edited. Every transition path
+        # (_sync_mask_shape, the region overlay toggle, the brush, crop mode)
+        # comes through here, so this one place catches it.
         frame = (self.preview._crop_mode, self._mask_editing_active())
         if frame != self._rendered_frame:
             self._rendered_frame = frame
@@ -1473,30 +1582,37 @@ class LoupeDialog(QDialog):
         if self.before_after.isChecked():
             image = self._source
         else:
-            # 크롭 모드에서는 크롭을 적용하지 않고 보여 줍니다. 잘라낸 결과를
-            # 그리면 그 위에서 크롭 범위를 다시 잡을 수가 없습니다.
+            # In crop mode we show the image without applying the crop.
+            # Drawing the cut result leaves no way to re-set the crop bounds
+            # on top of it.
             if self.preview._crop_mode:
                 settings = replace(
                     settings, geometry=replace(settings.geometry, **_FULL_CROP)
                 )
 
-            # **마스크를 보거나 만지는 동안은 기하를 통째로 풀고 보여 줍니다.**
+            # **While a mask is viewed or handled, geometry is released
+            # entirely.**
             #
-            # 마스크 좌표는 장면(자르기 전) 기준입니다. 화면이 잘린 프레임을
-            # 보여 주면 끌어서 잡는 좌표와 빨간 영역 표시가 전부 그 프레임
-            # 기준이 되어, 엔진이 거는 자리와 어긋납니다 — 크롭한 사진에서
-            # 마스크를 새로 그리면 다른 곳에 걸리던 원인입니다.
+            # Mask coordinates are relative to the scene (before cropping).
+            # If the screen shows the cropped frame, the coordinates grabbed
+            # by dragging and the red region overlay all become relative to
+            # that frame, out of step with where the engine applies them -
+            # this was why drawing a new mask on a cropped photo landed
+            # somewhere else.
             #
-            # 크롭만 풀면 부족합니다. 회전·수평보정도 좌표계를 바꾸므로 남겨
-            # 두면 그만큼 어긋납니다. 그래서 전부 풉니다 — 회전을 걸어 둔
-            # 사진은 마스크를 만지는 동안 원래 방향으로 보이는데, 크롭 모드가
-            # 편집 중에 전체를 보여 주는 것과 같은 성격의 대가입니다.
+            # Releasing only the crop is not enough. Rotation and straighten
+            # change the coordinate system too, so leaving them in puts it
+            # out of step by that much. So all of it is released - a photo
+            # with a rotation applied appears in its original orientation
+            # while the mask is being handled, which is the same kind of
+            # price crop mode pays by showing the whole frame while editing.
             if self._mask_editing_active():
                 settings = replace(settings, geometry=GeometrySettings())
-            # 워터마크와 정보 띠는 빼고 보정만 적용합니다. 정보 띠의 검은 바나
-            # 워터마크 글자가 섞이면 히스토그램·클리핑 경고가 사진의 계조를
-            # 반영하지 못해, 보정값이 바뀐 것처럼 보입니다. 표기는 아래에서
-            # 따로 얹습니다.
+            # Adjustments only - no watermark and no info strip. If the info
+            # strip's black bar or the watermark text mixes in, the histogram
+            # and the clipping warnings stop reflecting the photo's gradation
+            # and it looks as if the adjustment values changed. The markings
+            # are laid on separately below.
             image = engine.apply_settings(
                 self._source,
                 replace(settings, watermark=WatermarkSettings(),
@@ -1508,31 +1624,36 @@ class LoupeDialog(QDialog):
                 output_space="srgb",
             )
 
-        # 오버레이 좌표 변환이 쓸, **화면에 실제로 적용된** 기하를 남깁니다.
-        # 전/후 비교는 원본 그대로라 기하가 없습니다.
+        # Record the geometry **actually applied to the screen**, for the
+        # overlay coordinate conversion. The before/after comparison is the
+        # source as-is, so it has no geometry.
         self._display_geometry = (GeometrySettings()
                                   if self.before_after.isChecked()
                                   else settings.geometry)
 
-        # 전/후 비교의 원본은 작업 공간 float이므로 여기서 화면용으로 옮기고,
-        # 보정 렌더는 엔진이 output_space="srgb"로 이미 옮겨 왔습니다(uint8 통과).
+        # The before/after source is working-space float, so it is moved to
+        # display here; the adjusted render was already moved by the engine
+        # via output_space="srgb" (uint8 passes through).
         image = to_display(image)
         self.histogram.set_image(image)
-        # 곡선 편집기 배경에도 같은 히스토그램을 깔아 줍니다.
-        # 어느 계조를 만지고 있는지 보여야 곡선을 정확히 끌 수 있습니다.
+        # Lay the same histogram behind the curve editor as well. Seeing
+        # which gradations you are touching is what makes it possible to drag
+        # the curve accurately.
         self.panel.set_curve_histogram(self.histogram.luminance())
 
-        # 클리핑 오버레이는 히스토그램 계산 뒤에 얹습니다 (히스토그램은
-        # 실제 이미지를 반영해야 하고, 색칠은 화면 표시용입니다).
-        # 점멸시켜야 하므로 칠하기 직전 상태를 따로 들고 있습니다 — 매번
-        # 보정 파이프라인을 다시 돌리면 초당 두 번씩 몇백 ms를 태웁니다.
+        # The clipping overlay goes on after the histogram is computed (the
+        # histogram must reflect the real image; the painting is for
+        # display). It has to blink, so the state just before painting is
+        # held separately - re-running the develop pipeline every time would
+        # burn hundreds of ms twice a second.
         self._clip_base = image
         show_shadow, show_highlight = self._clip_overlay_state()
         if (show_shadow or show_highlight) and self._clip_blink_on:
             image = clip_overlay(image, show_shadow, show_highlight)
         self._refresh_clip_label()
 
-        # 계조 판단이 끝난 뒤에 결과물 표기(워터마크·정보 띠)를 얹습니다.
+        # The output markings (watermark, info strip) go on after the
+        # gradation judgement is done.
         if not self.before_after.isChecked():
             image = engine.apply_overlays(
                 image, settings, self.record.path, self.record.metadata
@@ -1549,11 +1670,12 @@ class LoupeDialog(QDialog):
         self.preview.set_busy(False)
 
     def _full_render_target(self) -> int:
-        """지금 화면에 실제로 필요한 긴 변 픽셀 수.
+        """The long-edge pixel count the screen actually needs right now.
 
-        고정 2200px로 뽑으면 창이 크거나 확대했을 때는 모자라고, 창이 작을
-        때는 낭비입니다. 뷰포트 크기 × 배율(× 화면 배율)만큼만 만듭니다.
-        원본보다 커지면 resize_long_edge가 원본에서 멈춥니다.
+        Pulling a fixed 2200px falls short when the window is large or zoomed
+        in, and is waste when the window is small. We build only viewport
+        size x zoom (x device pixel ratio). If that goes past the source,
+        resize_long_edge stops at the source.
         """
         viewport = max(self.preview.width(), self.preview.height())
         try:
@@ -1564,16 +1686,18 @@ class LoupeDialog(QDialog):
         return max(PREVIEW_LONG_EDGE, needed)
 
     def _set_full_render_state(self, busy: bool) -> None:
-        """Full Render 버튼의 글자·색·활성 여부를 한곳에서 정합니다.
+        """Decides the Full Render button's text, colour, and enabled state
+        in one place.
 
-        네 상태입니다.
+        There are four states.
 
-        - 꺼짐(회색): 누르면 시작
-        - 켜짐(파랑): 결과가 화면에 있음
-        - 생성 중(주황, 잠금): 지금 돌고 있음. 잠금은 연타로 렌더가 겹치는
-          것을 막습니다 — 겹치면 메모리가 두 배(실측 2.8GB → 5.5GB)가 되어
-          작은 PC에서 그대로 죽습니다.
-        - 대기 중(주황, 잠금): 앞 렌더가 아직 안 끝나 출발을 못 하는 상태
+        - Off (grey): press to start
+        - On (blue): the result is on screen
+        - Rendering (orange, locked): running right now. The lock keeps
+          hammering from overlapping renders - overlapping doubles memory
+          (measured 2.8GB -> 5.5GB) and kills a small PC outright.
+        - Waiting (orange, locked): the previous render has not finished, so
+          this one cannot set off
         """
         if busy:
             self.final_button.setText(
@@ -1583,41 +1707,45 @@ class LoupeDialog(QDialog):
             self.final_button.setText("Full Render")
             self.final_button.setStyleSheet(theme.TOGGLE_BUTTON)
 
-        # 활성 여부는 오직 잠금 타이머가 정합니다. 렌더가 도는 동안에도
-        # '끄기'는 허용해야 합니다 — 결과를 버리는 일이라 위험하지 않고,
-        # 5~8초짜리 렌더에 갇히면 그것대로 멈춘 것처럼 보입니다.
-        # 겹쳐 도는 것은 버튼이 아니라 `_FULL_RENDER_SLOT`이 막습니다.
+        # The lock timer alone decides the enabled state. Switching *off*
+        # must stay allowed even while a render runs - it only discards the
+        # result, so it is not dangerous, and being trapped in a 5~8s render
+        # looks like a hang in its own right.
+        # Overlapping runs are blocked by `_FULL_RENDER_SLOT`, not the button.
         self.final_button.setEnabled(not self._full_render_lock.isActive())
 
     def _lock_full_render_button(self) -> None:
-        """버튼을 잠시 잠급니다. 연타로 무거운 렌더가 겹치는 것을 막습니다."""
+        """Locks the button briefly. Keeps hammering from overlapping heavy
+        renders."""
         self.final_button.setEnabled(False)
         self._full_render_lock.start(FULL_RENDER_LOCKOUT_MS)
 
     def _release_full_render_button(self) -> None:
-        """잠금 해제. 글자와 색은 지금 상태를 그대로 둡니다."""
+        """Unlock. The text and colour are left in their current state."""
         self.final_button.setEnabled(True)
 
     def _on_full_render_toggled(self, enabled: bool) -> None:
-        """Full Render 모드 on/off."""
+        """Full Render mode on/off."""
         self._lock_full_render_button()
         if enabled:
             self._set_full_render_state(busy=False)
             self._schedule_full_render()
         else:
             self._abandon_render()
-            # 끄면 들고 있던 디모자이크 원본(약 390MB)도 놓습니다. 다시 켤
-            # 때 5초를 더 쓰지만, 안 쓰는 동안 그만한 메모리를 붙들고 있는
-            # 편이 더 나쁩니다 — 8GB PC에서는 그 자체로 부담입니다.
+            # Switching off also releases the held demosaic source (about
+            # 390MB). Turning it back on costs 5s more, but holding that much
+            # memory while it is unused is worse - on an 8GB PC it is a
+            # burden in itself.
             self._drop_demosaic()
             self._set_full_render_state(busy=False)
-            self._render()  # 빠른 미리보기로 되돌립니다
+            self._render()  # back to the fast preview
 
     def _schedule_full_render(self) -> None:
-        """조작이 멈춘 뒤에 고화질로 다시 그립니다.
+        """Redraws at full quality once the controls stop.
 
-        슬라이더를 움직이는 동안 매번 풀 해상도로 현상하면 조작이 불가능해서,
-        손을 뗀 뒤 잠깐 조용할 때만 돌립니다.
+        Developing at full resolution on every slider move makes it
+        impossible to work, so it runs only in the brief quiet after the hand
+        comes off.
         """
         if not self.final_button.isChecked():
             return
@@ -1625,12 +1753,13 @@ class LoupeDialog(QDialog):
         self._full_render_timer.start()
 
     def _abandon_render(self) -> None:
-        """예약을 접고, 돌던 렌더의 결과를 버립니다.
+        """Folds the schedule and discards the running render's result.
 
-        **멈추지는 못합니다.** cancel()은 플래그만 세우고, rawpy 디모자이크는
-        그 플래그를 볼 지점이 없는 단일 C 호출입니다. 그래서 스레드는 몇 초 더
-        메모리를 쥔 채 계속 돕니다. 다음 렌더가 그 위에 겹치지 않도록
-        `_FULL_RENDER_SLOT`이 끝까지 물고 있다가 스스로 빠집니다.
+        **It cannot stop it.** cancel() only raises a flag, and the rawpy
+        demosaic is a single C call with no point at which it can see that
+        flag. So the thread keeps running for several more seconds, holding
+        its memory. To keep the next render from overlapping on top of it,
+        `_FULL_RENDER_SLOT` holds on to the end and then drops itself.
         """
         self._full_render_timer.stop()
         self._waiting_for_slot = False
@@ -1641,18 +1770,20 @@ class LoupeDialog(QDialog):
             self._retire_worker(worker)
 
     def _retire_worker(self, worker: "FinalRenderWorker") -> None:
-        """취소한 워커를 스레드가 끝날 때까지 붙잡아 둡니다.
+        """Holds a cancelled worker until its thread finishes.
 
-        cancel()은 플래그만 세웁니다 — 스레드는 그 플래그를 확인할 때까지
-        계속 돕니다. 그 상태에서 마지막 참조를 놓으면 파이썬이 QThread를
-        파괴하고, Qt는 "실행 중인 스레드가 파괴됨"을 치명적 오류로 보고
-        qFatal()로 프로세스를 즉사시킵니다(Qt6Core, 0xc0000409).
+        cancel() only raises a flag - the thread keeps running until it
+        checks that flag. Drop the last reference in that state and Python
+        destroys the QThread, and Qt treats "a running thread was destroyed"
+        as a fatal error and kills the process instantly with qFatal()
+        (Qt6Core, 0xc0000409).
 
-        실제로 이 경로에서 크래시했습니다. Full Render를 켠 채 슬라이더를
-        움직이면 _schedule_full_render가 매번 여기를 지나갑니다.
+        This path actually crashed. Move a slider with Full Render on and
+        _schedule_full_render comes through here every time.
 
-        source_ready까지 끊습니다. 결과(done)만 끊으면 은퇴한 워커가 나중에
-        디모자이크 원본을 창에 밀어 넣어, 다음 렌더가 낡은 화소를 재사용합니다.
+        source_ready is disconnected as well. Disconnecting only the result
+        (done) lets a retired worker push its demosaic source into the window
+        later, and the next render reuses stale pixels.
         """
         _disconnect_worker(worker)
         if not worker.isRunning():
@@ -1661,11 +1792,12 @@ class LoupeDialog(QDialog):
         worker.finished.connect(self._reap_workers)
 
     def _shutdown_workers(self) -> None:
-        """이 창이 들고 있던 렌더를 놓습니다. 닫기와 종료 양쪽에서 씁니다.
+        """Releases the renders this window held. Used by both close and quit.
 
-        기다리지 않습니다. 아직 도는 스레드는 모듈 수준으로 넘겨(참조를
-        살려 둔 채) 제 속도로 끝나게 둡니다. 기다리면 rawpy 디모자이크가
-        길어질 때 창이 굳고, 기다림이 모자라면 크래시가 납니다.
+        It does not wait. Threads still running are handed to module level
+        (with the reference kept alive) and left to finish at their own pace.
+        Waiting freezes the window when the rawpy demosaic runs long, and a
+        wait that falls short crashes.
         """
         current = self._final_worker
         self._final_worker = None
@@ -1675,31 +1807,31 @@ class LoupeDialog(QDialog):
         for worker in ([current] if current is not None else []) + retired:
             try:
                 worker.cancel()
-                # 결과는 더 이상 쓰지 않습니다. finished만 남겨 두었다가
-                # 스스로 목록에서 빠지게 합니다.
+                # The result is no longer used. Only finished is left in
+                # place, so it drops itself from the list.
                 _disconnect_worker(worker)
                 if worker.isRunning():
                     _detach_until_finished(worker)
             except RuntimeError:
-                pass  # 이미 정리된 객체
+                pass  # already cleaned-up object
 
     def _reap_workers(self) -> None:
-        """끝난 워커를 목록에서 치웁니다."""
+        """Clears finished workers out of the list."""
         self._retired_workers = [
             worker for worker in self._retired_workers if worker.isRunning()
         ]
 
     def _show_final_preview(self) -> None:
-        """RAW를 디모자이크한 최종 화질 결과를 만들어 보여 줍니다."""
+        """Builds and shows the Full Render result from a RAW demosaic."""
         if self._source is None or not self.final_button.isChecked():
             self._waiting_for_slot = False
             return
         if self._final_worker is not None:
-            return  # 이미 만드는 중
+            return  # already building
 
-        # 앞 렌더가 아직 메모리를 쥐고 있으면 출발하지 않습니다. 겹치면
-        # 27MP 기준 2.8GB가 5.5GB가 되고, 작은 PC는 여기서 죽습니다.
-        # 끝나는 대로 다시 시도하도록 예약만 걸어 둡니다.
+        # If the previous render still holds memory we do not set off.
+        # Overlapping turns 2.8GB into 5.5GB at 27MP, and a small PC dies
+        # here. We only schedule a retry for as soon as it finishes.
         if full_render_in_flight():
             self._waiting_for_slot = True
             self._set_full_render_state(busy=True)
@@ -1710,30 +1842,35 @@ class LoupeDialog(QDialog):
         self._waiting_for_slot = False
         settings = self.panel.settings()
 
-        # 화면(_render)과 **같은 프레임**으로 만듭니다. 크롭 편집 중에는
-        # 크롭을 풀고, 마스크를 보거나 만지는 중에는 기하 전체를 풉니다.
-        # 여기만 기하를 그대로 두면 결과가 도착하는 순간 편집 중인 화면이
-        # 잘린 프레임으로 바뀌어, 러버밴드·조작점이 가정하는 좌표와
-        # 어긋납니다.
+        # Built with **the same frame** as the screen (_render). During crop
+        # editing the crop is released, and while a mask is viewed or handled
+        # all geometry is released. Leave geometry in place only here and the
+        # moment the result arrives the screen being edited turns into the
+        # cropped frame, out of step with the coordinates the rubber band and
+        # the handles assume.
         if self.preview._crop_mode:
             settings = replace(
                 settings, geometry=replace(settings.geometry, **_FULL_CROP))
         if self._mask_editing_active():
             settings = replace(settings, geometry=GeometrySettings())
 
-        # 확대 중이면 보이는 데만 만듭니다. 등배에서는 전체가 보이므로
-        # 잘라 봐야 이득이 없고, 잘린 결과를 화면에 맞추기만 번거롭습니다.
+        # When zoomed in we build only what is visible. At 1:1 the whole
+        # frame is visible, so cutting gains nothing and fitting the cut
+        # result to the screen is only a nuisance.
         #
-        # 렌즈 보정이 걸려 있어도 자릅니다 — 워커가 **자르기 전에** 광학
-        # 보정을 걸기 때문입니다(engine.apply_optics_stage). 예전에는 자른
-        # 뒤에 걸어서, 확대하면 Full Render에서만 그림이 휘었습니다.
+        # We cut even with lens correction on - because the worker applies
+        # the optical correction **before cutting**
+        # (engine.apply_optics_stage). It used to apply it after cutting, so
+        # zooming in bent the picture in the Full Render only.
         #
-        # **마스크가 있으면 자르지 않습니다.** 마스크 좌표는 장면 기준인데
-        # 여기서 보이는 영역만 잘라 넘기면 apply_settings가 그 조각을 장면
-        # 전체로 알고 마스크를 겁니다 — 확대한 Full Render에서만 마스크가
-        # 옮겨 갑니다. 얼굴 상자는 조각 기준으로 다시 잡지만(_remap_box)
-        # 방사형·선형·브러시는 좌표를 파라미터로 들고 있어 그렇게 못 합니다.
-        # 전체 프레임 렌더의 비용을 내더라도 맞는 그림이 우선입니다.
+        # **With a mask present we do not cut.** Mask coordinates are
+        # relative to the scene, but cutting only the visible region here
+        # makes apply_settings treat that piece as the whole scene when it
+        # applies the mask - the mask moves, but only in a zoomed Full
+        # Render. The face box is re-based on the piece (_remap_box), but
+        # radial, linear, and brush masks carry their coordinates as
+        # parameters and cannot be. Even at the cost of a whole-frame render,
+        # the correct picture comes first.
         region = None
         if (self.preview.zoom() > 1.01 and settings.geometry.is_neutral()
                 and not settings.masks):
@@ -1757,9 +1894,10 @@ class LoupeDialog(QDialog):
         worker.finished.connect(self._clear_final_worker)
         self._final_worker = worker
 
-        # 자리를 먼저 잡고 출발합니다. 스레드가 끝나면 스스로 비웁니다 —
-        # 결과를 버렸든(cancel) 아니든 메모리는 그때까지 물려 있으므로,
-        # 반납 시점은 '취소'가 아니라 '실제 종료'여야 합니다.
+        # Take the slot first, then set off. The thread clears it itself when
+        # it ends - whether the result was discarded (cancel) or not, the
+        # memory is held until then, so the moment of release has to be
+        # 'actually finished', not 'cancelled'.
         _FULL_RENDER_SLOT.add(worker)
         worker.finished.connect(lambda w=worker: _FULL_RENDER_SLOT.discard(w))
 
@@ -1769,13 +1907,14 @@ class LoupeDialog(QDialog):
 
     def _compose_region(self, patch: np.ndarray,
                         region: tuple[float, float, float, float]) -> np.ndarray:
-        """보이는 영역만 만든 결과를 전체 프레임 자리에 끼워 넣습니다.
+        """Fits a visible-region-only result into its place in the full frame.
 
-        화면은 이미지 하나를 놓고 줌·팬을 겁니다. 잘린 조각을 그대로 올리면
-        줌 계산과 초점 영역 좌표가 전부 어긋납니다. 그래서 프레임 크기의
-        판을 만들고(안 보이는 곳은 기존 미리보기를 늘려서 채웁니다) 그 위
-        제자리에 선명한 조각을 얹습니다. 결과는 지금까지와 같은 '한 장'이라
-        아래쪽 코드는 아무것도 달라지지 않습니다.
+        The screen puts down a single image and applies zoom and pan to it.
+        Putting the cut piece up as-is throws the zoom arithmetic and the
+        focus region coordinates all out of step. So we build a canvas at
+        frame size (filling the invisible parts by stretching the existing
+        preview) and lay the sharp piece onto it in its own place. The result
+        is 'one image' just as before, so nothing downstream changes.
         """
         left, top, right, bottom = region
         span_x = max(1e-6, right - left)
@@ -1799,28 +1938,31 @@ class LoupeDialog(QDialog):
         return canvas
 
     def _demosaic_for(self, path: Path):
-        """이 컷의 디모자이크 결과가 이미 있으면 돌려줍니다.
+        """Returns this shot's demosaic result if we already have it.
 
-        확대·이동할 때마다 5.1초짜리 디모자이크를 다시 하지 않기 위한
-        것입니다(실측 R6M3 27MP). 들고 있는 값은 27MP 기준 약 390MB이므로
-        **한 컷치만** 둡니다 — 컷을 넘기면 곧바로 놓습니다.
+        It exists so that a 5.1s demosaic is not repeated on every zoom and
+        pan (measured, R6M3 27MP). What it holds is about 390MB at 27MP, so
+        we keep **one shot's worth only** - move to another shot and it is
+        released at once.
         """
         if self._demosaic_path == path:
             return self._demosaic_cache
         return None
 
     def _keep_demosaic(self, image) -> None:
-        """워커가 막 만든 디모자이크 원본을 받아 둡니다.
+        """Takes in the demosaic source the worker just built.
 
-        **이름표는 보낸 워커의 경로로 답니다.** 렌더가 도는 사이에 컷을
-        넘기면 self.record는 이미 다음 컷인데 이 신호는 앞 컷의 것입니다.
-        지금 레코드 기준으로 이름을 붙이면 다음 Full Render가 `_demosaic_for`
-        에서 그것을 히트시켜 **앞 컷의 화소를 다음 컷의 최종 화질 결과로**
-        보여 줍니다. 예외도 표시도 없이 판단 근거만 바뀌므로, 사용자는
-        B를 보고 있다고 믿으면서 A를 보고 셀렉하게 됩니다.
+        **The label carries the sending worker's path.** Move to another shot
+        while a render is running and self.record is already the next shot
+        while this signal belongs to the previous one. Labelling it by the
+        current record makes the next Full Render hit it in `_demosaic_for`
+        and show **the previous shot's pixels as the next shot's Full Render
+        result**. With no exception and nothing on screen, only the evidence
+        changes, so the user culls looking at A while believing it is B.
 
-        지금 컷의 것이 아니면 그냥 버립니다. 27MP 기준 약 390MB라 "혹시
-        돌아올지 모르니" 붙들고 있을 값이 아닙니다.
+        If it is not the current shot's, it is simply discarded. At about
+        390MB per 27MP shot it is not a value to hold on to "in case we come
+        back".
         """
         worker = self.sender()
         path = getattr(worker, "_path", None) or self.record.path
@@ -1830,12 +1972,12 @@ class LoupeDialog(QDialog):
         self._demosaic_path = path
 
     def _drop_demosaic(self) -> None:
-        """들고 있던 원본을 놓습니다. 390MB짜리라 오래 쥐고 있으면 안 됩니다."""
+        """Releases the held source. At 390MB it must not be held for long."""
         self._demosaic_cache = None
         self._demosaic_path = None
 
     def _retry_when_slot_free(self) -> None:
-        """앞 렌더가 끝나기를 기다렸다가 출발합니다."""
+        """Waits for the previous render to finish, then sets off."""
         if not self._waiting_for_slot:
             return
         if not self.final_button.isChecked():
@@ -1849,11 +1991,15 @@ class LoupeDialog(QDialog):
         self._show_final_preview()
 
     def _on_final_ready(self, image: np.ndarray) -> None:
-        """완성된 결과를 화면에 올립니다.
+        """Puts the finished result on screen.
 
-        **보낸 워커를 직접 확인합니다.** 큐에 이미 실린 신호는 disconnect
-        해도 배달됩니다. self._final_worker로 검사하면 이미 새 워커로 바뀐
-        뒤라 검사를 통과해 버리고, 낡은 그림이 새 화면을 덮어씁니다.
+        **We compare the sender against the current worker.** A signal
+        already queued is delivered even after a disconnect, so merely
+        knowing that a worker exists is not enough - by then it has been
+        swapped for a new one, and the stale picture would overwrite the new
+        screen. self.sender() tells us which worker actually emitted this,
+        and the path and generation checks below cover the same race for a
+        shot change and a settings change.
         """
         worker = self.sender()
         if worker is None or worker is not self._final_worker:
@@ -1862,18 +2008,21 @@ class LoupeDialog(QDialog):
             return
         if worker.generation != self._final_generation:
             return
-        # 워커가 output_space="srgb"로 렌더하므로 보통은 화면용 uint8이 옵니다.
-        # to_display는 그때 통과이고, 혹시 float이 오면 여기서 옮깁니다.
+        # The worker renders with output_space="srgb", so normally display
+        # uint8 arrives. to_display is a pass-through then, and if a float
+        # does come in it is moved here.
         self.preview.set_busy(False)
-        # 이 결과에 적용된 기하 — 오버레이 좌표 변환이 씁니다(_draw_roi).
+        # The geometry applied to this result - used by the overlay
+        # coordinate conversion (_draw_roi).
         self._display_geometry = worker._settings.geometry
         image = to_display(image)
         if self._final_region is not None:
             image = self._compose_region(image, self._final_region)
 
-        # 표기·ROI·클리핑은 Full Render에서도 그대로 보여야 합니다. 예전에는
-        # 여기서 곧장 화면에 올려서, Full Render를 켜는 순간 클리핑 표시와
-        # 초점 영역이 조용히 사라졌습니다.
+        # The markings, the ROI, and the clipping must still show in the Full
+        # Render. This used to put it straight on screen, so the moment Full
+        # Render was switched on the clipping overlay and the focus region
+        # quietly disappeared.
         self._clip_base = image
         show_shadow, show_highlight = self._clip_overlay_state()
         if (show_shadow or show_highlight) and self._clip_blink_on:
@@ -1888,20 +2037,21 @@ class LoupeDialog(QDialog):
 
     def _clear_final_worker(self) -> None:
         if self.sender() is not self._final_worker:
-            return  # 은퇴시킨 워커가 뒤늦게 끝난 것 — 현재 상태를 건드리면 안 됩니다
+            return  # a retired worker finished late - do not touch state
         self._final_worker = None
         self._set_full_render_state(busy=False)
 
-    # -------------------------------------------------------- 클리핑 표시
+    # ------------------------------------------------------ Clipping overlay
 
     def _clip_overlay_state(self) -> tuple[bool, bool]:
         return (self.shadow_clip_button.isChecked(),
                 self.highlight_clip_button.isChecked())
 
     def _on_clip_overlay_toggled(self, _checked: bool = False) -> None:
-        """클리핑 표시를 켜고 끕니다."""
+        """Switches the clipping overlay on and off."""
         show_shadow, show_highlight = self._clip_overlay_state()
-        # 히스토그램 위젯도 같은 상태를 들고 있어야 삼각형 표시가 맞습니다
+        # The histogram widget has to hold the same state for its triangle
+        # markers to match
         self.histogram.set_overlay_state(show_shadow, show_highlight)
 
         if show_shadow or show_highlight:
@@ -1913,7 +2063,7 @@ class LoupeDialog(QDialog):
         self._render()
 
     def _sync_clip_buttons(self, show_shadow: bool, show_highlight: bool) -> None:
-        """히스토그램 쪽에서 토글된 경우 버튼을 맞춥니다."""
+        """Matches the buttons when the toggle came from the histogram."""
         for button, value in ((self.shadow_clip_button, show_shadow),
                               (self.highlight_clip_button, show_highlight)):
             if button.isChecked() != value:
@@ -1923,7 +2073,8 @@ class LoupeDialog(QDialog):
         self._on_clip_overlay_toggled()
 
     def _blink_clip_overlay(self) -> None:
-        """점멸 한 틱. 보정을 다시 계산하지 않고 칠하기만 뒤집습니다."""
+        """One blink tick. Flips only the painting, without recomputing the
+        adjustments."""
         show_shadow, show_highlight = self._clip_overlay_state()
         if not (show_shadow or show_highlight) or self._clip_base is None:
             self._clip_blink_timer.stop()
@@ -1936,7 +2087,8 @@ class LoupeDialog(QDialog):
         self._apply_display_overlays(image)
 
     def _apply_display_overlays(self, image: np.ndarray) -> None:
-        """점멸용 빠른 경로 — 표기·ROI만 다시 얹고 화면에 올립니다."""
+        """Fast path for blinking - relays only the markings and the ROI,
+        then puts it on screen."""
         settings = self.panel.settings()
         if not self.before_after.isChecked():
             image = engine.apply_overlays(
@@ -1947,23 +2099,27 @@ class LoupeDialog(QDialog):
         self.preview.set_pixmap(bgr_to_pixmap(to_display(image)))
 
     def _resolve_roi_scale(self, sensor_width: int) -> float:
-        """화면에 그릴 때 ROI 좌표에 곱할 배율.
+        """The scale to multiply ROI coordinates by when drawing on screen.
 
-        ROI와 얼굴 박스는 **분석에 쓴 내장 프리뷰** 좌표계입니다. 예전에는
-        그 프리뷰가 센서와 같은 가로라고 어림잡았는데, 파나소닉 S1R은 4700만
-        화소(8392px)에 1920px짜리 프리뷰만 넣습니다. 그래서 박스가 4.37배
-        어긋난 자리에 1/4 크기로 그려졌습니다(실측). 캐논은 풀 해상도
-        프리뷰라 우연히 맞아서, 캐논만 보면 멀쩡해 보였습니다.
+        The ROI and the face boxes are in the coordinate system of **the
+        embedded preview used for analysis**. It used to be assumed that this
+        preview had the same width as the sensor, but the Panasonic S1R puts
+        only a 1920px preview into a 47-megapixel (8392px) file. So the boxes
+        were drawn at 1/4 size, 4.37x out of place (measured). Canon gives a
+        full-resolution preview and happened to match, so looking at Canon
+        alone everything seemed fine.
 
-        이제는 분석이 기준 크기를 함께 남깁니다. 예전 캐시에는 없으므로
-        그때만 프리뷰를 직접 읽어 재고, 그것도 실패하면 옛 어림을 씁니다.
+        Analysis now records the reference size along with the coordinates.
+        Older caches do not have it, so only then do we read the preview and
+        measure it directly, and if that fails too we use the old guess.
         """
         display_width = self._source.shape[1] if self._source is not None else 1
         focus = self.record.focus
 
         reference = getattr(focus, "source_width", 0) if focus else 0
         if not reference and focus is not None and focus.roi:
-            # v4 이전 캐시 — 좌표만 있고 기준이 없습니다. 한 번 읽어 잽니다.
+            # Pre-v4 cache - coordinates only, no reference. Read once and
+            # measure.
             try:
                 from ..core.raw_io import load_preview as _load_preview
 
@@ -1974,22 +2130,24 @@ class LoupeDialog(QDialog):
         if not reference:
             reference = max(1, sensor_width)
 
-        # 그릴 때는 이 기준 폭에서 배율을 다시 냅니다(_draw_roi 참고).
+        # Drawing recomputes the scale from this reference width (see
+        # _draw_roi).
         self._roi_reference_width = reference
         return display_width / reference
 
     def _explain_degraded(self) -> str:
-        """왜 RAW를 못 풀었는지 한 줄로. 모르면 빈 문자열."""
+        """One line on why the RAW could not be decoded. Empty if unknown."""
         try:
             from ..core.nef_meta import unsupported_reason
 
             return unsupported_reason(self.record.path) or ""
-        except Exception:  # noqa: BLE001 - 사유를 못 찾아도 표시는 계속합니다
+        except Exception:  # noqa: BLE001 - display goes on without a reason
             log.debug("미지원 사유 확인 실패", exc_info=True)
             return ""
 
     def _maybe_warn_stale_roi(self) -> None:
-        """예전 캐시라 초점 영역 좌표를 믿을 수 없으면 알려 줍니다."""
+        """Warns when an old cache makes the focus region coordinates
+        untrustworthy."""
         focus = self.record.focus
         if focus is None or not focus.roi:
             return
@@ -1998,13 +2156,14 @@ class LoupeDialog(QDialog):
         log.debug("%s: 예전 캐시의 초점 좌표 — 기준 크기를 직접 재서 씁니다",
                   self.record.path.name)
 
-    # ------------------------------------------------- 주 피사체 수동 전환
+    # ---------------------------------------------- Manual main-subject switch
 
     def _on_preview_clicked(self, rx: float, ry: float) -> None:
-        """얼굴 위를 클릭하면 그 얼굴을 주 피사체로 삼습니다.
+        """Clicking on a face makes that face the main subject.
 
-        얼굴 상자가 보이지 않는 상태에서 클릭이 무언가를 바꾸면 놀랍기만
-        하므로, 표시를 켜 둔 동안에만 받습니다.
+        A click changing something while the face boxes are not visible is
+        nothing but startling, so it is only accepted while the overlay is
+        on.
         """
         if not self.show_faces.isChecked():
             return
@@ -2012,14 +2171,14 @@ class LoupeDialog(QDialog):
         if focus is None or not focus.faces:
             return
         if not self.panel.settings().geometry.is_neutral():
-            return  # 크롭·회전이 걸리면 좌표계가 달라 클릭 위치를 못 믿습니다
+            return  # crop/rotate change the coords - click untrustworthy
 
         reference = self._roi_reference_width or 1
         source_h = getattr(focus, "source_height", 0) or reference
         px, py = rx * reference, ry * source_h
 
-        # 겹친 얼굴에서는 작은 쪽을 고릅니다 — 큰 얼굴 안의 작은 얼굴은
-        # 클릭으로 고를 방법이 그것뿐입니다.
+        # Among overlapping faces we pick the smaller - a small face inside a
+        # large one has no other way of being picked by click.
         hits = [
             index for index in self.visible_face_indices()
             if focus.faces[index][0] <= px <= focus.faces[index][0] + focus.faces[index][2]
@@ -2033,19 +2192,21 @@ class LoupeDialog(QDialog):
         self.set_main_face(chosen)
 
     def set_main_face(self, index: int) -> None:
-        """주 피사체를 바꾸고 **판정을 그 얼굴 기준으로 다시** 냅니다.
+        """Changes the main subject and **re-scores against that face**.
 
-        표시만 옮기면 점수와 등급은 엉뚱한 얼굴 그대로 남습니다. 분석 때와
-        같은 함수(analyze_focus)를 얼굴만 지정해 다시 태워, ROI·선명도·배경
-        선명도가 모두 새 얼굴 기준이 되게 합니다.
+        Moving only the overlay leaves the score and the grade on the wrong
+        face. We re-run the same function analysis used (analyze_focus) with
+        just the face pinned, so the ROI, the sharpness, and the background
+        sharpness all become relative to the new face.
         """
         from ..core.focus import analyze_focus
         from ..core.raw_io import load_preview
 
-        # 배치와 **같은 설정**으로 다시 태워야 합니다. 인자를 안 넘기면
-        # laplacian_k·노이즈 차감이 기본값으로 돌고 af_box가 없어 af_face가
-        # -1로 죽습니다 — 주 피사체만 바꿨는데 점수가 배치와 달라지고 AF
-        # 신뢰도 배지가 사라집니다.
+        # It has to be re-run with **the same settings** as the batch.
+        # Without the arguments, laplacian_k and the noise subtraction fall
+        # back to defaults and, with no af_box, af_face dies at -1 - only the
+        # main subject changed, yet the score differs from the batch and the
+        # AF confidence badge disappears.
         config = self._analyze_config
         try:
             preview = load_preview(self.record.path)
@@ -2068,7 +2229,7 @@ class LoupeDialog(QDialog):
                 center_priority=config.center_priority,
                 noise_compensation=config.noise_compensation,
             )
-        except Exception:  # noqa: BLE001 - 못 바꿔도 보정 작업은 계속돼야 합니다
+        except Exception:  # noqa: BLE001 - develop must go on regardless
             log.warning("%s: 주 피사체 재판정 실패", self.record.path.name,
                         exc_info=True)
             return
@@ -2081,16 +2242,19 @@ class LoupeDialog(QDialog):
         self._render()
 
     def _any_overlay_on(self) -> bool:
-        """표시 항목이 하나라도 켜져 있는가. 전부 꺼져 있으면 복사조차 안 합니다."""
+        """Whether any overlay toggle is on. With all off we do not even
+        copy."""
         return (self.show_roi.isChecked() or self.show_faces.isChecked()
                 or self.show_eyes.isChecked() or self.show_af.isChecked())
 
     def visible_face_indices(self) -> list[int]:
-        """화면에 그릴 얼굴 번호. 주 피사체 전환 대상도 이 목록입니다.
+        """The face indices to draw. Also the candidates for switching the
+        main subject.
 
-        확신이 낮은 검출은 뺍니다. 실촬영 표본을 눈으로 보면 0.60~0.75
-        구간은 스피커 콘·흰 장갑·어두운 얼룩이 대부분이라, 그려 봐야
-        "저게 왜 얼굴이냐"는 의문만 남깁니다(실제 리포트).
+        Low-confidence detections are dropped. Looking at real shoot samples
+        by eye, the 0.60~0.75 band is mostly speaker cones, white gloves, and
+        dark smudges, so drawing them leaves nothing but "why is that a
+        face?" (an actual report).
         """
         focus = self.record.focus
         if focus is None or not focus.faces:
@@ -2104,10 +2268,12 @@ class LoupeDialog(QDialog):
         ]
 
     def _eye_rings(self) -> list[np.ndarray]:
-        """화면에 그릴 얼굴들의 눈 윤곽 — **분석 프리뷰 좌표계**입니다.
+        """Eye contours for the faces to be drawn - in **the analysis preview
+        coordinate system**.
 
-        얼굴 상자와 같은 좌표계로 맞춰 두면 그릴 때 배율 하나만 곱하면
-        됩니다. 컷당 한 번만 재고 캐시합니다(얼굴당 1.3ms).
+        Keeping them in the same coordinate system as the face boxes means
+        drawing needs only one scale multiply. Measured once per shot and
+        cached (1.3ms per face).
         """
         if self._eye_contours is not None:
             return self._eye_contours
@@ -2119,7 +2285,7 @@ class LoupeDialog(QDialog):
             return self._eye_contours
 
         reference = self._roi_reference_width or 1
-        to_source = source.shape[1] / reference  # 분석 좌표 → 지금 이미지
+        to_source = source.shape[1] / reference  # analysis coords -> image
         detect = np.clip(source, 0, 255).astype(np.uint8)
         for index in self.visible_face_indices():
             x, y, w, h = focus.faces[index]
@@ -2136,21 +2302,25 @@ class LoupeDialog(QDialog):
         return self._eye_contours
 
     def _draw_roi(self, image: np.ndarray) -> np.ndarray:
-        """켜 둔 표시 항목을 이미지 위에 얹습니다.
+        """Lays the enabled overlays onto the image.
 
-        좌표는 전부 분석 프리뷰(자르기 전) 기준입니다. 화면은 기하가 적용된
-        결과이므로 상자·윤곽을 같은 기하로 옮겨 그립니다(_map_scene_points).
-        예전에는 기하가 걸리면 통째로 숨겼는데, 그러면 크롭 한 번에 초점·
-        얼굴 표시가 전부 사라져 "크롭하면 안 보인다"는 제보가 됐습니다.
-        잘려 나간 상자만 빠지고 나머지는 제자리에 보여야 합니다.
+        The coordinates are all relative to the analysis preview (before
+        cropping). The screen is the result with geometry applied, so the
+        boxes and contours are moved through the same geometry to be drawn
+        (_map_scene_points). They used to be hidden wholesale whenever
+        geometry was applied, which made a single crop wipe out the focus and
+        face overlays entirely and turned into a report of "crop and I cannot
+        see them". Only the boxes cropped away should drop out; the rest must
+        show in place.
         """
         geometry = self._display_geometry
         reference = self._roi_reference_width or 1
         focus = self.record.focus
 
-        # 변환에 필요한 것은 분석 좌표계의 **종횡비**뿐입니다. 디모자이크
-        # 원본(_source)에 기대면 파일을 못 연 상태(분석 결과만 있는 컷)에서
-        # 표시가 통째로 사라집니다 — 예전 코드는 그때도 그렸습니다.
+        # All the conversion needs is the **aspect ratio** of the analysis
+        # coordinate system. Leaning on the demosaic source (_source) makes
+        # the overlays disappear entirely when the file could not be opened
+        # (a shot with analysis results only) - the old code drew even then.
         ref_h = int(getattr(focus, "source_height", 0) or 0)
         if not ref_h:
             shape = (self._source.shape if self._source is not None
@@ -2160,18 +2330,19 @@ class LoupeDialog(QDialog):
 
         out_wh = (image.shape[1], image.shape[0])
         marked = image.copy()
-        thin = max(1, int(image.shape[1] / 1200))  # 기존의 1/3 굵기
+        thin = max(1, int(image.shape[1] / 1200))  # 1/3 of the old width
 
         def draw(box, colour, width) -> None:
             mapped = _map_scene_box(tuple(box), geometry, scene_hw, out_wh)
             if mapped is None:
-                return                      # 크롭 밖 — 그릴 자리가 없습니다
+                return                      # outside crop - nowhere to draw
             x, y, w, h = mapped
             cv2.rectangle(marked, (int(x), int(y)),
                           (int(x + w), int(y + h)), colour, width)
 
-        # 검출된 얼굴을 옅게 그립니다. 주 피사체만 보여 주면 "왜 저 얼굴이
-        # 뽑혔는지" 알 수 없고, 다른 얼굴을 놓친 건지도 모릅니다.
+        # Detected faces are drawn faintly. Showing only the main subject
+        # leaves no way to tell "why was that face chosen", or whether other
+        # faces were missed.
         if self.show_faces.isChecked():
             for index in self.visible_face_indices():
                 if index != focus.main_face:
@@ -2185,29 +2356,33 @@ class LoupeDialog(QDialog):
                 pixels = np.round(mapped * np.array(out_wh)).astype(np.int32)
                 cv2.polylines(marked, [pixels], True, (240, 200, 60), thin)
 
-        # 초점 ROI (눈/얼굴/타일) — 실제로 선명도를 잰 자리
+        # Focus ROI (eye/face/tile) - where sharpness was actually measured
         if self.show_roi.isChecked() and focus.roi:
             draw(focus.roi, (80, 220, 80), thin)
 
-        # 주 피사체는 빨간 사각형. 초점 기준으로 고른 결과입니다.
-        # 굵기는 다른 얼굴과 같게 두고 **색으로만** 구분합니다. 두 배로
-        # 그렸더니 확대했을 때 선이 얼굴을 덮어 정작 초점을 못 봤습니다.
+        # The main subject is a red rectangle. It is what focus picked.
+        # The width is kept the same as the other faces and they are told
+        # apart **by colour alone**. Drawn at double width, the line covered
+        # the face when zoomed in and the focus could not be seen at all.
         if self.show_faces.isChecked() and 0 <= focus.main_face < len(focus.faces):
             draw(focus.faces[focus.main_face], (60, 60, 235), thin)
 
-        # 카메라 AF 위치 — 주황. 존 AF는 몸통을 가리키므로(소니) 얼굴 상자와
-        # 어긋나는 게 정상입니다. 그 어긋남 자체가 신뢰도 신호입니다(A1).
+        # Camera AF position - orange. Zone AF points at the torso (Sony), so
+        # being out of step with the face box is normal. That offset is
+        # itself a confidence signal (A1).
         af_box = self._af_reference_box()
         if self.show_af.isChecked() and af_box is not None:
             draw(af_box, (40, 170, 240), max(thin, 2))
         return marked
 
     def _af_reference_box(self) -> tuple[int, int, int, int] | None:
-        """카메라 AF 상자를 얼굴·ROI와 같은 좌표계(_roi_reference_width 기준)로.
+        """The camera AF box in the same coordinate system as the faces and
+        the ROI (relative to _roi_reference_width).
 
-        캐시된 레코드에는 AF 상자가 없어 표시 시점에 파일을 읽습니다(헤더
-        2MB, ~ms). 한 번 읽어 캐시하고, None(파일에 없음)과 미판독을 구분해
-        매 렌더마다 다시 뒤지지 않습니다.
+        Cached records carry no AF box, so the file is read at display time
+        (2MB of header, ~ms). It is read once and cached, and None (not in
+        the file) is kept distinct from not-yet-read so we do not dig through
+        the file on every render.
         """
         if self._af_box is not _AF_UNREAD:
             return self._af_box  # type: ignore[return-value]
@@ -2215,11 +2390,14 @@ class LoupeDialog(QDialog):
         reference = self._roi_reference_width
         source = self._source
         if not reference or source is None:
-            # 아직 프리뷰가 안 올라왔습니다. 캐시하지 않고(_AF_UNREAD 유지)
-            # 다음 렌더에서 다시 시도합니다 — None으로 굳히면 영영 안 읽습니다.
+            # The preview is not up yet. We do not cache (keeping
+            # _AF_UNREAD) and try again on the next render - settling on None
+            # would mean never reading it.
             return None
-        # af_preview_box는 프리뷰 크기를 받아 그 좌표로 돌려줍니다. 분석
-        # 좌표계(reference 폭)와 같은 종횡비를 줘야 결과가 얼굴 상자와 맞물립니다.
+        # af_preview_box takes the preview size and returns coordinates in
+        # it. It has to be given the same aspect ratio as the analysis
+        # coordinate system (reference width) for the result to line up with
+        # the face boxes.
         ref_h = int(round(reference * source.shape[0] / source.shape[1]))
         orientation = self.record.metadata.orientation if self.record.metadata else 1
         try:
@@ -2227,67 +2405,73 @@ class LoupeDialog(QDialog):
 
             self._af_box = af_preview_box(
                 self.record.path, orientation, int(reference), ref_h)
-        except Exception:  # noqa: BLE001 - 표시용이라 실패해도 조용히 넘어갑니다
+        except Exception:  # noqa: BLE001 - display only, so fail quietly
             self._af_box = None
         return self._af_box  # type: ignore[return-value]
 
-    # -------------------------------------------------- 방사형·선형 마스크 조작
+    # -------------------------------------------- Radial / linear mask handles
 
     def _sync_mask_shape(self) -> None:
-        """선택한 마스크가 방사형·선형이면 이미지 위에 조작점을 띄웁니다.
+        """Raises handles on the image when the selected mask is radial or
+        linear.
 
-        예전에는 이 두 종류만 기본 위치에 박혀 있었습니다. 파라미터는 전부
-        정규화 좌표인데 그 값을 만질 UI가 없어서, 스포트라이트는 언제나
-        화면 정중앙이었습니다.
+        These two used to be nailed to their default positions. The
+        parameters are all normalised coordinates, but there was no UI to
+        touch those values, so the spotlight was always dead centre.
         """
         from ..core.develop.masks import SIZE_KINDS, _size_factor
 
         mask = self.panel.shape_mask()
         if mask is None:
             self.preview.set_shape(None)
-            # 조작점이 사라지면 화면이 장면 프레임에서 크롭 적용 표시로
-            # 돌아가야 합니다(_mask_editing_active). 표시 프레임 전환이라
-            # 재렌더가 필요합니다.
+            # When the handles disappear the screen has to go back from the
+            # scene frame to the crop-applied view (_mask_editing_active).
+            # It is a display-frame transition, so a re-render is needed.
             self._render_timer.start()
             return
-        # 범위(size)는 방사형에만 걸립니다. 선형에 곱하면 있지도 않은
-        # 반경을 줄이는 셈이 되어 화면과 결과가 어긋납니다.
+        # The size applies to radial only. Multiplying it onto a linear mask
+        # amounts to shrinking a radius that does not exist, and the screen
+        # and the result go out of step.
         size = _size_factor(mask) if mask.kind in SIZE_KINDS else 1.0
         self.preview.set_shape(mask.kind.value, mask.params, size=size)
-        self._render_timer.start()      # 반대 방향 전환도 같습니다
+        self._render_timer.start()      # the reverse transition is the same
 
     def _on_shape_dragged(self, params: dict) -> None:
-        """이미지 위에서 끈 도형 좌표를 마스크에 담아 둡니다.
+        """Stores the shape coordinates dragged on the image into the mask.
 
-        여기서 렌더하지 않습니다 — 끄는 동안 매번 다시 그리면 따라오지
-        못합니다(크롭 드래그와 같은 방식). 윤곽선은 ImageView가 스스로
-        그리고, 실제 재렌더는 shape_finished에서 한 번만 돕니다.
+        No render happens here - redrawing on every step of the drag cannot
+        keep up (the same way as the crop drag). ImageView draws the outline
+        itself, and the real re-render runs once, from shape_finished.
         """
         self.panel.set_mask_params(params, silent=True)
         self._dirty = True
 
-    # ------------------------------------------------------------ 브러시
+    # ------------------------------------------------------------ Brush
 
     _BRUSH_CANVAS = 512
-    """브러시 알파를 담는 해상도. 프리셋 파일에 실려 다니므로 크게 잡지 않습니다."""
+    """The resolution the brush alpha is held at. It rides along inside
+    preset files, so it is not set large."""
 
     def _on_brush_mode(self, enabled: bool) -> None:
-        """칠하기 모드에서는 크롭·스포이드를 끄고 브러시만 받습니다."""
+        """Paint mode switches off crop and the eyedropper, taking only the
+        brush."""
         self.preview.set_brush_mode(enabled)
         self._sync_brush_cursor()
         if enabled:
-            # 칠하는 동안은 영역이 보여야 어디를 칠했는지 압니다
+            # While painting, the region has to show to know what was painted
             self.panel.mask_overlay_check.setChecked(True)
 
     def _sync_brush_cursor(self) -> None:
-        """붓 크기·지우개 상태를 미리보기 원에 반영합니다."""
+        """Reflects the brush size and eraser state in the preview circle."""
         self.preview.set_brush_radius(self.panel.brush_radius_ratio())
         self.preview.set_brush_erasing(self.panel.is_erasing())
 
     def _brush_canvas(self, mask) -> np.ndarray:
-        """선택 마스크의 알파를 편집용 캔버스로. 없으면 빈 캔버스를 만듭니다.
+        """The selected mask's alpha as an editing canvas. Builds an empty
+        one if there is none.
 
-        이미지 비율에 맞춰야 칠한 모양이 찌그러지지 않습니다.
+        It has to match the image aspect ratio or the painted shape comes out
+        squashed.
         """
         from ..core.develop.masks import _brush_alpha  # noqa: PLC0415
 
@@ -2306,7 +2490,7 @@ class LoupeDialog(QDialog):
         return np.zeros((canvas_h, canvas_w), np.float32)
 
     def _on_brush_paint(self, nx: float, ny: float) -> None:
-        """이미지 위에서 칠한 한 점을 마스크 알파에 반영합니다."""
+        """Reflects one point painted on the image into the mask alpha."""
         from ..core.develop.masks import encode_brush
         from ..core.develop.settings import MaskType
 
@@ -2322,17 +2506,18 @@ class LoupeDialog(QDialog):
         h, w = canvas.shape[:2]
         radius = max(1, int(round(self.panel.brush_radius_ratio() * min(h, w))))
         center = (int(round(nx * w)), int(round(ny * h)))
-        # 지우개는 같은 붓으로 0을 칠합니다
+        # The eraser paints 0 with the same brush
         value = 0.0 if self.panel.is_erasing() else 1.0
         cv2.circle(canvas, center, radius, value, -1, lineType=cv2.LINE_AA)
 
         self.panel.set_brush_bitmap(encode_brush(canvas))
 
     def _draw_mask_overlay(self, image: np.ndarray, mask) -> np.ndarray:
-        """선택한 마스크가 덮는 영역을 빨갛게 표시합니다 (반투명).
+        """Marks the area the selected mask covers in red (semi-transparent).
 
-        세기(opacity)와 무관하게 영역의 모양을 보여줘야 하므로 고정 강도로
-        칠합니다. 얼굴이 없어 마스크를 못 만들면 그대로 둡니다.
+        The shape of the area has to show regardless of the opacity, so it is
+        painted at a fixed strength. If there is no face and the mask cannot
+        be built, the image is left alone.
         """
         from ..core.develop.masks import mask_overlay_alpha
 
@@ -2348,7 +2533,7 @@ class LoupeDialog(QDialog):
         super().resizeEvent(event)
         self._render()
 
-    # ------------------------------------------------------------ 등급 / 적용
+    # ----------------------------------------------------------- Grade / apply
 
     def set_grade(self, grade: Grade) -> None:
         self.record.manual_grade = grade
@@ -2356,11 +2541,12 @@ class LoupeDialog(QDialog):
         self.records_changed.emit()
 
     def apply_to_all(self) -> None:
-        """이 창에서 맞춘 보정을 목록 전체에 적용합니다.
+        """Applies the develop dialled in here to the whole list.
 
-        크롭·기울이기·회전은 제외합니다. 구도는 컷마다 달라서 한 장에서 잡은
-        크롭을 다른 장에 씌우면 피사체가 잘려 나갑니다. 현재 컷의 크롭은
-        그대로 두고, 나머지 컷에는 색보정만 나눠 줍니다.
+        Crop, straighten, and rotate are excluded. Framing differs shot to
+        shot, so putting one shot's crop onto another cuts the subject away.
+        The current shot's crop is left as it is, and the other shots get the
+        colour adjustments only.
         """
         settings = self.panel.settings()
         self._commit_settings()
@@ -2370,14 +2556,15 @@ class LoupeDialog(QDialog):
 
         for record in self.records:
             if record is self.record:
-                continue  # 현재 컷은 크롭까지 포함해 이미 저장했습니다
+                continue  # current shot already saved, crop included
             if value is None:
                 record.develop = None
             elif record.develop is not None:
-                # 다른 컷이 이미 잡아 둔 크롭·마스크는 지키고 나머지만
-                # 덮어씁니다. 크롭만 지키고 마스크를 덮으면, 컷마다 그려 둔
-                # 국소 보정이 일괄 적용 한 번에 전부 사라집니다 — 둘 다
-                # 같은 이유(컷 고유의 값)로 공유 대상이 아닙니다.
+                # Crops and masks another shot already holds are kept and
+                # only the rest is overwritten. Keeping the crop but
+                # overwriting the mask makes every local adjustment drawn per
+                # shot vanish in a single apply-to-all - both are outside the
+                # shared set for the same reason (values specific to a shot).
                 record.develop = replace(
                     shared, geometry=record.develop.geometry,
                     masks=record.develop.masks,
@@ -2405,13 +2592,14 @@ class LoupeDialog(QDialog):
         super().reject()
 
     def closeEvent(self, event) -> None:
-        """예약된 렌더와 백그라운드 스레드를 모두 끊고 닫습니다.
+        """Cuts every scheduled render and background thread, then closes.
 
-        이 창은 WA_DeleteOnClose라 닫히는 즉시 파이썬 객체가 사라집니다.
-        그 뒤에 신호가 하나라도 도착하면 이미 없어진 C++ 객체를 건드려
-        네이티브 크래시(Qt6Core fail-fast)가 납니다. 그래서 타이머를 멈추고
-        **finished까지** 끊습니다 — 예전에는 done/failed만 끊어서, 워커가
-        끝나며 보내는 finished가 삭제된 창의 슬롯을 호출할 수 있었습니다.
+        This window is WA_DeleteOnClose, so the Python object disappears the
+        instant it closes. If even one signal arrives after that, it touches
+        an already-gone C++ object and a native crash follows (Qt6Core
+        fail-fast). So the timers are stopped and **finished is cut as
+        well** - only done/failed used to be cut, so the finished a worker
+        sends as it ends could call a slot on a deleted window.
         """
         self._render_timer.stop()
         self._full_render_timer.stop()

@@ -1,4 +1,5 @@
-"""설정. 촬영 스타일마다 적정값이 달라지므로 하드코딩하지 않습니다."""
+"""Settings. The right value differs per shooting style, so nothing here is
+hardcoded."""
 
 from __future__ import annotations
 
@@ -15,78 +16,94 @@ from . import focus
 
 log = logging.getLogger(__name__)
 
-#: face_bonus_full_area가 가질 수 있는 범위 (프레임 대비 얼굴 면적).
+#: The range face_bonus_full_area may take (face area relative to frame).
 #:
-#: 하한 0.1%는 26MP에서 대략 160×160 화소입니다. 망원으로 멀리서 찍는
-#: 무대 촬영은 주 피사체 얼굴이 0.1~0.6%에 몰려 있어(A6700 2845장 실측),
-#: 그 구간을 못 가리키면 설정이 무의미해집니다.
-#: 상한 50%는 얼굴이 화면 절반을 덮는 클로즈업으로, 그 위는 의미가 없습니다.
+#: The 0.1% lower bound is roughly 160x160 pixels at 26MP. Stage shooting
+#: from a distance with a telephoto has the main subject's face clustered
+#: at 0.1~0.6% (measured on 2845 A6700 frames), and a setting that cannot
+#: point into that band is meaningless.
+#: The 50% upper bound is a close-up with the face covering half the
+#: screen; above that there is no point.
 #:
-#: GUI 스핀박스와 sanitized_config()가 같은 값을 봐야 하므로 여기 둡니다.
+#: The GUI spinbox and sanitized_config() have to see the same values, so
+#: they live here.
 FACE_BONUS_AREA_RANGE = (0.001, 0.50)
 
 
 @dataclass
 class AnalyzeConfig:
-    """초점 분석 파라미터. 이 값이 바뀌면 캐시는 무효가 됩니다."""
+    """Focus analysis parameters. Change these and the cache is invalid."""
 
     detect_long_edge: int = focus.DETECT_LONG_EDGE
     laplacian_k: float = focus.LAPLACIAN_K
     tenengrad_k: float = focus.TENENGRAD_K
 
     noise_compensation: bool = True
-    """선명도에서 노이즈 기여분을 차감 (초점판독 v4).
+    """Subtract the noise contribution from sharpness (focus reading v4).
 
-    끄면 v3과 같은 측정입니다. 실측(2846장)에서 켰을 때 노이즈 낀 소프트
-    연사가 강등되고 keep 수는 그대로였습니다 — 끄는 것은 비교·검증용입니다.
-    분석 다이얼로그의 "정밀 분석" 항목으로 노출됩니다.
+    Turned off, this is the same measurement as v3. Measured over 2846
+    frames, turning it on demoted noisy soft bursts while the keep count
+    stayed the same - turning it off is for comparison and verification.
+    Exposed as the "Precision" item of the analysis dialog.
     """
 
     center_priority: bool = False
-    """1인 구도 우선 — 주 피사체를 중앙성 위주로 고릅니다.
+    """Single-subject composition first - pick the main subject mainly by
+    centrality.
 
-    포트레이트·팬사이트처럼 주인공을 정중앙에 두는 장르용. 암묵 정답
-    47,990컷에서 95.4%로 검증(현행 77.9%). 반대로 무대·그룹 장르 라벨
-    110장에서는 현행이 이겨(75.5% vs 68.2%) 기본은 꺼짐입니다 — 장르는
-    사용자만 압니다. 캐시 키에 자동 포함되어 옵션별로 갈라집니다.
+    For genres that put the protagonist dead centre, such as portraits and
+    fan-site shooting. Validated at 95.4% on 47,990 frames of implicit
+    ground truth (the current pick: 77.9%). On 110 frames labelled as the
+    stage/group genre the current one wins instead (75.5% vs 68.2%), so the
+    default is off - only the user knows the genre. It goes into the cache
+    key automatically, so the two options split their caches.
     """
 
     af_roi_hint: bool = False
-    """얼굴을 못 찾은 컷에서 카메라 AF 위치를 판정 영역으로 사용.
+    """Use the camera's AF position as the scoring region on frames where no
+    face was found.
 
-    소니 0x2027·니콘 AFInfo2에서 읽습니다(maker_meta). 얼굴·눈 ROI가
-    있으면 절대 개입하지 않습니다 — 존 AF의 기록 위치는 눈이 아니라서
-    (실측 47장, RESEARCH_METADATA.md) 얼굴 검출을 이길 수 없습니다.
-    기본 꺼짐: 켜면 TILE로 판정되던 컷의 점수가 달라지므로 선택 사항입니다.
+    Read from Sony 0x2027 and Nikon AFInfo2 (maker_meta). It never steps in
+    when a face or eye ROI exists - the position zone AF records is not the
+    eye (measured on 47 frames, RESEARCH_METADATA.md), so it cannot beat
+    face detection. Off by default: turning it on changes the score of
+    frames that used to be scored as TILE, so it is optional.
     """
 
     demosaic_small_preview: bool = False
-    """내장 프리뷰가 센서보다 훨씬 작은 RAW를 디모자이크해서 분석합니다.
+    """Demosaic and analyse RAWs whose embedded preview is far smaller than
+    the sensor.
 
-    파나소닉 RW2가 이 경우입니다 — 실측(DC-S5M2X): 센서 6008×4008인데
-    내장 프리뷰는 1920px(긴 변의 32%, 화소로는 10%)뿐입니다. 소니 ARW·캐논
-    CR2/CR3는 98~99%라 해당하지 않습니다.
+    Panasonic RW2 is this case - measured (DC-S5M2X): the sensor is
+    6008x4008 but the embedded preview is only 1920px (32% of the long
+    edge, 10% by pixel count). Sony ARW and Canon CR2/CR3 are at 98~99%, so
+    they do not apply.
 
-    선명도를 원본 해상도에서 잰다는 판정의 전제가 이런 파일에서는 깨져
-    있습니다. 켜면 half 디모자이크(긴 변의 50%)로 분석해 전제를 되살립니다.
-    대신 느립니다 — 실측 15.9 → 79.9ms/장(워커 12).
+    Scoring's premise that sharpness is measured at full resolution is
+    broken on files like these. Turned on, analysis runs on a half
+    demosaic (50% of the long edge), which brings the premise back. In
+    exchange it is slow - measured 15.9 -> 79.9ms per frame (12 workers).
 
-    파일마다 프리뷰/센서 비를 직접 재서 판단하므로(raw_io.load_preview),
-    확장자 목록에 없는 기종이 같은 사정이어도 함께 구제됩니다.
+    Since the preview/sensor ratio is measured per file to decide
+    (raw_io.load_preview), a body that is not in the extension list but is
+    in the same situation gets rescued along with it.
     """
 
     def cache_key(self) -> str:
-        """분석 결과에 영향을 주는 모든 것의 지문.
+        """A fingerprint of everything that affects the analysis result.
 
-        설정값뿐 아니라 알고리즘 버전도 넣어야 합니다. 설정이 그대로여도
-        측정 방식이 바뀌면 예전 결과는 무효인데, 버전이 빠져 있으면 캐시가
-        옛날 점수를 그대로 돌려줘서 고친 내용이 반영되지 않습니다.
+        Not just the settings but the algorithm version has to go in. Even
+        with the settings unchanged, old results are invalid once the
+        measurement method changes, and with the version left out the cache
+        hands back the old scores so the fix never takes effect.
         """
         payload = dict(asdict(self))
 
-        # **끈 상태는 예전과 결과가 같으므로 지문도 같아야 합니다.** 새 항목을
-        # 그냥 넣으면 이 옵션을 쓰지 않는 사람까지 전 폴더를 다시 분석하게
-        # 됩니다. 켰을 때만 지문에 실어 옵션별로 캐시를 가릅니다.
+        # **Off gives the same result as before, so the fingerprint has to
+        # be the same too.** Just dropping the new field in would make even
+        # people who never use this option re-analyse whole folders. It
+        # rides in the fingerprint only when on, splitting the cache per
+        # option.
         if not payload.get("demosaic_small_preview", False):
             payload.pop("demosaic_small_preview", None)
 
@@ -97,300 +114,350 @@ class AnalyzeConfig:
 
 @dataclass
 class GroupConfig:
-    """유사 컷 그룹핑 파라미터."""
+    """Similar-frame grouping parameters."""
 
     time_gap_seconds: float = 3.0
-    """이 간격을 넘으면 다른 그룹. 그룹핑의 주 신호입니다.
+    """Past this gap it is a different group. The main signal for grouping.
 
-    실측(A6700, 2845장)에서 연사 내 간격 중앙값은 0.16초, p90은 1.4초였고
-    실제 장면 전환은 수십~수백 초였습니다. 시간은 두 상황을 깨끗하게 가릅니다.
+    Measured (A6700, 2845 frames), the median gap within a burst was 0.16s
+    and p90 was 1.4s, while real scene changes were tens to hundreds of
+    seconds. Time separates the two situations cleanly.
     """
 
     scene_change_distance: int = 40
-    """dHash 해밍 거리 임계값 (64비트 중). 보조 신호이므로 느슨하게 잡습니다.
+    """dHash Hamming distance threshold (out of 64 bits). A secondary
+    signal, so it is set loose.
 
-    같은 배치 실측에서 시각 신호만으로는 연사와 장면 전환을 가를 수 없었습니다.
-      - 같은 연사(<0.5초) 거리: 중앙값 11, p90 25, p99 37
-      - 장면 전환(>60초) 거리: 중앙값 29, p10 23
-    분포가 겹쳐서 어떤 임계값도 둘을 분리하지 못합니다. 히스토그램 상관으로
-    바꿔도 마찬가지였다(연사 p10 0.651 vs 전환 p90 0.732).
+    Measured on the same batch, the visual signal alone could not separate
+    bursts from scene changes.
+      - Distance within one burst (<0.5s): median 11, p90 25, p99 37
+      - Distance across a scene change (>60s): median 29, p10 23
+    The distributions overlap, so no threshold separates the two. Switching
+    to histogram correlation made no difference (burst p10 0.651 vs change
+    p90 0.732).
 
-    망원으로 움직이는 피사체를 찍으면 0.16초 사이에도 화면이 크게 바뀌기
-    때문입니다. 그래서 이 값은 "연사인데도 화면이 완전히 뒤집힌" 명백한
-    경우(연사 p99=37을 넘는 40 이상)만 잡도록 두었습니다. 정물이나 인물 위주
-    촬영이라면 더 낮춰도 잘 동작합니다.
+    It is because shooting a moving subject with a telephoto changes the
+    frame a great deal even within 0.16s. So this value is left to catch
+    only the blatant case, "a burst, and yet the frame flipped over
+    completely" (40 and up, past the burst p99 of 37). For still-life or
+    portrait-led shooting it works well set lower.
     """
 
     no_time_hash_distance: int = 16
-    """EXIF 촬영 시각이 없을 때만 쓰는 임계값.
+    """The threshold used only when the EXIF capture time is missing.
 
-    이 경우 시각 신호가 유일한 근거라 느슨하게 두면 전부 한 그룹이 됩니다.
+    In that case the visual signal is the only evidence there is, so left
+    loose everything ends up in one group.
     """
 
     max_group_size: int = 40
-    """폭주 방지. 한 그룹이 이보다 커지면 강제로 끊습니다."""
+    """Runaway guard. A group that grows past this is forcibly cut."""
 
 
 @dataclass
 class ScoreConfig:
-    """점수 통합과 등급 판정 파라미터."""
+    """Parameters for combining scores and assigning grades."""
 
-    # ------------------------------------------------------------ 점수 가중치
+    # --------------------------------------------------------- score weights
     #
-    # 점수 = (ROI 선명도 × 신뢰도 + 전체 선명도 × (1 - 신뢰도)) × 0.5
-    #        + 보너스 - 감점
+    # score = (ROI sharpness x trust + frame sharpness x (1 - trust)) x 0.5
+    #         + bonuses - penalties
     #
-    # 선명도에 0.5를 곱하는 이유는 scoring.SHARPNESS_SCALE 참고 — 선명도만으로
-    # 0~100을 다 쓰면 보너스를 조금만 켜도 100에 붙어 순위가 사라집니다.
-    # **아래 절대 점수 임계값들은 그 척도(선명도 0~50)를 전제로 합니다.**
+    # For why sharpness is multiplied by 0.5, see scoring.SHARPNESS_SCALE -
+    # if sharpness alone used all of 0~100, turning on even a little bonus
+    # pins everything to 100 and the ranking disappears.
+    # **The absolute score thresholds below all assume that scale
+    # (sharpness 0~50).**
     #
-    # 신뢰도는 이 ROI를 얼마나 믿을지를 뜻합니다. 눈을 잡았으면 그 안의 선명도가
-    # 곧 판정 근거지만, 타일 추정은 주 피사체가 아닐 수 있어 전체 프레임
-    # 쪽에 무게를 나눠 줍니다.
+    # Trust means how far this ROI is to be believed. If the eyes were
+    # caught, the sharpness inside them is the basis for scoring outright;
+    # but a tile estimate may not be the main subject, so part of the weight
+    # is handed over to the whole frame.
 
     trust_eye: float = 0.75
-    """눈 영역을 잡았을 때 ROI 선명도의 비중."""
+    """Weight of the ROI sharpness when the eye region was caught."""
 
     trust_face: float = 0.60
-    """얼굴은 잡았지만 눈 ROI가 너무 작을 때."""
+    """When a face was caught but the eye ROI is too small."""
 
     trust_tile: float = 0.55
-    """얼굴이 없어 격자 타일로 추정했을 때."""
+    """When there is no face and a grid tile was used to estimate."""
 
     trust_frame: float = 0.40
-    """ROI를 못 잡아 전체 프레임을 쓸 때."""
+    """When no ROI could be caught and the whole frame is used."""
 
     face_priority: bool = True
-    """얼굴 우선 모드. 인물 위주 촬영(A6700 기본 용도)의 기본값입니다.
+    """Face-priority mode. The default for portrait-led shooting (the
+    A6700's primary use here).
 
-    켜져 있으면 얼굴을 잡은 컷에서 얼굴/눈 ROI를 더 신뢰하고, 얼굴은 흐린데
-    배경이 더 선명한 컷(초점이 뒤로 빠진 컷)을 penalty_face_defocus로 감점합니다.
-    풍경 위주 배치라면 꺼서 전체 프레임 선명도로만 판정할 수 있습니다.
+    With it on, frames where a face was caught trust the face/eye ROI more,
+    and a frame where the face is soft but the background is sharper (focus
+    fell behind) is penalised by penalty_face_defocus. For a landscape-led
+    batch it can be turned off to score on whole-frame sharpness alone.
     """
 
     penalty_face_defocus: float = 15.0
-    """얼굴 우선 모드에서, 배경이 얼굴보다 선명할 때의 최대 감점.
+    """The maximum penalty in face-priority mode when the background is
+    sharper than the face.
 
-    "초점이 얼굴이 아니라 배경에 맞은" 컷을 가려냅니다. 감점 크기는 배경이
-    얼굴보다 얼마나 더 선명한지에 비례하고, 얼굴 검출 신뢰도로 가중합니다
-    (불확실한 검출은 덜 감점). 얼굴이 없거나 모드가 꺼져 있으면 적용되지
-    않습니다.
+    It screens out frames "focused on the background, not the face". The
+    size of the penalty is proportional to how much sharper the background
+    is than the face, and it is weighted by the face detection confidence
+    (an uncertain detection is penalised less). It does not apply when
+    there is no face or the mode is off.
     """
 
     bonus_focus_on_face: float = 5.0
-    """얼굴 우선 모드에서 초점 ROI가 실제로 얼굴/눈일 때 더하는 점수.
+    """Points added in face-priority mode when the focus ROI really is a
+    face/eye.
 
-    얼굴이 화면에 있다는 것과 그 얼굴에 초점이 맞았다는 것은 다릅니다.
-    이 보너스는 후자에만 붙습니다 — 인물 셀렉에서 원하는 것이 그것이기
-    때문입니다. bonus_face는 '얼굴이 있기만 하면' 붙으므로 성격이 다릅니다.
+    A face being in the frame and that face being in focus are two
+    different things. This bonus attaches only to the latter - because that
+    is what portrait culling wants. bonus_face attaches as soon as 'there
+    is a face at all', so it is a different animal.
     """
 
     penalty_no_face: float = 10.0
-    """얼굴 우선 모드인데 얼굴이 하나도 없을 때의 감점.
+    """The penalty in face-priority mode when there is no face at all.
 
-    실측(A6700 2845장): 얼굴 없는 컷의 점수 중앙값이 59.0으로, 초점이
-    얼굴에 맞은 컷의 47.6보다 오히려 높았습니다. 얼굴 컷은 (대개 더
-    부드러운) 얼굴 ROI로 재고 배경초점 감점까지 받는데, 얼굴 없는 컷은
-    프레임 선명도를 감점 없이 그대로 쓰기 때문입니다. 그 결과 얼굴 우선
-    모드인데도 얼굴 없는 컷이 4배 더 자주 자동 keep 됐습니다.
+    Measured (A6700, 2845 frames): the median score of frames with no face
+    was 59.0, actually higher than the 47.6 of frames focused on a face.
+    Frames with a face are measured on the (usually softer) face ROI and
+    take the background-focus penalty on top, while frames with no face use
+    the frame sharpness as it is, with no penalty. The result was that in
+    face-priority mode, frames with no face were auto-kept 4 times more
+    often.
 
-    이 감점은 두 집단을 견줄 수 있게 맞추는 보정입니다. 풍경 위주라면
-    face_priority를 끄십시오 — 그러면 적용되지 않습니다.
+    This penalty is the correction that puts the two populations back on
+    comparable terms. For landscape-led work, turn face_priority off - then
+    it does not apply.
     """
 
     bonus_face: float = 20.0
-    """얼굴이 검출되면 더하는 점수. 인물 위주 촬영에서 올립니다.
+    """Points added when a face is detected. Raised for portrait-led work.
 
-    face_bonus_full_area의 크기 가중을 곱해서 붙습니다 — 작은 얼굴은 이
-    값을 다 받지 못합니다.
+    It attaches multiplied by the size weighting of face_bonus_full_area -
+    a small face does not receive all of this value.
     """
 
     bonus_eye: float = 15.0
-    """눈까지 잡혔을 때 추가로 더하는 점수."""
+    """Points added on top when the eyes were caught as well."""
 
     penalty_eyes_closed: float = 20.0
-    """주 피사체가 눈을 감은 것으로 보일 때의 감점.
+    """The penalty when the main subject appears to have their eyes closed.
 
-    눈 감은 컷은 초점이 아무리 맞아도 못 쓰는데, 선명도로는 전혀 걸러지지
-    않습니다 — 감은 눈도 초점은 맞아 있기 때문입니다.
+    A frame with closed eyes is unusable however good the focus is, and
+    sharpness does not screen it out at all - closed eyes are in focus too.
 
-    감점 중 가장 큽니다. 사용자가 직접 정한 값으로, 눈 감은 컷은 아예
-    자동 keep 후보에서 빼겠다는 뜻입니다. 다만 판정이 완벽하지 않으므로
-    (eyes_closed_below 참고) 오판이 나면 그만큼 크게 손해 봅니다.
+    It is the largest of the penalties. The user set the value themselves,
+    meaning frames with closed eyes are to be taken out of the auto-keep
+    candidates altogether. But the call is not perfect (see
+    eyes_closed_below), so a wrong call costs exactly that much.
 
-    bonus_eyes_open과 짝입니다. 뜬 컷과 감은 컷의 실제 점수 차이는
-    두 값의 합입니다.
+    It pairs with bonus_eyes_open. The real score gap between an open frame
+    and a closed one is the sum of the two.
     """
 
     bonus_eyes_open: float = 10.0
-    """주 피사체가 눈을 뜬 것으로 보일 때의 가산.
+    """The bonus when the main subject appears to have their eyes open.
 
-    감점만 있으면 "눈을 떴다"와 "눈을 못 쟀다"가 점수에서 똑같습니다.
-    옆얼굴이라 못 잰 컷과 정면으로 눈을 뜬 컷이 같은 대우를 받는 셈이라,
-    인물 셀렉트에서 가장 중요한 신호가 반만 쓰이고 있었습니다.
+    With only a penalty, "the eyes are open" and "the eyes could not be
+    measured" come out identical in the score. A frame that could not be
+    measured because it is a profile was treated the same as a frame with
+    the eyes open to camera, which meant the most important signal in
+    portrait culling was only half used.
 
-    **못 잰 컷(-1)에는 주지 않습니다.** 모르는 것을 좋은 것으로도 나쁜
-    것으로도 취급하지 않는다는 원칙은 그대로입니다 — 그렇게 하면 옆얼굴
-    원경이 정면 인물과 같은 가산을 받습니다.
+    **It is not given to frames that could not be measured (-1).** The
+    principle that what is unknown is treated as neither good nor bad still
+    stands - do otherwise and a distant profile receives the same bonus as
+    a frontal portrait.
 
-    얼굴 크기 가중을 받지 않습니다. penalty_eyes_closed와 대칭으로 두어
-    "떴으면 +, 감았으면 −"가 한눈에 읽히게 했습니다.
+    It does not take the face size weighting. It is left symmetric with
+    penalty_eyes_closed so that "open, +; closed, -" reads at a glance.
     """
 
     eyes_closed_below: float = 0.25
-    """이 값보다 눈 종횡비(EAR)가 작으면 감았다고 봅니다.
+    """An eye aspect ratio (EAR) below this value is taken as closed.
 
-    사용자가 라벨한 실사진 107장(감음 28 / 뜸 79) 실측:
+    Measured on 107 real photos the user labelled (28 closed / 79 open):
 
-        임계    잡아냄    거짓감점    정확
-        0.20     8/28     0/79      81%
-        0.22    14/28     2/79      85%
-        0.25    17/28     7/79      83%
-        0.28    24/28    16/79      81%
-        0.30    25/28    19/79      79%   ← 기본값
-        0.32    25/28    26/79      73%
-        0.35    26/28    40/79      61%
+        thresh   caught  false pen.   accuracy
+        0.20       8/28        0/79        81%
+        0.22      14/28        2/79        85%
+        0.25      17/28        7/79        83%
+        0.28      24/28       16/79        81%
+        0.30      25/28       19/79        79%   <- default
+        0.32      25/28       26/79        73%
+        0.35      26/28       40/79        61%
 
-    **0.30 위로는 올릴 이유가 없습니다.** 0.32는 0.30과 똑같이 25장을
-    잡으면서 뜬 눈만 7장 더 깎습니다. 감음 라벨의 EAR이 대부분 0.28
-    이하에 몰려 있고(28장 중 25장), 뜬 눈은 0.20부터 시작해 두 분포가
-    그 위에서 겹치기 때문입니다.
+    **There is no reason to go above 0.30.** 0.32 catches the same 25 as
+    0.30 while cutting 7 more open eyes. It is because the EAR of the
+    closed labels is mostly clustered at 0.28 and below (25 of 28), while
+    open eyes start from 0.20, so the two distributions overlap above that.
 
-    놓치는 것보다 거짓감점이 싫으면 0.22로 내리십시오 — 뜬 눈은 2장만
-    깎이고 정확도는 이 표본에서 가장 높습니다.
+    If you dislike a false penalty more than a miss, drop it to 0.22 - only
+    2 open eyes get cut and the accuracy is the highest in this sample.
 
-    **기본값 0.25 (0.30→0.22→0.25로 조정)**. 아래 근거(2차 라벨 400장, 2026-07-26).**
-    코퍼스 2만 장에서 임계 근처(0.22~0.38)만 층화한 400장을 "살려둘
-    가치" 기준으로 라벨 — 이 구간에서는 살림 중앙 EAR 0.316 vs 감점감
-    0.273으로 분포가 거의 겹쳐 **어떤 임계도 성립하지 않습니다**(0.30이면
-    살릴 컷의 38.6%를 오감점, 0.24로 내려도 9.4% 오감점에 포착 18.6%).
-    한쪽 감음·흐림·어두움이 EAR과 무관하게 섞여 있기 때문이고, 그것들은
-    선명도·노출 축이 따로 잡습니다. 그래서 감점은 애매 구간을 아예
-    피해 **확실히 감은 꼬리(<0.22, 코퍼스의 ~5%)**에만 작동합니다 —
-    이 라벨에서 오감점 0장, 1차 라벨 107장에서도 2/79로 최소였습니다.
+    **Default 0.25 (moved 0.30 -> 0.22 -> 0.25).** Evidence below: second
+    labelling round, 400 frames, 2026-07-26.
+    From a 20,000-frame corpus, 400 frames stratified to lie near the
+    threshold only (0.22~0.38) were labelled on a "worth keeping alive"
+    basis - in this band the median EAR of the keeps is 0.316 vs 0.273 for
+    the penalty-worthy, the distributions almost entirely overlap, and
+    **no threshold holds up at all** (at 0.30, 38.6% of the frames worth
+    keeping are falsely penalised; even down at 0.24 it is 9.4% false
+    penalty for 18.6% caught). It is because one eye closed, blur and
+    darkness are mixed in independently of EAR, and the sharpness and
+    exposure axes catch those separately. So the penalty avoids the
+    ambiguous band entirely and works only on the **definitely-closed tail
+    (<0.22, ~5% of the corpus)** - 0 false penalties on this labelling, and
+    on the first 107-frame labelling it was 2/79, the minimum there too.
 
-    **최종 0.25 (사용자 결정).** 깨끗한 라벨 152장(감음 72/떴음 80) 실측:
+    **Final 0.25 (the user's decision).** Measured on 152 clean labels
+    (72 closed / 80 open):
 
-        임계    오감점   포착    정확도
-        0.22     8.0%   57.5%   76.2%
-        0.25    10.3%   67.1%   79.4%   ← 기본값
+        thresh    false pen.   recall   accuracy
+        0.22            8.0%    57.5%      76.2%
+        0.25           10.3%    67.1%      79.4%   <- default
 
-    0.22가 지나치게 보수적이라 놓치는 감김이 많다는 판단으로 0.25를
-    씁니다 — 오감점 2.3%p를 더 내주고 포착 9.6%p를 얻는 교환이며,
-    정확도도 이쪽이 높습니다.
+    We use 0.25, on the judgement that 0.22 is excessively conservative and
+    misses too many closed eyes - the trade gives up another 2.3%p of false
+    penalty to gain 9.6%p of recall, and the accuracy is higher this way
+    too.
 
-    눈을 못 잰 컷(-1)은 어느 값에서도 감점하지 않습니다.
+    A frame where the eyes could not be measured (-1) is not penalised at
+    any value.
     """
 
     bonus_face_size: float = 0.0
-    """얼굴이 클수록 더하는 점수 (프레임 대비 면적 비례).
+    """Points added the larger the face is (proportional to area relative
+    to the frame).
 
-    멀리 있는 행인보다 크게 잡힌 주 피사체를 우대하고 싶을 때 씁니다.
+    Used when you want to favour a main subject caught large over a distant
+    passer-by.
     """
 
     face_bonus_full_area: float = 0.03
-    """얼굴 보너스를 **온전히** 받기 시작하는 얼굴 면적 (프레임 대비).
+    """The face area (relative to the frame) at which the face bonus starts
+    being received **in full**.
 
-    이보다 작은 얼굴은 크기에 비례해 보너스가 줄어듭니다. 없으면 객석에
-    잡힌 얼굴이 주 피사체 얼굴과 똑같은 보너스를 받습니다 — 검출기는 수십
-    화소짜리 얼굴도 찾아내기 때문입니다.
+    A face smaller than this has its bonus reduced in proportion to size.
+    Without it, a face caught in the audience receives exactly the same
+    bonus as the main subject's face - the detector finds faces only a few
+    dozen pixels across as well.
 
-    bonus_face와 bonus_eye 양쪽에 걸립니다. 눈 보너스에 안 걸면 작은 얼굴이
-    그쪽으로 우회합니다.
+    It applies to both bonus_face and bonus_eye. Leave it off the eye bonus
+    and small faces just detour through that one.
 
-    기본 3%는 6240×4168(26MP)에서 대략 880×880 화소입니다. 사용자가 고른
-    값으로, 상반신 인물컷을 온전히 인정하는 선입니다.
+    The default 3% is roughly 880x880 pixels at 6240x4168 (26MP). It is the
+    value the user chose, the line at which a waist-up portrait is credited
+    in full.
 
-    **망원으로 멀리서 찍으면 훨씬 낮춰야 합니다.** A6700 2845장(300mm 무대
-    촬영) 실측에서 주 피사체 얼굴은 중앙값 0.34%, 최대 2.99%였습니다. 그런
-    배치에서는 0.3% 근처가 맞습니다.
+    **Shooting from a distance with a telephoto, it has to go far lower.**
+    Measured on 2845 A6700 frames (stage shooting at 300mm), the main
+    subject's face had a median of 0.34% and a maximum of 2.99%. In a batch
+    like that, somewhere near 0.3% is right.
 
-    범위는 FACE_BONUS_AREA_RANGE(0.1%~50%)입니다.
+    The range is FACE_BONUS_AREA_RANGE (0.1%~50%).
     """
 
     penalty_highlight_clip: float = 1.0
-    """하이라이트가 임계를 넘게 날아갔을 때 최대 감점."""
+    """Maximum penalty when highlights blow out past the threshold."""
 
     penalty_shadow_clip: float = 2.5
-    """섀도우가 뭉갰을 때 최대 감점.
+    """Maximum penalty when the shadows are crushed.
 
-    작게 둡니다. 무대·야간 촬영은 의도적으로 검은 부분이 많아서, 크게 잡으면
-    멀쩡한 컷이 무더기로 깎입니다. max_clipped_shadows(기본 0.5)를 넘는
-    경우에만 걸립니다.
+    Kept small. Stage and night shooting deliberately has large black
+    areas, so set large it cuts perfectly good frames by the pile. It only
+    applies past max_clipped_shadows (0.5 by default).
     """
 
     penalty_extreme_luma: float = 15.0
-    """프레임이 거의 검거나 흴 때 감점 (렌즈캡, 오발 셔터)."""
+    """Penalty when the frame is nearly black or nearly white (lens cap,
+    misfired shutter)."""
 
     max_clipped_shadows: float = 0.5
-    """섀도우가 이 비율을 넘게 뭉개지면 감점 대상."""
+    """Shadows crushed past this ratio become penalty material."""
 
     keep_per_group: int = 1
-    """그룹당 keep으로 올릴 상위 컷 수.
+    """How many top frames per group to raise to keep.
 
-    0으로 두면 장면 보장을 끕니다. 그때는 절대 점수(keep_above)나 목표
-    비율만으로 판정하므로, 전체가 keep이 하나도 안 나오는 장면이 생깁니다.
+    Left at 0 this turns the scene guarantee off. Scoring then goes by the
+    absolute score (keep_above) or the target ratio alone, so scenes appear
+    out of which no keep comes at all.
     """
 
     min_keep_score: float = 0.0
-    """keep으로 올리기 위한 최소 점수. 장면 보장을 무력화하는 유일한 조건.
+    """The minimum score to be raised to keep. The only condition that
+    disables the scene guarantee.
 
-    0이면 모든 장면에서 최소 1장이 반드시 나온다(기본 동작). 0보다 크면
-    장면 전체가 이 점수에 못 미칠 때 그 장면에서는 아무것도 뽑지 않습니다.
+    At 0, at least one frame always comes out of every scene (the default
+    behaviour). Above 0, when a whole scene falls short of this score
+    nothing is taken from that scene.
 
-    전부 흔들린 장면까지 무리하게 한 장 건져 올리면 keep 폴더의 신뢰가
-    떨어집니다. 다만 이 값을 올리면 장면 전체가 사라질 수 있으므로,
-    올린 만큼 review를 꼭 확인해야 합니다.
+    Forcing one frame out of even a scene where everything is shaken drops
+    the trust in the keep folder. But raising this value can make a whole
+    scene disappear, so raise it and you must check review to match.
     """
 
     reject_below: float = 15.0
-    """이 점수 미만은 그룹 순위와 무관하게 reject (절대 임계)."""
+    """Below this score it is a reject regardless of group rank (an
+    absolute threshold)."""
 
     reject_percentile: float = 15.0
-    """배치 내 하위 몇 %를 reject 후보로 볼지 (상대 임계).
+    """What bottom percentage of the batch to treat as reject candidates
+    (a relative threshold).
 
-    조명 조건은 배치마다 달라서 절대 임계만으로는 불안정합니다. 절대값과
-    백분위를 함께 봐야 합니다.
+    Lighting conditions differ from batch to batch, so an absolute
+    threshold alone is unstable. The absolute value and the percentile have
+    to be read together.
     """
 
     keep_above: float = 65.0
-    """그룹 순위와 무관하게 keep으로 올리는 절대 점수.
+    """The absolute score that raises a frame to keep regardless of group
+    rank.
 
-    선명도 항이 0~50이므로(scoring.SHARPNESS_SCALE) 이 값은 보너스를 상당히
-    받은 컷만 넘습니다. 사용자가 실제 촬영본으로 맞춘 값입니다.
+    Since the sharpness term is 0~50 (scoring.SHARPNESS_SCALE), only frames
+    that took a substantial bonus clear this value. It is the value the
+    user tuned against their own real shoots.
 
-    target_keep_ratio가 켜져 있으면 이 값은 무시됩니다.
+    If target_keep_ratio is on, this value is ignored.
     """
 
     target_keep_ratio: float | None = None
-    """목표 keep 비율 (0~1). None이면 keep_above를 그대로 씁니다.
+    """The target keep ratio (0~1). None uses keep_above as it is.
 
-    절대 점수는 배치마다 의미가 달라집니다. 조명과 렌즈가 바뀌면 점수 분포가
-    전체가 이동해서, 어떤 촬영에서 10%를 내던 값이 다른 촬영에서는 30%가
-    됩니다. 목표 비율을 주면 배치의 점수 분포에서 임계값을 역산하므로
-    촬영이 바뀌어도 결과 비율이 유지됩니다.
+    An absolute score means something different in every batch. Change the
+    lighting and the lens and the whole score distribution shifts, so a
+    value that yielded 10% on one shoot yields 30% on another. Give it a
+    target ratio and the threshold is derived back out of the batch's own
+    score distribution, so the result ratio holds even when the shoot
+    changes.
 
-    달성 가능한 하한은 '장면 수 / 전체 장수'다. 장면마다 최소 1장은 반드시
-    남기기 때문입니다. 목표가 그보다 낮으면 하한이 그대로 결과가 됩니다.
+    The achievable lower bound is 'number of scenes / total frames',
+    because at least one frame is always left per scene. A target lower
+    than that just gives the lower bound as the result.
     """
 
     reject_below_group_best: float = 10.0
-    """같은 그룹 베스트보다 이만큼 낮으면 reject.
+    """Reject if it is this far below the best of the same group.
 
-    연사에서 사람이 실제로 하는 판단입니다. 전역 점수로는 중간쯤이어도,
-    같은 순간을 찍은 더 나은 컷이 있으면 그것은 볼 이유가 없는 중복입니다.
+    This is the judgement a person actually makes on a burst. Even if it
+    sits mid-pack on the global score, if there is a better frame of the
+    same moment then it is a duplicate with no reason to look at it.
 
-    실측(2845장, 그룹 226개)에서 그룹 베스트 대비 격차는 중앙값 14.7점,
-    p75가 24점이었습니다 — **선명도가 0~100을 쓰던 예전 척도 기준**입니다.
-    지금은 선명도 항이 절반(SHARPNESS_SCALE)이라 격차도 대략 절반이므로
-    그 20점에 해당하는 값이 10점입니다.
+    Measured (2845 frames, 226 groups), the gap against the group best had
+    a median of 14.7 points and a p75 of 24 points - **on the old scale,
+    where sharpness used all of 0~100**. The sharpness term is now halved
+    (SHARPNESS_SCALE) so the gaps are roughly halved too, which makes the
+    value corresponding to that 20 points 10 points.
 
-    그룹 1등은 이 규칙보다 먼저 keep으로 확정되므로 장면이 통째로
-    사라지는 일은 없습니다.
+    The group's number one is fixed as keep ahead of this rule, so a scene
+    never disappears wholesale.
     """
 
     max_clipped_highlights: float = 0.25
-    """하이라이트가 이 비율을 넘게 날아가면 감점."""
+    """Highlights blown out past this ratio take a penalty."""
 
 
 @dataclass
@@ -399,16 +466,17 @@ class Config:
     group: GroupConfig = field(default_factory=GroupConfig)
     score: ScoreConfig = field(default_factory=ScoreConfig)
     workers: int | None = None
-    """None이면 cpu_count - 1."""
+    """None means cpu_count - 1."""
 
     recursive: bool = True
 
     @classmethod
     def load(cls, path: Path | None) -> "Config":
-        """YAML에서 설정을 읽습니다.
+        """Read the settings from YAML.
 
-        경로가 없거나 파일이 손상되었으면 기본값으로 넘어갑니다. 설정 파일
-        하나 때문에 프로그램이 실행되지 않는 상황을 만들지 않습니다.
+        If the path is missing or the file is damaged, it falls through to
+        the defaults. One settings file is never allowed to become the
+        reason the program will not run.
         """
         if path is None or not Path(path).exists():
             return cls()
@@ -423,10 +491,11 @@ class Config:
 
     @classmethod
     def from_dict(cls, data: Any) -> "Config":
-        """알 수 없는 키는 걸러냅니다.
+        """Unknown keys are filtered out.
 
-        손으로 편집한 파일에서 섹션이 dict가 아닌 값으로 들어와도 그 섹션만
-        기본값이 되고 나머지는 살립니다.
+        Even if a hand-edited file has a section come in as something other
+        than a dict, only that section falls back to defaults and the rest
+        survives.
         """
         if not isinstance(data, dict):
             return cls()

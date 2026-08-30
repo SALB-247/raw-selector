@@ -1,7 +1,7 @@
-"""헤드리스 CLI. 4000장 배치 검증과 자동화용.
+"""The headless CLI. For verifying 4000-frame batches and for automation.
 
-GUI와 완전히 같은 코어를 쓴다 (core.session). 여기서 나온 결과와 GUI에서
-나온 결과가 다르면 그것은 버급니다.
+It uses exactly the same core as the GUI (core.session). If the result out
+of here differs from the result out of the GUI, that is a bug.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def _format_duration(seconds: float) -> str:
 
 
 class ProgressPrinter:
-    """터미널 한 줄을 덮어쓰며 진행률을 보여 줍니다."""
+    """Shows the progress by overwriting a single terminal line."""
 
     def __init__(self, quiet: bool = False):
         self.quiet = quiet
@@ -39,7 +39,7 @@ class ProgressPrinter:
     def __call__(self, progress) -> None:
         if self.quiet or progress.total == 0:
             return
-        # 매 장마다 다시 그리면 터미널이 병목이 됩니다
+        # redrawing on every frame makes the terminal the bottleneck
         if progress.done - self._last_done < 25 and progress.done != progress.total:
             return
         self._last_done = progress.done
@@ -59,7 +59,8 @@ class ProgressPrinter:
 
 
 def write_report(records: list[ImageRecord], path: Path) -> None:
-    """장별 상세를 CSV 또는 JSON으로 남깁니다. 임계값 튜닝의 근거가 됩니다."""
+    """Writes the per-frame detail as CSV or JSON. It is the evidence for
+    tuning the thresholds."""
     path = Path(path)
 
     if path.suffix.lower() == ".json":
@@ -90,7 +91,7 @@ def write_report(records: list[ImageRecord], path: Path) -> None:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return
 
-    # utf-8-sig: Excel이 BOM 없이는 한글을 깨뜨립니다
+    # utf-8-sig: without the BOM, Excel mangles Hangul
     with path.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.writer(handle)
         writer.writerow([
@@ -211,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.target_keep is not None:
         config.score.target_keep_ratio = args.target_keep / 100.0
     if args.keep_above is not None:
-        # 절대 점수를 명시했으면 목표 비율은 꺼야 합니다 — 둘 다 켜면 비율이 이깁니다
+        # with an absolute score given, the target ratio has to be turned
+        # off - with both on, the ratio wins
         config.score.keep_above = args.keep_above
         config.score.target_keep_ratio = None
     if args.recursive is not None:
@@ -259,7 +261,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _select_for_export(session: SelectionSession, grades_arg: str | None) -> list[ImageRecord]:
-    """--grades로 지정한 등급만 남깁니다. 없으면 전체."""
+    """Keeps only the grades given with --grades. All of them if there are
+    none."""
     if not grades_arg:
         return session.records
 

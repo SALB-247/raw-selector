@@ -1,10 +1,11 @@
-"""등급별 폴더 분류.
+"""Sorting into folders by grade.
 
-기본은 복삽니다. 4000장을 옮기는 건 되돌리기 어렵고, 자동 판정을 처음
-써보는 사용자가 원본을 잃는 상황은 만들면 안 됩니다. 이동은 명시적으로
-선택해야 합니다.
+The default is to copy. Moving 4000 frames is hard to undo, and a user
+trying automatic scoring for the first time must never be put in a position
+to lose their originals. Moving has to be chosen explicitly.
 
-모든 작업은 JSON 로그로 남기고, 그 로그만으로 완전히 되돌릴 수 있습니다.
+Every operation is recorded in a JSON log, and that log alone is enough to
+undo it completely.
 """
 
 from __future__ import annotations
@@ -22,51 +23,54 @@ from .types import Grade, ImageRecord
 
 log = logging.getLogger(__name__)
 
-from .appinfo import CACHE_DIR_NAME as LOG_DIR_NAME  # 되돌리기 로그도 같은 폴더에 둡니다
+from .appinfo import CACHE_DIR_NAME as LOG_DIR_NAME  # the undo log lives in the same folder
 
 LOG_VERSION = 1
 
 COMPANION_EXTENSIONS = (
     ".jpg",
     ".jpeg",
-    # RAW+HEIF로 찍으면 .HIF가 함께 생깁니다(소니). 이걸 빠뜨리면 이동
-    # 내보내기에서 RAW만 옮겨 가고 HIF가 원본 폴더에 고아로 남습니다.
+    # Shooting RAW+HEIF also produces a .HIF (Sony). Leave it out and a
+    # move export takes only the RAW, orphaning the HIF in the source folder.
     ".hif",
     ".heif",
     ".heic",
     ".xmp",
 )
-"""RAW와 함께 움직여야 하는 파일 확장자.
+"""File extensions that have to move together with the RAW.
 
-RAW+JPEG로 찍었거나 Lightroom이 사이드카를 만들어 둔 경우, RAW만 옮기면
-짝이 끊어집니다.
+If you shot RAW+JPEG, or Lightroom left a sidecar behind, moving only the
+RAW breaks the pair.
 """
 
 
 @dataclass(frozen=True)
 class ExportOp:
-    """파일 하나에 대한 작업."""
+    """One operation on a single file."""
 
     source: Path
     destination: Path
     grade: Grade
     develop: object | None = None
-    """DevelopSettings. 있으면 현상한 이미지를 추가로 만듭니다."""
+    """DevelopSettings. If present, a developed image is made as well."""
 
     rendered_name: str | None = None
-    """현상 결과 파일명. None이면 destination의 확장자만 바꿔 씁니다."""
+    """Filename of the develop result. None just swaps destination's
+    extension."""
 
     main_face_box: tuple[float, float, float, float] | None = None
-    """분석이 고른(또는 사용자가 바꾼) 주 피사체 얼굴의 정규화 좌표.
+    """Normalised coordinates of the main subject face the analysis picked
+    (or the user changed).
 
-    얼굴 마스크의 '주 피사체'가 이 얼굴을 따라갑니다. 안 넘기면 마스크가
-    저장 시점에 스스로 다시 골라서, 화면에서 본 얼굴과 다를 수 있습니다.
+    The face mask's 'main subject' follows this face. Without it the mask
+    picks one again by itself at save time, which may not be the face you
+    saw on screen.
     """
 
 
 @dataclass
 class ExportPlan:
-    """실제로 무엇이 어디로 갈지. dry-run으로 먼저 확인할 수 있습니다."""
+    """What actually goes where. You can check it first with a dry run."""
 
     operations: list[ExportOp] = field(default_factory=list)
     skipped: list[tuple[Path, str]] = field(default_factory=list)
@@ -87,7 +91,7 @@ class ExportPlan:
 class ExportResult:
     moved: int = 0
     rendered: int = 0
-    """보정을 적용해 JPEG로 현상한 장수."""
+    """How many frames were developed to JPEG with adjustments applied."""
     failed: list[tuple[Path, str]] = field(default_factory=list)
     log_path: Path | None = None
     mode: str = "copy"
@@ -95,10 +99,10 @@ class ExportResult:
 
 
 def find_companions(raw_path: Path) -> list[Path]:
-    """RAW와 짝지어진 파일들을 찾습니다.
+    """Finds the files paired with a RAW.
 
-    대소문자를 구분하지 않고 비교합니다 — Windows에서 만든 폴더를 macOS에서
-    열면 DSC001.JPG와 DSC001.jpg가 다르게 취급되기 때문입니다.
+    Compared case-insensitively - opening a folder made on Windows from
+    macOS would otherwise treat DSC001.JPG and DSC001.jpg as different.
     """
     companions: list[Path] = []
     stem_lower = raw_path.stem.lower()
@@ -113,10 +117,10 @@ def find_companions(raw_path: Path) -> list[Path]:
         if not sibling.is_file() or sibling == raw_path:
             continue
         name_lower = sibling.name.lower()
-        # DSC001.ARW.xmp 형태 (Lightroom이 만드는 사이드카)
+        # the DSC001.ARW.xmp form (the sidecar Lightroom makes)
         if name_lower == f"{raw_name_lower}.xmp":
             companions.append(sibling)
-        # DSC001.jpg / DSC001.xmp 형태
+        # the DSC001.jpg / DSC001.xmp form
         elif (
             sibling.stem.lower() == stem_lower
             and sibling.suffix.lower() in COMPANION_EXTENSIONS
@@ -127,9 +131,10 @@ def find_companions(raw_path: Path) -> list[Path]:
 
 
 def _unique_destination(destination: Path) -> Path:
-    """이름이 겹치면 덮어쓰지 않고 접미사를 붙입니다.
+    """On a name clash, a suffix is appended instead of overwriting.
 
-    다른 카드에서 온 같은 파일명이 서로를 지우는 사고를 막습니다.
+    It prevents the accident where identically named files from different
+    cards erase each other.
     """
     if not destination.exists():
         return destination
@@ -141,19 +146,22 @@ def _unique_destination(destination: Path) -> Path:
 
 
 NO_PLACE_FOLDER = "_위치없음"
-"""GPS가 없는 컷이 갈 폴더.
+"""The folder frames with no GPS go to.
 
-임의의 장소에 섞으면 안 됩니다. 위치를 모르는 것과 그 장소에서 찍은 것은
-다릅니다. 실측(A6700 300장): 폰 연동 없이 찍으면 GPS가 **한 장도** 안
-들어가므로, 이 폴더가 전부가 되는 경우가 흔합니다.
+They must not be mixed into some arbitrary place. Not knowing the location
+and having been shot at that location are different things. Measured (300
+A6700 frames): shooting without the phone linked puts GPS into **not one
+frame**, so it is common for this folder to be all of it.
 """
 
 
 def _place_folder_names(records: list[ImageRecord]) -> dict[int, str]:
-    """place_id → 폴더 이름. 아직 안 묶였으면 여기서 묶습니다.
+    """place_id -> folder name. If they are not grouped yet, they are
+    grouped here.
 
-    분석 직후에는 place_id가 채워져 있지만, 대기열처럼 레코드를 따로
-    만들어 넣는 경로도 있어서 여기서 한 번 더 확인합니다.
+    Right after analysis place_id is filled in, but there are paths such as
+    the queue that build records separately, so it is checked once more
+    here.
     """
     from .places import assign_places, place_labels
 
@@ -189,15 +197,15 @@ def build_plan(
     include_companions: bool = False,
     options: "ExportOptions | None" = None,
 ) -> ExportPlan:
-    """어떤 파일이 어디로 갈지 계산합니다. 파일시스템은 건드리지 않습니다."""
+    """Works out which file goes where. Does not touch the filesystem."""
     from .export_options import ExportOptions, format_filename
 
     options = options or ExportOptions()
     plan = ExportPlan()
     destination_root = Path(destination_root)
 
-    # 선택한 등급만 내보냅니다. enumerate 앞에서 걸러야 {index} 번호가
-    # 건너뛰지 않고 1부터 이어집니다.
+    # Only the selected grades are exported. The filtering has to happen
+    # before enumerate so the {index} number runs on from 1 without skips.
     records = [r for r in records if options.wants_grade(r.final_grade)]
 
     place_names = _place_folder_names(records) if options.subfolder_by_place else {}
@@ -205,8 +213,9 @@ def build_plan(
     for index, record in enumerate(records, start=1):
         grade = record.final_grade
         target_dir = destination_root
-        # 장소를 먼저, 등급을 그 안에. 반대로 하면 같은 장소의 keep과
-        # review가 멀리 떨어져 "이 장소 결과"를 한눈에 볼 수 없습니다.
+        # Place first, grade inside it. The other way round, the keep and
+        # review of the same place sit far apart and you cannot see "the
+        # result for this place" at a glance.
         if options.subfolder_by_place:
             target_dir = target_dir / place_names.get(
                 record.place_id, NO_PLACE_FOLDER)
@@ -219,7 +228,7 @@ def build_plan(
 
         develop = getattr(record, "develop", None)
         if develop is not None and getattr(develop, "is_neutral", lambda: True)():
-            develop = None  # 기본값뿐이면 현상할 이유가 없습니다
+            develop = None  # nothing but defaults, so no reason to develop
 
         raw_name = format_filename(
             options.filename_pattern, record, index, record.path.suffix
@@ -259,13 +268,14 @@ def export_records(
     progress_cb: Callable[[int, int], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> ExportResult:
-    """등급별 폴더로 복사(기본) 또는 이동합니다.
+    """Copies (the default) or moves into folders by grade.
 
-    보정이 지정된 컷은 현상한 이미지를 함께 만듭니다. 기본적으로 원본 RAW도
-    그대로 나가므로 나중에 다시 현상할 여지가 남습니다.
+    Frames with an adjustment assigned get a developed image made
+    alongside. By default the original RAW goes out as it is too, so there
+    is room to develop it again later.
 
-    되돌리기 로그를 먼저 쓰고 작업을 시작합니다 — 중간에 죽어도 그때까지
-    한 일을 되돌릴 수 있어야 합니다.
+    The undo log is written before the work starts - even if it dies
+    partway, what it has done up to then has to be undoable.
     """
     from .export_options import ExportOptions
 
@@ -284,10 +294,11 @@ def export_records(
     if not plan.operations:
         return result
 
-    # 원본도 안 내보내고 보정본도 안 만들면 결과물이 하나도 없습니다.
-    # 그런데도 "완료"로 끝나서 사용자는 내보낸 줄 압니다. 조용히 성공하는
-    # 대신 왜 아무것도 안 나오는지 알려 주고 멈춥니다. (이동 모드는
-    # 원본을 옮기므로 결과물이 남습니다.)
+    # Not exporting the original and not making an adjusted copy either
+    # means there is no output at all. And yet it ends as "done", so the
+    # user believes it was exported. Instead of succeeding quietly, we say
+    # why nothing comes out and stop. (Move mode moves the original, so
+    # there is output.)
     if not options.copy_raw and not apply_develop and not move:
         message = "원본 복사와 보정 적용이 모두 꺼져 있어 내보낼 것이 없습니다"
         log.error(message)
@@ -298,8 +309,8 @@ def export_records(
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        # 내보낼 위치 자체를 만들 수 없으면 시작하지 않습니다.
-        # 로그를 못 남기면 되돌리기도 불가능하므로 진행이 위험합니다.
+        # If the export location itself cannot be created, do not start.
+        # With no log there is no undo either, so going on is dangerous.
         log.error("내보낼 위치를 만들 수 없습니다 (%s): %s", destination_root, exc)
         result.failed.append((destination_root, f"폴더를 만들 수 없습니다: {exc}"))
         return result
@@ -310,26 +321,31 @@ def export_records(
     try:
         for index, op in enumerate(plan.operations, start=1):
             if should_cancel and should_cancel():
-                # 여기까지 한 일은 로그에 남으므로 그대로 되돌릴 수 있습니다
+                # what was done up to here is in the log, so it can be undone
                 log.info("사용자 취소 — %d개 처리 후 중단", result.moved)
                 result.cancelled = True
                 break
             try:
                 op.destination.parent.mkdir(parents=True, exist_ok=True)
 
-                # 짝 파일(카메라 JPEG·.xmp)은 build_plan이 rendered_name 없이
-                # 만듭니다. 사진이 아니라 **딸린 파일**이므로 현상 엔진을 타면
-                # 안 되고(JPEG이 손실 재압축되고 .xmp는 실패로 기록됩니다),
-                # copy_raw 옵션과도 무관합니다 — 그 옵션은 원본 RAW를 남길지
-                # 정하는 것이지, 사용자가 명시적으로 켠 "짝 파일 포함"을
-                # 무르는 스위치가 아닙니다. 짝 파일은 언제나 그대로 복사/이동.
+                # build_plan makes companion files (camera JPEG, .xmp) with
+                # no rendered_name. They are **attached files**, not
+                # photographs, so they must not go through the develop
+                # engine (the JPEG would be lossily re-compressed and the
+                # .xmp recorded as a failure), and they have nothing to do
+                # with the copy_raw option - that option decides whether to
+                # keep the original RAW, it is not a switch that undoes the
+                # "include companions" the user explicitly turned on.
+                # Companion files are always copied/moved as they are.
                 is_companion = op.rendered_name is None
 
-                # 현상을 먼저 합니다. 이동 모드에서 원본을 옮긴 뒤에 읽으려 하면
-                # 소스가 이미 사라져 있습니다.
-                # 원본을 복사하지 않는다면 이 사진의 결과물은 렌더링본뿐입니다.
-                # 보정값이 없다고 건너뛰면 그 사진만 조용히 사라지므로,
-                # 이때는 중립 보정으로라도 반드시 내보냅니다.
+                # Develop first. In move mode, trying to read after the
+                # original has been moved finds the source already gone.
+                # If the original is not copied, the only output for this
+                # photo is the rendered version. Skipping it because there
+                # is no adjustment would make that one photo vanish
+                # quietly, so in that case it is exported without fail,
+                # even if only with a neutral adjustment.
                 rendered = apply_develop and not is_companion and (
                     op.develop is not None or not options.copy_raw
                 )
@@ -337,15 +353,18 @@ def export_records(
                     completed.append(_render_operation(op, options))
                     result.rendered += 1
 
-                # 원본 RAW는 옵션을 껐으면 내보내지 않습니다. 다만 이동
-                # 모드에서까지 건너뛰면 원본이 제자리에 남아 "이동"이
-                # 아니게 되므로, 이동일 때는 항상 옮깁니다.
+                # The original RAW is not exported if the option is off.
+                # But skipping it in move mode as well would leave the
+                # original in place and stop it being a "move", so on a
+                # move it is always moved.
                 #
-                # 원본이 RAW가 아니면 copy_raw는 지킬 것이 없습니다. RAW를
-                # 남기는 이유는 나중에 다시 현상할 여지인데, JPEG 원본은
-                # 현상본과 같은 형식·같은 이름이라 IMG_0001.jpg 옆에
-                # IMG_0001_1.jpg가 생기고 어느 쪽이 보정본인지 알 수 없게
-                # 됩니다. 원본은 원래 폴더에 그대로 있습니다.
+                # If the original is not a RAW, copy_raw has nothing to
+                # protect. The reason for keeping the RAW is the room to
+                # develop it again later, but a JPEG original has the same
+                # format and the same name as the developed version, so
+                # IMG_0001_1.jpg appears next to IMG_0001.jpg and there is
+                # no telling which one is the adjusted copy. The original
+                # stays in its own folder as it is.
                 skip_original = not is_companion and (
                     not options.copy_raw or (rendered and not is_raw(op.source))
                 )
@@ -357,9 +376,10 @@ def export_records(
                 completed.append(_transfer_operation(op, move=move))
                 result.moved += 1
             except Exception as exc:  # noqa: BLE001
-                # 한 파일이 실패해도 나머지는 계속 처리합니다. OSError뿐 아니라
-                # 디모자이크/프리뷰 실패(PreviewError)나 보정 연산 오류(cv2.error)도
-                # 여기서 삼켜야 손상 파일 한 장이 배치 전체를 멈추지 않습니다.
+                # One file failing does not stop the rest. Not just
+                # OSError but demosaic/preview failures (PreviewError) and
+                # adjustment errors (cv2.error) have to be swallowed here,
+                # or one damaged file stops the whole batch.
                 log.warning("%s 실패: %s", op.source.name, exc)
                 result.failed.append((op.source, str(exc)))
 
@@ -377,7 +397,8 @@ def export_records(
 
 
 def _render_operation(op: "ExportOperation", options: "ExportOptions") -> dict[str, str]:
-    """보정을 적용한 이미지를 내보내고 되돌리기 로그 항목을 만듭니다."""
+    """Exports the image with the adjustment applied and makes the undo log
+    entry."""
     from .develop.engine import export_image
     from .develop.settings import DevelopSettings
 
@@ -404,7 +425,7 @@ def _render_operation(op: "ExportOperation", options: "ExportOptions") -> dict[s
 
 
 def _transfer_operation(op: "ExportOperation", *, move: bool) -> dict[str, str]:
-    """원본 파일을 복사하거나 이동하고 되돌리기 로그 항목을 만듭니다."""
+    """Copies or moves the original file and makes the undo log entry."""
     final_destination = _unique_destination(op.destination)
     if move:
         shutil.move(str(op.source), str(final_destination))
@@ -417,7 +438,7 @@ def _transfer_operation(op: "ExportOperation", *, move: bool) -> dict[str, str]:
     }
 
 
-# ---------------------------------------------------------------- 되돌리기
+# --------------------------------------------------------------------- undo
 
 
 def _new_log_path(destination_root: Path) -> Path:
@@ -441,10 +462,11 @@ def _write_log(
 
 
 def find_logs(destination_root: Path) -> list[Path]:
-    """최신 로그가 앞에 오도록 정렬해 반환합니다.
+    """Returns them sorted so that the newest log comes first.
 
-    제품명이 바뀌기 전에 내보낸 기록도 찾아야 합니다. 못 찾으면 그때
-    내보낸 4000장을 되돌릴 방법이 사라집니다.
+    Records exported before the product name changed have to be found too.
+    If they are not, the way to undo the 4000 frames exported back then
+    disappears.
     """
     from .cache import resolve_cache_dir
 
@@ -455,16 +477,19 @@ def find_logs(destination_root: Path) -> list[Path]:
 
 
 def undo_export(log_path: Path) -> ExportResult:
-    """로그를 읽어 내보내기를 되돌립니다.
+    """Reads the log and undoes the export.
 
-    copy였으면 만들어낸 사본을 지우고, move였으면 원위치로 되돌립니다.
-    이름 충돌 시 항상 새 파일을 만들었으므로, 지우는 대상은 전부 이 툴이
-    만든 것입니다. 사용자가 원래 갖고 있던 파일은 건드리지 않습니다.
+    If it was a copy, the copies it created are deleted; if it was a move,
+    they are put back where they were. Since a new file was always created
+    on a name clash, everything being deleted is something this tool made.
+    Files the user already had are not touched.
 
-    로그가 조금 어긋나 있어도 **할 수 있는 만큼은 되돌립니다.** 이동 모드에서
-    이 로그는 유일한 안전망입니다 — 항목 하나가 깨졌다고 통째로 예외를 내면
-    4000장을 옮긴 사용자에게 복구 수단이 하나도 남지 않습니다. 되돌리지 못한
-    항목은 failed에 담아 사용자가 직접 처리할 수 있게 합니다.
+    Even when the log is a little out of step it **undoes as much as it
+    can.** In move mode this log is the only safety net there is - throwing
+    an exception over the whole thing because one entry is broken would
+    leave a user who moved 4000 frames with no means of recovery at all.
+    Entries it could not undo go into failed so the user can deal with them
+    by hand.
     """
     log_path = Path(log_path)
     payload = json.loads(log_path.read_text(encoding="utf-8"))
@@ -477,9 +502,10 @@ def undo_export(log_path: Path) -> ExportResult:
     )
 
     if mode not in ("copy", "move"):
-        # 모르는 모드에서 추측하면 안 됩니다. copy로 보고 진행하면 대상
-        # 파일을 지우는데, 실제가 move였다면 그게 사용자가 가진 **유일한**
-        # 사본입니다. 되돌리기를 못 하는 것보다 지우는 쪽이 훨씬 비쌉니다.
+        # Do not guess on a mode we do not know. Treating it as copy and
+        # going on deletes the destination file, and if it really was a
+        # move that is the **only** copy the user has. Deleting costs far
+        # more than failing to undo.
         log.error("되돌리기 모드를 알 수 없습니다 (%s): %r", log_path.name, mode)
         result.failed.append((log_path, f"되돌리기 모드를 알 수 없습니다: {mode!r}"))
         return result
@@ -488,7 +514,7 @@ def undo_export(log_path: Path) -> ExportResult:
     if not isinstance(operations, (list, tuple)):
         operations = ()
 
-    # 역순으로 되돌려야 중간에 만들어진 상태와 부딪히지 않습니다
+    # undoing in reverse order avoids colliding with state made along the way
     for operation in reversed(list(operations)):
         if (
             not isinstance(operation, dict)
@@ -506,11 +532,14 @@ def undo_export(log_path: Path) -> ExportResult:
                 result.failed.append((destination, "대상이 이미 없음"))
                 continue
 
-            # 현상해서 새로 만든 파일은 옮겨 온 것이 아니라 **없던 것**입니다.
-            # 되돌리기는 지우는 것이 맞습니다. 배치 전체의 mode만 보고
-            # "이동이었으니 되돌려 놓자"고 하면, source 자리에는 이미 원본이
-            # 복구돼 있어서(전송 항목을 먼저 되돌립니다) 전부 "원위치에 다른
-            # 파일이 있음"으로 실패하고 현상본만 대상 폴더에 남았습니다.
+            # A file newly created by developing was not moved in from
+            # somewhere - it **did not exist** before. Undoing it means
+            # deleting it. Going by the batch-wide mode alone and saying
+            # "it was a move, so put it back" meant the original had
+            # already been restored at the source position (transfer
+            # entries are undone first), so they all failed with "another
+            # file is in the original position" and only the developed
+            # copies were left in the destination folder.
             if mode == "move" and not operation.get("rendered"):
                 if source.exists():
                     result.failed.append((source, "원위치에 다른 파일이 있음"))
@@ -532,7 +561,7 @@ def undo_export(log_path: Path) -> ExportResult:
 
 
 def _cleanup_empty_dirs(destination_root: Path) -> None:
-    """비게 된 _keep/_review/_reject 폴더를 치웁니다."""
+    """Clears away _keep/_review/_reject folders that have become empty."""
     for grade in Grade:
         directory = destination_root / f"_{grade.value}"
         try:

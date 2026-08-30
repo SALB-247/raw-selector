@@ -1,7 +1,8 @@
-"""보정 패널에서 쓰는 공용 위젯.
+"""Shared widgets used by the adjustment panel.
 
-슬라이더가 수십 개라 한 줄씩 손으로 만들면 관리가 안 됩니다. 라벨·슬라이더·
-숫자입력·초기화를 한 덩어리로 묶어 두고 재사용합니다.
+With dozens of sliders, building them one line at a time by hand is
+unmanageable. The label, slider, number entry and reset are bundled into one
+piece and reused.
 """
 
 from __future__ import annotations
@@ -25,14 +26,17 @@ from .i18n import tr
 
 
 def disable_wheel(widget: QWidget) -> QWidget:
-    """휠로 값이 바뀌지 않게 하고, 스크롤을 부모(패널)로 넘깁니다.
+    """Stops the wheel changing the value and passes the scroll on to the
+    parent (the panel).
 
-    긴 패널을 휠로 훑다 보면 커서가 콤보박스·스핀박스 위를 지나갑니다. 그때
-    값이 멋대로 바뀌면 무엇이 바뀌었는지도 모른 채 보정이 틀어집니다.
-    슬라이더에는 이미 같은 처리가 되어 있었는데, 드롭다운에는 빠져 있었습니다.
+    Running the wheel down a long panel drags the cursor over combo boxes and
+    spin boxes. If the value changes on its own there, the adjustment goes
+    wrong without you even knowing what changed. The sliders already had the
+    same handling; the dropdowns had been left out.
 
-    포커스 정책도 함께 낮춥니다. StrongFocus면 클릭해 포커스를 준 뒤에만
-    키보드로 조작할 수 있어, 지나가다 건드리는 사고가 나지 않습니다.
+    The focus policy is lowered along with it. With StrongFocus you can only
+    work it from the keyboard after clicking to give it focus, so there is no
+    accident from brushing past.
     """
     widget.setFocusPolicy(Qt.StrongFocus)
     widget.wheelEvent = lambda event: event.ignore()
@@ -40,12 +44,14 @@ def disable_wheel(widget: QWidget) -> QWidget:
 
 
 def disable_wheel_in(parent: QWidget) -> None:
-    """패널 안의 모든 콤보박스·스핀박스에 휠 차단을 적용합니다.
+    """Applies the wheel block to every combo box and spin box in the panel.
 
-    위젯을 새로 추가할 때마다 빠뜨리기 쉬워서, 다 만든 뒤 한 번에 훑습니다.
+    It is easy to miss one each time a widget is added, so everything is swept
+    in a single pass once it is all built.
     """
-    # PySide6의 findChildren은 타입 튜플을 받지 않아 종류별로 훑습니다.
-    # QAbstractSpinBox 하나로 QSpinBox와 QDoubleSpinBox가 모두 걸립니다.
+    # PySide6's findChildren does not take a tuple of types, so each kind is
+    # swept separately. QAbstractSpinBox alone catches both QSpinBox and
+    # QDoubleSpinBox.
     from PySide6.QtWidgets import QAbstractSpinBox, QComboBox
 
     for widget_type in (QComboBox, QAbstractSpinBox):
@@ -53,20 +59,21 @@ def disable_wheel_in(parent: QWidget) -> None:
             disable_wheel(child)
 
 
-# 슬라이더 트랙 그라디언트. 무엇을 조정하는 값인지 색으로 바로 보이게 합니다.
-# Lightroom과 같은 방향(왼쪽이 음수)을 씁니다.
+# Slider track gradients. The colour shows at once which value is being
+# adjusted. The same direction as Lightroom is used (negative on the left).
 GRADIENTS = {
-    "temperature": ("#4a7fd4", "#e8c14a"),   # 차갑게 ↔ 따뜻하게
-    "tint": ("#4ac46a", "#d24ac4"),          # 초록 ↔ 마젠타
+    "temperature": ("#4a7fd4", "#e8c14a"),   # cool <-> warm
+    "tint": ("#4ac46a", "#d24ac4"),          # green <-> magenta
     "exposure": ("#101013", "#f5f5f5"),
     "contrast": ("#6a6a70", "#e8e8ea"),
     "highlights": ("#5a5a60", "#ffffff"),
     "shadows": ("#101013", "#9a9aa0"),
     "whites": ("#7a7a80", "#ffffff"),
     "blacks": ("#000000", "#8a8a90"),
-    # 채도/생동감은 "색이 진해진다"는 뜻이지 특정 색으로 간다는 뜻이 아닙니다.
-    # 예전에는 각각 빨강/주황 한 색으로 끝나서, 올리면 붉어지는 것처럼
-    # 보였습니다. 무채색에서 여러 색이 살아나는 쪽으로 바꿉니다.
+    # Saturation/vibrance mean "the colour gets deeper", not that it heads for
+    # one particular colour. They used to end at a single red/orange each, so
+    # raising them looked like it turned things red. Changed towards several
+    # colours coming alive out of grey.
     "saturation": ("#8a8a8a", "#7a9ad0", "#7ac07a", "#d0c060", "#d06a6a"),
     "vibrance": ("#8a8a8a", "#93a8c8", "#9dbd93", "#c8bd8a", "#c88a8a"),
     "hue": (
@@ -77,16 +84,18 @@ GRADIENTS = {
 
 
 def hsl_band_colors(center_hue: int, channel: str) -> tuple[str, ...]:
-    """HSL 밴드 슬라이더의 트랙 색.
+    """Track colours for the HSL band sliders.
 
-    전 밴드를 같은 무지개로 칠하면 지금 무엇을 만지는지 알 수 없습니다.
-    Lightroom처럼 밴드마다 그 색상대 고유의 그라디언트를 씁니다.
+    Painting every band with the same rainbow leaves you unable to tell what
+    you are working on right now. Like Lightroom, every band uses the gradient
+    belonging to its own hue range.
 
-    - 색조: 이웃 색상대까지만 좁게 (빨강이면 마젠타↔빨강↔주황)
-    - 채도: 무채색 → 그 색
-    - 광도: 어두운 그 색 → 밝은 그 색
+    - Hue: narrow, only as far as the neighbouring hues (for red,
+      magenta <-> red <-> orange)
+    - Saturation: grey -> that colour
+    - Luminance: that colour dark -> that colour bright
 
-    center_hue는 OpenCV 기준(0~179)이라 QColor용으로 2배 합니다.
+    center_hue is on OpenCV's scale (0~179), so it is doubled for QColor.
     """
     from PySide6.QtGui import QColor
 
@@ -96,27 +105,28 @@ def hsl_band_colors(center_hue: int, channel: str) -> tuple[str, ...]:
         return QColor.fromHsv(h % 360, s, v).name()
 
     if channel == "hue":
-        # 좌우 30도씩만 — 슬라이더를 끌었을 때 실제로 갈 방향을 보여줍니다
+        # Only 30° either side - it shows where dragging the slider really goes
         return (css(hue - 30, 230, 235), css(hue, 230, 235), css(hue + 30, 230, 235))
     if channel == "saturation":
-        # 채도만 움직입니다. 예전에는 명도까지 150→235로 같이 올려서,
-        # 채도를 올리면 밝아지기도 하는 것처럼 보였습니다.
+        # Saturation only. It used to raise the value 150->235 along with it,
+        # so raising saturation looked like it brightened as well.
         return (css(hue, 20, 215), css(hue, 245, 215))
-    # 광도 — 명도만 움직입니다. 채도를 200→120으로 같이 낮추면 광도를
-    # 올릴 때 색이 빠지는 것처럼 보입니다.
+    # Luminance - value only. Lowering saturation 200->120 along with it makes
+    # raising luminance look like the colour is draining away.
     return (css(hue, 170, 55), css(hue, 170, 250))
 
 
 def temperature_track_colors(
     as_shot: int, low: int = 2000, high: int = 12000
 ) -> tuple[tuple[float, str], ...]:
-    """색온도 트랙. 중립(as-shot) 지점에 무채색을 놓습니다.
+    """The colour temperature track. Grey sits at the neutral (as-shot) point.
 
-    색온도는 절대 Kelvin이라 "변화 없음"이 트랙 한가운데가 아닙니다.
-    5500K 촬영이면 2000~12000 구간의 35% 지점입니다. 그런데 파랑→주황을
-    균등하게 깔면 손대지 않은 상태의 핸들 밑이 푸르스름해서, 아무것도
-    안 했는데 차갑게 보정된 것처럼 읽힙니다. 중립 지점을 실제 위치에
-    찍어 두면 좌우 어느 쪽으로 가야 따뜻해지는지 바로 보입니다.
+    Colour temperature is absolute Kelvin, so "no change" is not the middle of
+    the track. Shot at 5500K it is the 35% point of the 2000~12000 span. But
+    laying blue->orange out evenly leaves something bluish under the handle in
+    its untouched state, so it reads as a cool adjustment when nothing was
+    done. Marking the neutral point at its real position shows at once which
+    way to go to get warmer.
     """
     span = max(high - low, 1)
     pivot = min(max((as_shot - low) / span, 0.05), 0.95)
@@ -124,10 +134,11 @@ def temperature_track_colors(
 
 
 def _track_style(colors) -> str:
-    """그라디언트 트랙을 가진 슬라이더 스타일시트.
+    """The stylesheet for a slider with a gradient track.
 
-    색 문자열만 주면 균등 간격으로, (위치, 색) 쌍을 주면 그 위치에
-    찍습니다. 색온도처럼 중립이 가운데가 아닌 슬라이더에 필요합니다.
+    Given plain colour strings the stops come out evenly spaced; given
+    (position, colour) pairs they are placed at those positions. Needed for
+    sliders whose neutral is not the centre, like colour temperature.
     """
     colors = tuple(colors)
     if colors and isinstance(colors[0], (tuple, list)):
@@ -151,28 +162,31 @@ def _track_style(colors) -> str:
     """
 
 
-#: 방향키로 슬라이더 끝에서 끝까지 가는 데 걸리는 대략적인 횟수.
-#: 촘촘하면 눈에 안 보이고, 성기면 원하는 값에 못 세웁니다.
+#: Roughly how many arrow-key presses it takes to cross a slider end to end.
+#: Too fine and nothing visibly moves; too coarse and you cannot stop on the
+#: value you want.
 _ARROW_DIVISIONS = 200
 
 
 def _arrow_step(span: float, quantum: float) -> float:
-    """방향키 한 번에 움직일 양을 범위에 비례해 정합니다.
+    """Sets how far one arrow-key press moves, in proportion to the range.
 
-    Qt의 기본 방향키 폭은 슬라이더 **내부 정수 1칸**입니다. 그 1칸이 화면에서
-    얼마가 되는지는 범위마다 달라서, 같은 방향키가 밝기(0~100)에서는 1%를
-    움직이는데 색온도(2000~12000K)에서는 0.01%를 움직였습니다. 색온도는 눈에
-    보이는 변화까지 100번을 눌러야 해서 사실상 안 움직이는 것처럼 보입니다.
+    Qt's default arrow-key step is **1 internal integer unit** of the slider.
+    How much that one unit comes to on screen differs per range, so the same
+    arrow key moved 1% on brightness (0~100) but 0.01% on colour temperature
+    (2000~12000K). On colour temperature you had to press 100 times to get a
+    visible change, so it looked as if it did not move at all.
 
-    범위를 일정한 칸수로 나눠 어느 슬라이더든 손맛이 같게 만듭니다. 값은
-    1·2·5 배수로 떨어뜨려 화면에 찍히는 숫자가 지저분해지지 않게 합니다
-    (색온도 50K, 노출 0.05EV, 기울이기 0.5°).
+    The range is divided into a fixed number of steps so every slider feels
+    the same. The value is rounded onto a multiple of 1, 2 or 5 so the numbers
+    printed on screen do not turn messy (colour temperature 50K, exposure
+    0.05EV, tilt 0.5°).
     """
     if span <= 0:
         return quantum
     rough = span / _ARROW_DIVISIONS
     if rough <= quantum:
-        return quantum  # 이미 충분히 성깁니다 — 정수 슬라이더 대부분이 여기입니다
+        return quantum  # coarse enough already - most integer sliders here
     magnitude = 10.0 ** math.floor(math.log10(rough))
     for factor in (1.0, 2.0, 5.0):
         candidate = factor * magnitude
@@ -180,12 +194,13 @@ def _arrow_step(span: float, quantum: float) -> float:
             break
     else:
         candidate = 10.0 * magnitude
-    # 슬라이더 내부는 정수라 눈금(1/scale)의 배수여야 어긋나지 않습니다
+    # The slider is integer inside, so it has to be a multiple of the
+    # quantum (1/scale) to stay in step
     return max(quantum, round(candidate / quantum) * quantum)
 
 
 class SliderRow(QWidget):
-    """라벨 + 슬라이더 + 숫자. 더블클릭하면 기본값으로 돌아갑니다."""
+    """Label + slider + number. Double-click puts it back to the default."""
 
     value_changed = Signal(float)
 
@@ -207,7 +222,8 @@ class SliderRow(QWidget):
         self.decimals = decimals
         self._scale = 10 ** decimals
         self._syncing = False
-        # 방향키·PageUp 폭. 지정이 없으면 범위에 비례해 정합니다.
+        # Arrow-key and PageUp step. With none given it is set in proportion
+        # to the range.
         self.step = (
             step if step and step > 0
             else _arrow_step(maximum - minimum, 1.0 / self._scale)
@@ -239,8 +255,9 @@ class SliderRow(QWidget):
         self.spin.valueChanged.connect(self._on_spin)
         header.addWidget(self.spin)
 
-        # 투명 배경에 흐린 글자로 두면 있는 줄도 모릅니다. 항상 보이게 하되
-        # 기본값일 때는 눌러도 소용없으므로 비활성으로 흐려 둡니다.
+        # Left as faint text on a transparent background, nobody knows it is
+        # there. It is always shown, but at the default value pressing it does
+        # nothing, so it is disabled and dimmed.
         self.reset_button = QPushButton("↺")
         self.reset_button.setFixedSize(24, 22)
         self.reset_button.setCursor(Qt.PointingHandCursor)
@@ -256,7 +273,7 @@ class SliderRow(QWidget):
         raw_step = max(1, int(round(self.step * self._scale)))
         self.slider.setSingleStep(raw_step)
         self.slider.setPageStep(raw_step * 10)
-        self.slider.setFocusPolicy(Qt.StrongFocus)  # 휠 대신 클릭 후 방향키
+        self.slider.setFocusPolicy(Qt.StrongFocus)  # arrow keys, not the wheel
         self.slider.wheelEvent = lambda event: event.ignore()
         self.spin.wheelEvent = lambda event: event.ignore()
         self.slider.valueChanged.connect(self._on_slider)
@@ -266,13 +283,14 @@ class SliderRow(QWidget):
         if tooltip:
             self.setToolTip(tooltip)
 
-        self._highlight_if_changed()  # 리셋 버튼 초기 상태를 잡아 줍니다
+        self._highlight_if_changed()  # sets the reset button's initial state
 
     def set_gradient(self, gradient) -> None:
-        """트랙 색을 바꿉니다. 이름(GRADIENTS 키) 또는 색 튜플을 받습니다.
+        """Changes the track colour. Takes a name (a GRADIENTS key) or a tuple
+        of colours.
 
-        HSL 탭처럼 같은 슬라이더가 채널에 따라 다른 색이 되어야 하는 경우가
-        있어서 나중에도 바꿀 수 있어야 합니다.
+        There are cases like the HSL tab where the same slider has to take a
+        different colour per channel, so it has to stay changeable later too.
         """
         if not gradient:
             self.slider.setStyleSheet("")
@@ -282,10 +300,11 @@ class SliderRow(QWidget):
             self.slider.setStyleSheet(_track_style(colors))
 
     def wheelEvent(self, event) -> None:
-        """휠은 무시하고 부모(스크롤 영역)로 넘깁니다.
+        """Ignores the wheel and passes it to the parent (the scroll area).
 
-        휠로 값을 조정하게 두면 패널을 스크롤하다가 마우스가 지나간
-        슬라이더들이 멋대로 바뀝니다. 잃는 것보다 얻는 게 적습니다.
+        Letting the wheel adjust the value means that while scrolling the
+        panel, every slider the mouse passed over changes on its own. There is
+        less to gain than there is to lose.
         """
         event.ignore()
 
@@ -313,9 +332,11 @@ class SliderRow(QWidget):
         return f"{value:.{self.decimals}f}" if self.decimals else f"{value:.0f}"
 
     def _highlight_if_changed(self) -> None:
-        """기본값이 아니면 라벨과 리셋 버튼을 살립니다.
+        """Brings the label and the reset button to life when the value is not
+        the default.
 
-        무엇을 만졌는지 한눈에 보여야 하고, 되돌릴 수단도 그 자리에 있어야 합니다.
+        What you have touched has to show at a glance, and the means to put it
+        back has to be right there too.
         """
         changed = abs(self.value() - self.default) > 1e-9
         self.label.setStyleSheet(
@@ -344,10 +365,12 @@ class SliderRow(QWidget):
 
 
 class CollapsibleSection(QWidget):
-    """접이식 섹션. Lightroom 패널처럼 필요한 것만 펴 놓고 씁니다.
+    """A collapsible section. Like the Lightroom panel, only what you need is
+    opened out.
 
-    오른쪽 눈 버튼으로 그 섹션의 보정을 전체가 껐다 켤 수 있습니다. 값을
-    지우지 않고 잠시 빼 보는 용도라, 껐다 켜면 원래 값이 그대로 돌아옵니다.
+    The eye button on the right turns that section's adjustments off and on as
+    a whole. It is for taking them out for a moment without erasing the
+    values, so switching it back on brings the original values straight back.
     """
 
     toggled_open = Signal(bool)
@@ -412,7 +435,7 @@ class CollapsibleSection(QWidget):
         self.header.setChecked(expanded)
 
     def mark_active(self, active: bool) -> None:
-        """이 섹션에 손댄 값이 있으면 제목에 표시합니다."""
+        """Marks the title when this section has values that were touched."""
         self._active = active
         self._refresh_title()
 

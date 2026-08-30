@@ -1,11 +1,13 @@
-"""내보내기 대기열.
+"""The export queue.
 
-여러 폴더를 돌아다니며 "이 컷들은 이 프리셋으로" 를 쌓아두고, 마지막에
-한 번에 내보냅니다. 4000장 배치에서 현상까지 하면 수십 분이 걸리므로,
-작업할 때마다 기다리는 대신 모아서 한 번에 돌리는 편이 낫습니다.
+You go round several folders piling up "these frames with this preset", and
+export the lot at the end. Developing a 4000-frame batch takes tens of
+minutes, so gathering it up and running it once is better than waiting
+every time you work.
 
-항목은 (원본 경로, 보정 설정) 쌍입니다. 원본은 경로로만 들고 있으므로
-대기열을 JSON으로 저장했다가 다음 세션에서 이어서 쓸 수 있습니다.
+An entry is a (source path, adjustment settings) pair. The source is held
+only as a path, so the queue can be saved as JSON and picked up again in
+the next session.
 """
 
 from __future__ import annotations
@@ -26,13 +28,15 @@ QUEUE_VERSION = 1
 
 @dataclass
 class QueueEntry:
-    """대기열 한 줄 — 원본 하나와 거기 적용할 보정."""
+    """One line of the queue - one source and the adjustment to apply to
+    it."""
 
     source: Path
     develop: DevelopSettings | None = None
     grade: Grade = Grade.KEEP
     preset_name: str | None = None
-    """어떤 프리셋에서 왔는지. 목록에 보여주기 위한 것으로 동작에는 영향 없습니다."""
+    """Which preset it came from. For showing in the list; it has no effect
+    on behaviour."""
 
     @property
     def has_develop(self) -> bool:
@@ -61,11 +65,11 @@ class QueueEntry:
 
 @dataclass
 class ExportQueue:
-    """중복 없이 항목을 쌓습니다.
+    """Piles entries up without duplicates.
 
-    같은 원본을 다시 담으면 새로 추가하지 않고 보정만 갱신합니다. 사용자가
-    값을 고쳐서 다시 담는 것은 "덮어쓰기"를 의도한 것이지 같은 사진을 두 번
-    내보내려는 게 아닙니다.
+    Queuing the same source again does not add a new entry, it just updates
+    the adjustment. A user changing the values and queuing again means
+    "overwrite", not exporting the same photo twice.
     """
 
     entries: list[QueueEntry] = field(default_factory=list)
@@ -93,7 +97,7 @@ class ExportQueue:
         grade: Grade = Grade.KEEP,
         preset_name: str | None = None,
     ) -> bool:
-        """새로 담았으면 True, 기존 항목을 갱신했으면 False."""
+        """True if newly queued, False if an existing entry was updated."""
         existing = self.index_of(source)
         entry = QueueEntry(source, develop, grade, preset_name)
         if existing is None:
@@ -108,9 +112,10 @@ class ExportQueue:
         develop: DevelopSettings | None = None,
         preset_name: str | None = None,
     ) -> tuple[int, int]:
-        """레코드 여러 개를 담습니다. (새로 추가, 갱신) 개수를 반환.
+        """Queues several records. Returns the (added, updated) counts.
 
-        develop을 주지 않으면 각 레코드에 이미 지정된 보정을 그대로 씁니다.
+        Without a develop given, the adjustment already assigned to each
+        record is used as it is.
         """
         added = updated = 0
         for record in records:
@@ -131,14 +136,16 @@ class ExportQueue:
         self.entries.clear()
 
     def missing_sources(self) -> list[Path]:
-        """원본이 사라진 항목. 내보내기 전에 알려줘야 합니다."""
+        """Entries whose source has gone. The user has to be told before
+        exporting."""
         return [e.source for e in self.entries if not e.source.exists()]
 
     def to_records(self) -> list[ImageRecord]:
-        """export_records가 받는 형태로 바꿉니다.
+        """Converts to the shape export_records takes.
 
-        대기열은 경로만 들고 있으므로 분석 정보는 없습니다. 내보내기에 필요한
-        것은 경로·등급·보정뿐이라 문제되지 않습니다.
+        The queue holds only paths, so there is no analysis information.
+        All the export needs is the path, the grade and the adjustment, so
+        that is not a problem.
         """
         records = []
         for entry in self.entries:
@@ -148,7 +155,7 @@ class ExportQueue:
             records.append(record)
         return records
 
-    # ------------------------------------------------------------ 저장
+    # ------------------------------------------------------------ saving
 
     def save(self, path: Path) -> Path:
         path = Path(path)
@@ -167,8 +174,9 @@ class ExportQueue:
     def load(cls, path: Path) -> "ExportQueue":
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
         queue = cls()
-        # entries 자체가 리스트가 아니면(손 편집, 다른 버전) 순회 대상이 없습니다.
-        # dict를 그냥 돌면 키 문자열이 항목으로 들어옵니다.
+        # If entries itself is not a list (hand editing, another version)
+        # there is nothing to iterate over. Iterating a dict as it is would
+        # bring the key strings in as entries.
         entries = payload.get("entries") if isinstance(payload, dict) else None
         if not isinstance(entries, (list, tuple)):
             entries = ()
@@ -176,6 +184,6 @@ class ExportQueue:
             try:
                 queue.entries.append(QueueEntry.from_dict(item))
             except (KeyError, ValueError, TypeError, AttributeError) as exc:
-                # 항목 하나가 깨졌다고 대기열 전체를 버릴 이유는 없습니다
+                # one broken entry is no reason to throw the whole queue away
                 log.warning("대기열 항목을 건너뛴다: %s", exc)
         return queue

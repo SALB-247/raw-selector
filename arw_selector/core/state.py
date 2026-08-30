@@ -1,11 +1,12 @@
-"""기기별 상태.
+"""Per-machine state.
 
-프리셋 같은 콘텐츠와 달리, "마지막으로 연 폴더"는 그 PC에서만 의미가
-있습니다. 앱 폴더에 같이 넣어 USB로 옮기면 존재하지도 않는 경로를
-가리키게 되므로, 이것만 사용자 폴더(%APPDATA% 등)에 둡니다.
+Unlike content such as presets, "the folder last opened" means something
+only on that PC. Put in the app folder and carried on a USB stick it would
+point at a path that does not even exist, so this alone lives in the user
+folder (%APPDATA% and the like).
 
-읽기·쓰기 모두 실패해도 앱은 그냥 돌아가야 합니다. 편의 기능이 앱을
-막아서는 안 됩니다.
+The app has to keep running even if both reading and writing fail. A
+convenience feature must not block the app.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ def state_path() -> Path:
 
 
 def load_state() -> dict:
-    """상태 전체를 읽습니다. 없거나 깨졌으면 빈 dict."""
+    """Reads the whole state. An empty dict if missing or broken."""
     try:
         raw = state_path().read_text(encoding="utf-8")
     except OSError:
@@ -38,7 +39,7 @@ def load_state() -> dict:
 
 
 def save_state(values: dict) -> None:
-    """상태를 통째로 씁니다. 실패는 조용히 넘깁니다."""
+    """Writes the state wholesale. Failures are passed over quietly."""
     path = state_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -50,16 +51,17 @@ def save_state(values: dict) -> None:
 
 
 def update_state(**values) -> None:
-    """일부 키만 바꿔 저장합니다."""
+    """Saves with only some of the keys changed."""
     current = load_state()
     current.update(values)
     save_state(current)
 
 
 def last_folder() -> Path | None:
-    """마지막으로 연 폴더. 지금도 존재할 때만 돌려줍니다.
+    """The folder last opened. Returned only if it still exists.
 
-    지워졌거나 뽑아 둔 외장 드라이브를 가리키면 없는 것으로 칩니다.
+    If it points at something deleted, or at an external drive that has
+    been unplugged, it counts as absent.
     """
     value = load_state().get("last_folder")
     if not value:
@@ -73,10 +75,11 @@ def remember_folder(folder: Path) -> None:
 
 
 def language() -> str | None:
-    """고른 인터페이스 언어. None이면 시스템 설정을 따릅니다.
+    """The chosen interface language. None follows the system setting.
 
-    기기별 상태에 둡니다 — 같은 프리셋을 다른 언어를 쓰는 사람과 주고받아도
-    각자의 화면 언어는 그대로여야 합니다.
+    Kept in the per-machine state - handing the same preset back and forth
+    with someone using another language has to leave each person's screen
+    language as it was.
     """
     value = load_state().get("language")
     return value if isinstance(value, str) and value else None
@@ -87,11 +90,13 @@ def set_language(code: str | None) -> None:
 
 
 def camera_match_on_open() -> bool:
-    """보정창을 열 때 카메라 룩 매칭을 자동 적용할지. **기본은 꺼짐입니다.**
+    """Whether to apply camera look matching automatically when the
+    adjustment window opens. **Off by default.**
 
-    켜져 있어도 그 컷에 이미 보정이 있으면(중립이 아니면) 절대 건드리지
-    않습니다 — 자동 기능이 사용자의 편집을 덮으면 안 됩니다. 판단 자체는
-    보정창이 합니다(core는 화면 사정을 모릅니다).
+    Even when it is on, a frame that already has an adjustment (that is not
+    neutral) is never touched - an automatic feature must not overwrite the
+    user's edit. The decision itself is made by the adjustment window (core
+    knows nothing about the screen's situation).
     """
     return bool(load_state().get("camera_match_on_open", False))
 
@@ -100,11 +105,46 @@ def set_camera_match_on_open(enabled: bool) -> None:
     update_state(camera_match_on_open=bool(enabled))
 
 
-def update_check_enabled() -> bool:
-    """업데이트 확인을 켜 두었는지. **기본은 꺼짐입니다.**
+ANALYZE_OPTION_KEYS = (
+    "noise_compensation",
+    "af_roi_hint",
+    "center_priority",
+    "demosaic_small_preview",
+)
+"""The analysis options the start dialog offers.
 
-    확인은 외부 서버에 요청을 보냅니다. 사진 편집 도구가 묻지도 않고
-    네트워크로 나가면 안 됩니다 — 켜는 것은 사용자가 정합니다.
+These are exactly the ones that go into the cache fingerprint, which is why
+they have to survive a restart. While they did not, turning any of them on
+and analysing a folder meant that on the next launch the options fell back
+to their defaults, the fingerprint no longer matched, and a full cache
+counted as zero - the folder asked to be analysed again from scratch.
+"""
+
+
+def analyze_options() -> dict:
+    """The saved analysis options. Empty while nothing has been saved, so
+    the config defaults stand."""
+    saved = load_state().get("analyze_options")
+    if not isinstance(saved, dict):
+        return {}
+    return {key: bool(saved[key]) for key in ANALYZE_OPTION_KEYS if key in saved}
+
+
+def set_analyze_options(**options) -> None:
+    """Remembers the options. Unknown keys are dropped rather than stored -
+    a stray key would go on to be handed to the config as a keyword."""
+    keep = {key: bool(value) for key, value in options.items()
+            if key in ANALYZE_OPTION_KEYS}
+    if keep:
+        update_state(analyze_options={**analyze_options(), **keep})
+
+
+def update_check_enabled() -> bool:
+    """Whether the update check has been turned on. **Off by default.**
+
+    The check sends a request to an outside server. A photo editing tool
+    must not go out onto the network without asking - turning it on is the
+    user's decision.
     """
     return bool(load_state().get("update_check", False))
 

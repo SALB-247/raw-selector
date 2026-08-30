@@ -1,19 +1,23 @@
-"""얼굴 윤곽 랜드마크 (MediaPipe Face Mesh, ONNX).
+"""Face contour landmarks (MediaPipe Face Mesh, ONNX).
 
-YuNet은 점 5개(눈 2·코 1·입꼬리 2)만 줍니다. 그걸로는 마스크를 타원으로
-어림잡을 수밖에 없고, 실제로 그렇게 만든 마스크는 이렇게 어긋났습니다
-(같은 얼굴 실측):
+YuNet gives only 5 points (2 eyes, 1 nose, 2 mouth corners). With those the
+best you can do is approximate the mask with an ellipse, and a mask
+actually built that way was off by this much (measured on the same face):
 
-  눈 마스크    화면의 4.09% — 눈 중심점 둘로 사각형을 그려 이마·볼까지 덮음
-  피부 마스크  33.75% — '이목구비 제외'라고 해 놓고 실제로는 눈·눈썹·입이
-               그대로 포함 (일반 얼굴 마스크와 수치가 같았습니다)
+  eye mask     4.09% of the screen - a rectangle drawn from the two eye
+               centres, covering the forehead and cheeks as well
+  skin mask    33.75% - billed as 'facial features excluded', but the eyes,
+               brows and mouth were included as they were (the figure was
+               the same as the plain face mask)
 
-468점을 쓰면 각각 0.41% / 23.97%가 됩니다. 눈은 눈꺼풀 윤곽만, 피부는
-이목구비를 실제로 빼고 남은 부분만 잡힙니다.
+With the 468 points they become 0.41% / 23.97% respectively. The eye picks
+up only the eyelid contour, and the skin only what is left after the facial
+features really are subtracted.
 
-**분석(셀렉)에는 쓰지 않습니다.** 4000장을 훑는 경로에 장당 비용을 더할
-이유가 없고, 거기서는 YuNet 5점으로 충분합니다. 보정 창의 마스크처럼
-정밀도가 결과를 좌우하는 곳에서만 씁니다.
+**It is not used for analysis (culling).** There is no reason to add a
+per-frame cost to the path that sweeps 4000 frames, and YuNet's 5 points
+are enough there. It is used only where precision decides the result, such
+as the masks in the adjustment window.
 """
 
 from __future__ import annotations
@@ -30,19 +34,19 @@ log = logging.getLogger(__name__)
 MODEL_PATH = Path(__file__).parent / "models" / "face_mesh_192x192.onnx"
 
 INPUT_SIZE = 192
-"""모델이 요구하는 입력 한 변."""
+"""The side length of the input the model requires."""
 
 FACE_PAD = 0.25
-"""얼굴 상자를 이만큼 넓혀서 잘라 넣습니다.
+"""The face box is widened by this much before being cropped and fed in.
 
-Face Mesh는 턱·이마까지 들어온 그림에서 잘 맞습니다. 상자에 딱 맞춰
-자르면 윤곽점이 가장자리에 눌립니다.
+Face Mesh fits well on a picture that includes the chin and forehead. Crop
+exactly to the box and the contour points get squashed against the edge.
 """
 
-# ---------------------------------------------------------------- 윤곽 인덱스
+# -------------------------------------------------------- contour indices
 #
-# MediaPipe Face Mesh의 468점 표준 인덱스입니다. 숫자 자체에 의미는 없고
-# 모델이 정한 순서입니다.
+# The standard 468-point indices of MediaPipe Face Mesh. The numbers
+# themselves mean nothing; they are the order the model settled on.
 
 FACE_OVAL = (
     10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365,
@@ -62,17 +66,18 @@ LIPS = (61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291,
         409, 270, 269, 267, 0, 37, 39, 40, 185)
 INNER_LIPS = (78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308,
               415, 310, 311, 312, 13, 82, 81, 80, 191)
-"""입술 안쪽 — 입을 벌린 컷에서 **치아**가 있는 자리입니다.
+"""The inner lips - where the **teeth** are on a frame with the mouth open.
 
-치아 화이트닝을 바깥 입술로 걸면 입술까지 채도가 빠져 창백해집니다.
-입을 다문 컷에서는 이 윤곽이 실처럼 얇아져 효과가 거의 없는데, 보이지도
-않는 치아를 만지지 않는 것이 맞는 동작입니다.
+Run teeth whitening off the outer lips and the lips lose saturation too and
+go pale. On a frame with the mouth closed this contour thins to a thread so
+the effect is almost nil, and not touching teeth that are not even visible
+is the correct behaviour.
 """
 
-LEFT_IRIS_RING = (159, 145, 33, 133)    # 위·아래·좌·우 — 홍채 크기 어림용
+LEFT_IRIS_RING = (159, 145, 33, 133)    # top/bottom/left/right - for iris size
 RIGHT_IRIS_RING = (386, 374, 362, 263)
 
-# 눈 종횡비(EAR)용 6점 — 감김 판정에 씁니다
+# the 6 points for the eye aspect ratio (EAR) - used for the closed check
 LEFT_EAR_POINTS = (33, 160, 158, 133, 153, 144)
 RIGHT_EAR_POINTS = (362, 385, 387, 263, 373, 380)
 
@@ -81,12 +86,14 @@ _local = threading.local()
 
 
 def available() -> bool:
-    """모델 파일이 있는지. 없으면 부르는 쪽이 예전 방식으로 물러섭니다."""
+    """Whether the model file is present. Callers fall back to the older
+    path if not."""
     return MODEL_PATH.is_file()
 
 
 def _net():
-    """스레드마다 하나씩 재사용합니다. ONNX 로딩은 반복하기엔 비쌉니다."""
+    """One net per thread, reused. Loading ONNX is too expensive to
+    repeat."""
     net = getattr(_local, "net", None)
     if net is not None:
         return net or None
@@ -104,9 +111,10 @@ def _net():
 
 def landmarks(image_bgr: np.ndarray,
               face_box: tuple[float, float, float, float]) -> np.ndarray | None:
-    """얼굴 하나의 468점을 **입력 이미지 좌표**로 돌려줍니다. 실패하면 None.
+    """Returns the 468 points of one face in **input image coordinates**.
+    None on failure.
 
-    face_box는 (x, y, w, h), image_bgr과 같은 좌표계입니다.
+    face_box is (x, y, w, h), in the same coordinate system as image_bgr.
     """
     net = _net()
     if net is None or image_bgr is None or image_bgr.size == 0:
@@ -124,16 +132,18 @@ def landmarks(image_bgr: np.ndarray,
     if x1 - x0 < 16 or y1 - y0 < 16:
         return None
 
-    # 형변환은 **자른 뒤에** 합니다. 보정 엔진은 6000×4000 float 배열을
-    # 넘기는데, 그걸 통째로 uint8로 바꾸면 얼굴 하나 재는 데 수십 ms가 듭니다.
+    # The type conversion happens **after** the crop. The adjustment engine
+    # hands over a 6000x4000 float array, and converting the whole thing to
+    # uint8 costs tens of ms just to measure one face.
     crop = image_bgr[y0:y1, x0:x1]
     if crop.dtype != np.float32:
         crop = crop.astype(np.float32)
     crop = np.clip(crop, 0.0, 255.0)
     resized = cv2.resize(crop, (INPUT_SIZE, INPUT_SIZE))
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB) / 255.0
-    # **NCHW입니다.** NHWC로 넣으면 유한값은 나오는데 좌표가 전부 범위 밖인
-    # "돌긴 하는데 틀린" 상태가 되어 알아채기 어렵습니다.
+    # **It is NCHW.** Feed it NHWC and you get finite values but every
+    # coordinate out of range - a "it runs, but it is wrong" state that is
+    # hard to notice.
     blob = np.transpose(rgb, (2, 0, 1))[None]
 
     try:
@@ -152,7 +162,7 @@ def landmarks(image_bgr: np.ndarray,
     if points is None or not np.isfinite(points).all():
         return None
 
-    # 모델 좌표(0~192) → 잘라낸 조각 → 원본
+    # model coordinates (0~192) -> the cropped patch -> the original
     scale_x = (x1 - x0) / float(INPUT_SIZE)
     scale_y = (y1 - y0) / float(INPUT_SIZE)
     mapped = points.copy()
@@ -162,16 +172,18 @@ def landmarks(image_bgr: np.ndarray,
 
 
 def polygon(points: np.ndarray, indices) -> np.ndarray:
-    """윤곽 인덱스를 cv2.fillPoly가 받는 정수 좌표 배열로."""
+    """Contour indices as the integer coordinate array cv2.fillPoly
+    takes."""
     return np.array([[int(round(points[i][0])), int(round(points[i][1]))]
                      for i in indices], np.int32)
 
 
 def eye_aspect_ratio(points: np.ndarray) -> float:
-    """양 눈 종횡비의 평균. 작을수록 감은 쪽입니다.
+    """The mean aspect ratio of both eyes. The smaller, the more closed.
 
-    실측(무대 사진 32장, 손으로 라벨): 임계값 0.20에서 72% 정확. 완벽하진
-    않지만 거짓감점이 2건뿐이라 감점을 작게 주면 쓸 만합니다.
+    Measured (32 stage photos, labelled by hand): 72% accurate at a
+    threshold of 0.20. Not perfect, but with only 2 false penalties it is
+    usable as long as the penalty is kept small.
     """
     def ratio(indices) -> float:
         p = [points[i][:2] for i in indices]

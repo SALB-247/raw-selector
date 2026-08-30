@@ -1,28 +1,29 @@
-"""보정 파라미터 데이터 모델.
+"""Data model for the adjustment parameters.
 
-Lightroom / Camera Raw의 패널 구성을 따라갑니다. 사용자가 이미 익숙한
-이름과 범위를 쓰는 편이 배우기 쉽고, 나중에 XMP로 내보낼 때도 대응이
-단순해집니다.
+It follows the panel layout of Lightroom / Camera Raw. Using names and
+ranges the user already knows is easier to learn, and it also keeps the
+mapping simple when we later export to XMP.
 
-값 범위는 대부분 -100~+100이고, 노출만 EV 단윕니다.
-모든 dataclass는 picklable하고 dict 왕복이 가능해야 합니다 — 프리셋 파일과
-내보내기 워커가 둘 다 필요로 합니다.
+Most value ranges are -100~+100; only exposure is in EV.
+Every dataclass has to be picklable and round-trip through a dict - the
+preset files and the export workers both need that.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import Enum
 from typing import Any
 
-# HSL / 색상 혼합에서 다루는 8개 색상대. Lightroom과 같은 구성입니다.
+# The 8 colour bands the HSL / colour mix panel works with. The same set
+# as Lightroom.
 HSL_BANDS = ("red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta")
 HSL_BAND_LABELS = {
     "red": "빨강", "orange": "주황", "yellow": "노랑", "green": "녹색",
     "aqua": "아쿠아", "blue": "파랑", "purple": "자주", "magenta": "마젠타",
 }
-# 각 색상대의 중심 색조 (OpenCV HSV 기준 0~179)
+# Centre hue of each colour band (OpenCV HSV basis, 0~179)
 HSL_BAND_CENTERS = {
     "red": 0, "orange": 15, "yellow": 30, "green": 60,
     "aqua": 90, "blue": 120, "purple": 140, "magenta": 160,
@@ -30,22 +31,24 @@ HSL_BAND_CENTERS = {
 
 
 def _as_dict(values: Any) -> dict[str, Any]:
-    """섹션 값을 dict로. dict가 아니면 빈 dict.
+    """A section value as a dict. An empty dict if it is not one.
 
-    프리셋은 사용자가 직접 열어 고칠 수 있는 YAML입니다. 섹션 하나를
-    실수로 문자열이나 리스트로 만들어 두면 `dict(values)`는 "dictionary
-    update sequence element..."로, `values.get(...)`은 AttributeError로
-    터집니다. 그 예외는 보정 패널 전체를 열지 못하게 만듭니다 — 값 하나가
-    이상한 것과 파일을 못 여는 것은 사용자에게 전혀 다른 사건입니다.
+    Presets are YAML the user can open and edit by hand. Turn one section
+    into a string or a list by mistake and `dict(values)` blows up with
+    "dictionary update sequence element..." while `values.get(...)` blows up
+    with AttributeError. That exception stops the whole adjust panel from
+    opening - one odd value and a file that will not open are entirely
+    different events as far as the user is concerned.
     """
     return dict(values) if isinstance(values, dict) else {}
 
 
 def _as_int(value: Any, default: int) -> int:
-    """숫자로 못 읽는 값은 기본값으로.
+    """A value that will not read as a number falls back to the default.
 
-    bool은 int의 하위형이라 그냥 통과하는데, 그러면 `opacity: true`가 1이
-    됩니다. 손 편집에서 나올 법한 실수라 명시적으로 걸러 기본값을 씁니다.
+    bool is a subtype of int and so passes straight through, which would
+    make `opacity: true` mean 1. That is exactly the sort of mistake hand
+    editing produces, so we filter it explicitly and use the default.
     """
     if isinstance(value, bool) or value is None:
         return default
@@ -53,11 +56,12 @@ def _as_int(value: Any, default: int) -> int:
         number = float(value)
     except (TypeError, ValueError):
         return default
-    # inf·NaN은 기본값으로. float 쪽(_coerce_scalar)은 이미 이렇게 하는데
-    # 정수 쪽만 빠져 있었습니다 — `int(inf)`는 ValueError가 아니라
-    # **OverflowError**라 아래 except에도 안 걸리고 그대로 올라갔습니다.
-    # 프리셋은 손으로 고칠 수 있는 YAML이고 `contrast: .inf` 한 줄이면
-    # 닿습니다. 예전에는 프리셋 불러오기가 통째로 실패했습니다.
+    # inf and NaN fall back to the default. The float side (_coerce_scalar)
+    # already did this and only the integer side was missing it - `int(inf)`
+    # raises **OverflowError**, not ValueError, so it slipped past the
+    # except below and propagated straight up. Presets are hand-editable
+    # YAML and a single line of `contrast: .inf` gets you there. Loading a
+    # preset used to fail outright.
     if not math.isfinite(number):
         return default
     try:
@@ -67,10 +71,11 @@ def _as_int(value: Any, default: int) -> int:
 
 
 def _as_key_tuple(value: Any, allowed) -> tuple[str, ...]:
-    """항목 목록을 정리합니다. 아는 키만 남깁니다.
+    """Tidy up a list of items, keeping only the keys we know.
 
-    문자열 하나로 들어오면 (예: `include: camera`) 그대로 순회하면 글자
-    단위로 쪼개져 조용히 빈 목록이 됩니다. 한 항목으로 봅니다.
+    Given a single string (e.g. `include: camera`), iterating it as-is
+    splits it letter by letter and silently yields an empty list. We treat
+    it as one item.
     """
     if isinstance(value, str):
         value = (value,)
@@ -80,15 +85,17 @@ def _as_key_tuple(value: Any, allowed) -> tuple[str, ...]:
 
 
 def _coerce_scalar(value: Any, default: Any) -> Any:
-    """기본값의 타입에 맞춰 값을 맞춥니다. 못 맞추면 기본값.
+    """Coerce a value to the default's type. Falls back to the default.
 
-    **dataclass는 타입을 검사하지 않습니다.** `sharpen_amount: "강하게"`는
-    생성자를 그대로 통과해서, 불러오기는 조용히 성공하고 몇십 분 뒤
-    내보내기에서 장마다 TypeError로 죽습니다. 원인을 찾기 가장 어려운
-    모양이라 들어오는 자리에서 막습니다.
+    **A dataclass does not check types.** `sharpen_amount: "strong"` passes
+    straight through the constructor, so loading succeeds quietly and then,
+    tens of minutes later, export dies with a TypeError on every frame.
+    That is the hardest shape of failure to trace back, so we block it at
+    the point of entry.
 
-    NaN·inf도 기본값으로 되돌립니다. 그대로 두면 예외 없이 화소만
-    쓰레기가 되어(clip → uint8 캐스팅에서 임의값) 결과물에 남습니다.
+    NaN and inf are put back to the default as well. Left alone they raise
+    nothing and merely turn the pixels to garbage (arbitrary values out of
+    the clip -> uint8 cast), which then stays in the result.
     """
     if isinstance(default, bool):
         if isinstance(value, bool):
@@ -110,15 +117,16 @@ def _coerce_scalar(value: Any, default: Any) -> Any:
 
 
 def _merge_known(cls, values: Any, base: dict[str, Any]) -> Any:
-    """알 수 없는 키는 버리고, 남은 값은 기본값의 타입에 맞춰 반영합니다.
+    """Drop unknown keys; apply the rest coerced to the default's type.
 
-    예전 버전이 저장한 프리셋에 지금은 없는 필드가 들어 있어도 열려야 합니다.
-    손으로 편집한 파일에서 섹션이 dict가 아닌 값(문자열, 리스트 등)으로
-    들어오는 경우도 있으므로 기본값으로 넘어갑니다.
+    A preset saved by an older version has to open even when it holds fields
+    that no longer exist. A hand-edited file can also hand us a section that
+    is not a dict (a string, a list and so on), in which case we fall
+    through to the defaults.
 
-    타입을 여기서 맞추는 이유는 _coerce_scalar 참고 — dataclass 생성자는
-    타입을 검사하지 않아서, 걸러 두지 않으면 이상한 값이 그대로 살아남아
-    한참 뒤 렌더에서 터집니다.
+    For why the types are coerced here, see _coerce_scalar - the dataclass
+    constructor does not check types, so anything we do not filter out
+    survives intact and blows up in the render much later.
     """
     if not isinstance(values, dict):
         return cls(**base)
@@ -133,24 +141,26 @@ def _merge_known(cls, values: Any, base: dict[str, Any]) -> Any:
     try:
         return cls(**merged)
     except (TypeError, ValueError):
-        # _coerce_scalar가 못 거른 모양(중첩 구조 등)이 남아 있으면 통째로 기본값
+        # a shape _coerce_scalar could not filter out (a nested structure
+        # and the like) means falling back to the defaults wholesale
         return cls(**base)
 
 
 @dataclass(frozen=True)
 class BasicSettings:
-    """기본 패널 — 화이트밸런스와 톤."""
+    """The Basic panel - white balance and tone."""
 
-    temperature: int = 0      # 절대 색온도(Kelvin). 0은 "손대지 않음"(as-shot 유지)
-    tint: int = 0             # -100(초록) ~ +100(마젠타)
+    temperature: int = 0      # absolute kelvin. 0 = "untouched" (as-shot)
+    tint: int = 0             # -100 (green) ~ +100 (magenta)
     exposure: float = 0.0     # EV, -5 ~ +5
 
     brightness: int = 0
-    """중간톤 밝기 (-100 ~ +100). 노출과 다릅니다.
+    """Midtone brightness (-100 ~ +100). Not the same as exposure.
 
-    노출은 전체에 2^EV를 곱해 하이라이트부터 날아갑니다. 밝기는 감마라
-    흰색과 검정을 고정한 채 중간톤만 밀어 올립니다 — 역광 인물의 얼굴만
-    살리고 싶을 때 이쪽이 맞습니다.
+    Exposure multiplies everything by 2^EV, so the highlights blow first.
+    Brightness is a gamma, so it holds white and black in place and pushes
+    only the midtones up - this is the right one when you want to rescue
+    just the face of a backlit subject.
     """
 
     contrast: int = 0
@@ -158,39 +168,44 @@ class BasicSettings:
     shadows: int = 0
     whites: int = 0
     blacks: int = 0
-    texture: int = 0          # 중간 주파수 디테일
-    clarity: int = 0          # 국소 대비
+    texture: int = 0          # mid-frequency detail
+    clarity: int = 0          # local contrast
     dehaze: int = 0
     vibrance: int = 0
     saturation: int = 0
 
     highlight_recovery: bool = False
-    """포화한 하이라이트를 디모자이크 단계에서 재구성합니다 (LibRaw blend).
+    """Rebuild saturated highlights during demosaic (LibRaw blend).
 
-    톤 LUT가 아니라 **디코드 시점**에 걸립니다 — 센서에서 한 채널만 포화한
-    자리(무대 LED 등)를 남은 채널로 되살립니다. RAW에만 의미가 있고
-    JPEG·HEIF에서는 무시됩니다. 실측(A6700 콘서트 컷): 하이라이트에서
-    평균 50~78레벨 차이, LED 내부 구조 복원.
+    It applies **at decode time**, not through the tone LUT - where only one
+    channel saturated on the sensor (stage LEDs and the like), the remaining
+    channels bring it back. It means something only for RAW and is ignored
+    for JPEG/HEIF. Measured (A6700 concert frames): 50~78 levels of
+    difference on average in the highlights, with the internal structure of
+    the LEDs recovered.
 
-    켜면 **전체가 1~1.5스톱 어두워집니다** — LibRaw이 화이트밸런스 게인만큼
-    헤드룸을 확보하느라 선형 공간에서 균일 배율(실측: 파일당 상수, 폭
-    ±0.1%)이 걸립니다. 노출이 선형에서 곱해지므로 사용자가 노출 슬라이더로
-    정확히 되돌릴 수 있고, 그때 하이라이트는 잘리는 대신 말립니다. 이것이
-    이 방식의 의도된 워크플로라 몰래 보정하지 않습니다 — 몰래 되올리면
-    확보한 헤드룸이 도로 잘려 옵션이 무의미해집니다. 기본은 끔입니다.
+    Turn it on and **everything gets 1~1.5 stops darker** - LibRaw reserves
+    headroom equal to the white balance gain, which lands as a uniform
+    factor in linear space (measured: constant per file, spread ±0.1%).
+    Exposure multiplies in linear too, so the user can take it back exactly
+    with the exposure slider, and at that point the highlights roll off
+    instead of clipping. That is the intended workflow for this method, so
+    we do not correct for it behind the user's back - lifting it back
+    silently would clip away the headroom just reserved and make the option
+    pointless. Off by default.
     """
 
 
 @dataclass(frozen=True)
 class CurveSettings:
-    """곡선 패널 — 파라메트릭 곡선과 채널별 포인트 곡선."""
+    """The Curve panel - parametric curve and per-channel point curves."""
 
     highlights: int = 0
     lights: int = 0
     darks: int = 0
     shadows: int = 0
 
-    # (입력, 출력) 점들. 비어 있으면 항등.
+    # (input, output) points. Empty means identity.
     points_rgb: tuple[tuple[int, int], ...] = ()
     points_red: tuple[tuple[int, int], ...] = ()
     points_green: tuple[tuple[int, int], ...] = ()
@@ -206,38 +221,54 @@ class CurveSettings:
 
 
 class NoiseAlgorithm(str, Enum):
-    """휘도 노이즈를 지우는 방식.
+    """The method used to remove luminance noise.
 
-    같은 "노이즈 감소 50"이라도 방식마다 남는 디테일과 걸리는 시간이 크게
-    다릅니다. 아래 값은 R6 Mark III ISO 6400 실파일(2048² 크롭)에서 잰
-    것으로, 평탄 영역 노이즈를 원본의 50%까지 줄였을 때 남은 엣지
-    그래디언트 비율과 32MP 환산 처리 시간입니다.
+    Even at the same "noise reduction 50", the detail that survives and the
+    time it takes differ greatly from method to method. The figures below
+    were measured on a real R6 Mark III ISO 6400 file (2048² crop): the
+    proportion of edge gradient left once flat-area noise was reduced to 50%
+    of the original, and the processing time scaled to 32MP.
     """
 
     LEGACY = "legacy"
-    """예전 방식. 디테일 보존 78.7%, 0.29초.
+    """The old method. Detail retention 78.7%, 0.29 seconds.
 
-    지웠던 사진을 예전과 똑같이 재현해야 할 때만 씁니다. 슬라이더가
-    실질적으로 동작하지 않습니다(60 이상은 100과 차이가 0.05).
+    Used only when a photo that was already processed has to be reproduced
+    exactly as before. The slider effectively does nothing (above 60, the
+    difference from 100 is 0.05).
     """
 
     BILATERAL = "bilateral"
-    """양방향 필터. 디테일 보존 79.9%, 0.34초.
+    """Bilateral filter. Detail retention 79.9%, 0.34 seconds.
 
-    가장 빠릅니다. 노이즈가 적은 저감도 사진에서 살짝만 다듬을 때.
+    The fastest. For a light touch-up on a low-ISO photo with little noise.
     """
 
     NLMEANS = "nlmeans"
-    """비국소 평균(표준). 디테일 보존 99.4%, 0.95초.
+    """Non-local means (standard). Detail retention 99.4%, 0.95 seconds.
 
-    떨어진 곳의 비슷한 무늬끼리 평균 내므로 엣지를 거의 잃지 않습니다.
-    고감도 사진의 기본값입니다.
+    It averages similar patterns from far apart, so it barely loses any
+    edges. The default for high-ISO photos.
     """
 
     NLMEANS_HQ = "nlmeans_hq"
-    """비국소 평균(고품질). 디테일 보존 99.9%, 2.6초.
+    """Non-local means, wide search window. 2.7x slower than standard.
 
-    탐색 창이 넓어 표준보다 2.7배 느립니다. 크게 인화할 한 장에.
+    The name oversells it. The original 99.9% was measured at a *matched*
+    reduction level; used at the same slider value it removes more fine
+    noise than the standard window and pays for it heavily. Measured
+    (2026-08-30, four files ISO 800~12800, strong-edge retention):
+
+        strength 50:  standard 92~100%   HQ 85~99%
+        strength 80:  standard 73~98%    HQ 50~97%
+
+    It also leaves a **blotchier** residual - the coarse/fine ratio of what
+    is left is higher than the standard window in nearly every cell, which
+    is the "smeared" look rather than grain.
+
+    Worth reaching for when you want the last of the fine grain gone and
+    the frame has little fine detail to lose. The standard window is the
+    better default.
     """
 
 
@@ -247,125 +278,169 @@ NOISE_ALGORITHM_LABELS = {
     NoiseAlgorithm.BILATERAL: "빠름 (양방향 필터)",
     NoiseAlgorithm.LEGACY: "기존 방식 (구버전 재현용)",
 }
-"""콤보박스 표시 순서 겸 이름. 권장하는 것부터 놓습니다."""
+"""Combo box display order and names. The recommended one goes first."""
 
 
 @dataclass(frozen=True)
 class DetailSettings:
-    """세부 패널 — 샤프닝과 노이즈 감소."""
+    """The Detail panel - sharpening and noise reduction."""
 
     sharpen_amount: int = 0       # 0~150
     sharpen_radius: float = 1.0   # 0.5~3.0
-    noise_reduction: int = 0      # 0~100 (휘도)
+    noise_reduction: int = 0      # 0~100 (luminance)
     color_noise_reduction: int = 0  # 0~100
 
     noise_algorithm: NoiseAlgorithm = NoiseAlgorithm.NLMEANS
-    """휘도 노이즈를 지우는 방식. 각 값의 실측치는 NoiseAlgorithm 참고."""
+    """Luminance noise removal method. See NoiseAlgorithm for measurements."""
 
-    noise_passes: int = 1
-    """휘도 노이즈 감소 패스 수 (1~4). 비국소 평균 계열에만 적용됩니다.
+    noise_passes: int = 2
+    """Number of luminance noise reduction passes (1~4). Non-local means
+    only.
 
-    같은 감소량이면 여러 번 약하게가 한 번 강하게보다 디테일을 훨씬 덜
-    다칩니다 — h가 작을수록 '이만큼의 차이는 노이즈'라는 판단이 진짜
-    엣지를 안 건드리기 때문입니다.
+    For the same amount of reduction, several weak passes damage detail far
+    less than one strong pass - the smaller h is, the less the judgement
+    "a difference this large is noise" touches a real edge.
 
-    실측 (A6700 ISO3200, 평탄부 노이즈를 같은 양만큼 줄였을 때 강한 엣지
-    그래디언트 보존율):
+    Measured (A6700 ISO3200, retention of strong edge gradient at equal
+    flat-area noise reduction):
 
-        감소 70%:  1패스 74% / 2패스 97% / 3패스 99% / 4패스 99%
-        감소 80%:  1패스 도달 불가 / 2패스 43% / 3패스 68% / 4패스 85%
+        reduce 70%:  1 pass 74% / 2 pass 97% / 3 pass 99% / 4 pass 99%
+        reduce 80%:  1 pass unreachable / 2 pass 43% / 3 pass 68% /
+                     4 pass 85%
 
-    강한 감소(콘서트 ISO2000+ 촬영)일수록 패스가 결정적입니다. 80% 같은
-    깊은 감소는 1패스로는 아예 도달하지 못합니다. 시간은 패스 수에
-    비례합니다 (32MP 기준 패스당 약 0.9초).
+    The stronger the reduction (concert shooting at ISO2000+), the more
+    decisive the pass count is. A deep reduction like 80% cannot be reached
+    at all in one pass. Time is proportional to the pass count (about 0.9
+    seconds per pass at 32MP).
+    A second, ground-truth measurement (A1 ISO 400 + synthetic noise
+    matched to ISO 1600 lifted +2EV, through the real entry point) backs
+    the panel's nudge past strength 70: from 75 up the second pass is a
+    strict win, not a trade - PSNR equal or better *and* 9~12%p more
+    edge retained (NR 75: 39.92dB/80.6% -> 39.91dB/92.1%; NR 100:
+    39.57dB/75.6% -> 39.66dB/84.3%). At NR 50 it is still a trade
+    (-0.6dB for +12%p edge), and a third pass was diminishing everywhere.
 
-    기본 1은 예전과 완전히 같은 동작입니다.
+    A second sweep (2026-08-30, four files across ISO 800~12800, two
+    strengths) showed the gain is **not** confined to strong reduction -
+    strong-edge retention by pass count:
+
+        strength 50:  1 pass 56~94%   2 pass 92~100%   4 pass 98~100%
+        strength 80:  1 pass 36~84%   2 pass 73~98%    4 pass 82~99%
+
+    A single pass costs 44%p of the edges even at a middling setting, so
+    **2 is the default**. Files saved earlier carry an explicit 1 and go
+    on rendering exactly as they did.
     """
 
     noise_detail: int = 50
-    """디테일 보존 (0~100). 무늬가 있는 곳에 원본을 얼마나 되살릴지.
+    """Detail retention (0~100). How much of the original to bring back
+    where there is texture.
 
-    노이즈 감소는 평탄한 곳에는 이롭고 머리카락·나뭇잎처럼 잔무늬가 있는
-    곳에는 해롭습니다. 국소 대비가 노이즈보다 확실히 큰 자리에만 원본을
-    섞어 되돌립니다. 0이면 전면 적용, 100이면 무늬 있는 곳을 거의 그대로.
+    Noise reduction helps in flat areas and hurts where there is fine
+    texture, such as hair or leaves. We blend the original back in only
+    where the local contrast is clearly larger than the noise. 0 applies it
+    everywhere; 100 leaves textured areas almost as they were.
     """
 
     color_noise_radius: int = 50
-    """색 노이즈 반경 (0~100). 얼마나 큰 색 얼룩까지 볼지.
+    """Colour noise radius (0~100). How large a colour blotch to look for.
 
-    고감도 색 노이즈는 화소 단위가 아니라 수십 화소짜리 얼룩입니다
-    (실측: R6M3 ISO6400에서 색 노이즈의 54%가 4화소보다 큰 스케일).
-    올리면 큰 얼룩까지 잡지만 진짜 색 경계도 함께 번집니다.
+    High-ISO colour noise is not per pixel but blotches tens of pixels
+    across (measured: on the R6M3 at ISO6400, 54% of the colour noise is at
+    a scale larger than 4 pixels). Raise it and it catches the large
+    blotches too, but real colour edges bleed along with them.
     """
 
-    color_noise_shadow: int = 0
-    """어두운 곳 색 노이즈 추가 억제 (0~100).
+    color_noise_shadow: int = 100
+    """Extra colour noise suppression in dark areas (0~100).
 
-    색 노이즈는 어두운 곳에서 특히 심합니다 — 섀도를 증폭하면서 색 얼룩이
-    같이 커집니다. 그런데 균일한 색 블러를 어두운 곳에 맞춰 키우면 밝은
-    곳의 진짜 색 경계까지 번집니다. 그래서 어두운 곳(휘도 70 미만,
-    부드러운 경계)에만 더 센 블러를 섞습니다.
+    Colour noise is especially bad in the dark - amplifying the shadows
+    grows the colour blotches along with them. But sizing a uniform colour
+    blur for the dark areas bleeds the real colour edges in the bright ones
+    as well. So the dark areas only (luminance below 70, with a soft
+    boundary) get a wider, stronger pass, and it is weighted in over the
+    top of the colour noise slider rather than all at once at the bottom.
 
-    실측 (콘서트 실촬영 3파일, 색 노이즈 잔여율):
+    Measured on the real shadows of five high-ISO files (ISO 8000, 5000,
+    4000, 3200 and an A1 at 1600) - colour noise remaining in the shadow:
 
-        균일 블러만:    어두움 25~29% / 밝음 25~42%
-        +섀도 억제:     어두움  6~15% / 밝음 25~42% (동일)
-        밝은 색 경계:   두 경우 완전 동일
+        colour noise slider    25    50    75   100
+        this at 0              68%   46%   38%   25%
+        this at 100            25%   15%   12%    9%
 
-    기본 0은 예전과 완전히 같은 동작입니다. 색 노이즈 감소가 켜져 있을
-    때만 함께 동작합니다.
+    The bright areas keep their colour throughout (97% of the original
+    colour edge at the midpoint). What the top of the slider spends is
+    colour in the dark - 85% at the midpoint down to 65% at the top - so
+    it is there for people who would rather lose some shadow saturation
+    than see the blotching. Turning the whole frame up instead bleeds
+    colour edges everywhere (64.95 -> 35.58), which is the reason this is
+    gated to the shadows at all.
+
+    Like the radius, this is a helper: it does nothing while colour noise
+    reduction is 0, which is why is_neutral ignores it. It defaults to on
+    so that turning colour noise reduction on gets the shadows too.
     """
 
     destripe: int = 0
-    """LED월 가로 줄무늬 제거 (0~100).
+    """Remove horizontal LED wall striping (0~100).
 
-    LED 패널의 PWM 점멸과 롤링셔터 판독이 어긋나면 가로 밴드가 남습니다.
-    실측한 두 컷(DSC02751 ISO2500 1/800, DSC03868 ISO3200 1/1000) 모두
-    주기가 **103px로 같았습니다** — ISO도 셔터도 다른데 같다는 것은
-    피사체가 아니라 판독 주기에서 온다는 뜻입니다.
+    When an LED panel's PWM flicker and the rolling shutter readout fall out
+    of step, horizontal banding is left behind. Both measured frames
+    (DSC02751 ISO2500 1/800, DSC03868 ISO3200 1/1000) had **the same 103px
+    period** - the same period at different ISO and different shutter means
+    it comes from the readout cycle, not from the subject.
 
-    기본 0(꺼짐)입니다. 줄무늬는 특정 촬영장에서만 나오는데, 늘 켜 두면
-    수평선이 있는 풍경에서 하늘의 미묘한 그라데이션을 건드릴 수 있습니다.
+    The default is 0 (off). Striping only turns up at particular venues, and
+    leaving it on all the time can disturb the subtle gradation of the sky
+    in a landscape with a horizon in it.
 
-    주기가 검출되지 않으면(16~400px 밖) 값을 올려도 아무 일도 하지 않습니다.
+    If no period is detected (outside 16~400px), raising the value does
+    nothing at all.
     """
 
     face_priority: int = 85
-    """얼굴 우선 (0~100). 얼굴 밖에서 휘도 노이즈 감소를 얼마나 뺄지.
+    """Face priority (0~100). How much luminance noise reduction to take
+    away outside faces.
 
-    고감도에서 눈에 거슬리는 것은 대개 **피부의 알갱이**입니다. 피부는
-    원래 매끄러워서 세게 지워도 잃을 것이 없지만, 같은 강도를 화면 전체에
-    걸면 옷의 짜임·머리카락·객석 조명이 함께 뭉갭니다.
+    What grates at high ISO is usually **grain on skin**. Skin is smooth to
+    begin with, so there is nothing to lose by erasing hard; but apply the
+    same strength across the whole frame and the weave of clothing, hair
+    and the audience lighting get mushed along with it.
 
-    0이면 화면 전체에 같은 강도(예전 동작), 100이면 얼굴 밖은 아예 건드리지
-    않습니다.
+    0 applies the same strength across the whole frame (the old behaviour);
+    100 leaves everything outside faces completely untouched.
 
-    실측 (DSC03360, A6700 ISO3200, RAW 디모자이크 6240×4168, 노이즈 감소 70):
+    Measured (DSC03360, A6700 ISO3200, RAW demosaic 6240x4168, noise
+    reduction 70):
 
-        얼굴 우선    피부 노이즈    배경 디테일    시간
-             0        -39%         -20%      1.37초
-            50        -36%         -13%      1.33초
-            85        -33%          -6%      1.32초
-           100        -34%          -2%      0.75초
+        face priority   skin noise   background detail   time
+              0           -39%             -20%          1.37s
+             50           -36%             -13%          1.33s
+             85           -33%              -6%          1.32s
+            100           -34%              -2%          0.75s
 
-    기본값 85는 '주로 얼굴'이라는 뜻 그대로입니다. 100이 배경 디테일에는
-    더 좋고 두 배 빠르지만(얼굴 상자 밖을 아예 계산하지 않으므로), 배경에
-    노이즈 감소가 **0**이 되어 풍경 한구석에 우연히 얼굴이 하나 잡힌 사진에서
-    화면 전체의 노이즈 감소가 사라집니다. 85면 그런 경우에도 배경이 강도의
-    15%는 받습니다.
+    The default of 85 means exactly what it says: 'mostly faces'. 100 is
+    better for background detail and twice as fast (it does not compute
+    outside the face boxes at all), but noise reduction in the background
+    becomes **0**, so on a landscape that happens to catch one face in a
+    corner, noise reduction disappears from the whole frame. At 85 the
+    background still gets 15% of the strength even in that case.
 
-    얼굴이 검출되지 않으면 이 값은 통째로 무시하고 화면 전체에 같은 강도를
-    겁니다 — 얼굴을 못 찾았다고 기능이 사라지면 안 됩니다.
+    If no face is detected, this value is ignored entirely and the same
+    strength is applied to the whole frame - the feature must not vanish
+    just because no face was found.
 
-    색 노이즈에는 걸지 않습니다. 색 얼룩 제거는 디테일을 거의 해치지 않아
-    얼굴만 할 이유가 없고, 배경에만 색 얼룩이 남으면 그게 더 눈에 띕니다.
+    It is not applied to colour noise. Removing colour blotches barely hurts
+    detail, so there is no reason to do it on faces alone, and colour
+    blotches left only in the background stand out more.
     """
 
     def __post_init__(self) -> None:
-        """방식이 문자열로 들어와도 enum으로 맞춥니다.
+        """Coerce the method to the enum even when it comes in as a string.
 
-        프리셋 파일은 문자열로 저장되고, 모르는 값이 적힌 파일도 열려야
-        합니다 (GeometrySettings.ratio와 같은 이유).
+        Preset files store it as a string, and a file holding a value we do
+        not know still has to open (the same reason as
+        GeometrySettings.ratio).
         """
         if not isinstance(self.noise_algorithm, NoiseAlgorithm):
             try:
@@ -376,11 +451,12 @@ class DetailSettings:
                 object.__setattr__(self, "noise_algorithm", NoiseAlgorithm.NLMEANS)
 
     def is_neutral(self) -> bool:
-        """화소를 실제로 건드리는 값이 하나도 없는지.
+        """Whether not one value actually touches the pixels.
 
-        방식과 보조 파라미터(디테일 보존·색 반경)는 조정량이 0이면 아무
-        일도 하지 않습니다. 이것들만 바뀐 상태가 '보정 있음'으로 표시되면
-        패널의 ● 표시와 프리셋 비교가 거짓말을 하게 됩니다.
+        The method and the helper parameters (detail retention, colour
+        radius) do nothing at all while the adjustment amount is 0. If a
+        state where only those changed showed as 'has adjustments', the
+        panel's ● marker and preset comparison would be lying.
         """
         return (
             self.sharpen_amount == 0
@@ -402,17 +478,18 @@ class HSLBand:
 
 @dataclass(frozen=True)
 class HSLSettings:
-    """색상 혼합 패널 — 8개 색상대별 색조/채도/광도."""
+    """The Colour Mix panel - hue/saturation/luminance per colour band."""
 
     bands: dict[str, HSLBand] = field(
         default_factory=lambda: {name: HSLBand() for name in HSL_BANDS}
     )
 
     def __post_init__(self) -> None:
-        """항상 8개 밴드를 다 채워 둡니다.
+        """Always keep all 8 bands filled in.
 
-        일부만 지정해서 만들 수 있게 두면 같은 의미의 설정이 서로 다른
-        객체가 되어 비교와 프리셋 왕복이 어긋납니다.
+        Allow construction with only some of them specified and settings
+        that mean the same thing become different objects, which throws off
+        comparison and the preset round trip.
         """
         normalized = {name: HSLBand() for name in HSL_BANDS}
         normalized.update(
@@ -437,7 +514,7 @@ class HSLSettings:
 
 @dataclass(frozen=True)
 class ColorGradeZone:
-    """색 보정의 한 구간 (어두운/중간/밝은 영역)."""
+    """One zone of colour grading (shadow/midtone/highlight region)."""
 
     hue: int = 0          # 0~359
     saturation: int = 0   # 0~100
@@ -449,7 +526,7 @@ class ColorGradeZone:
 
 @dataclass(frozen=True)
 class ColorGradeSettings:
-    """색 보정 패널 — 구간별 컬러 그레이딩."""
+    """The Colour Grading panel - colour grading per zone."""
 
     shadows: ColorGradeZone = field(default_factory=ColorGradeZone)
     midtones: ColorGradeZone = field(default_factory=ColorGradeZone)
@@ -467,11 +544,11 @@ class ColorGradeSettings:
 
 @dataclass(frozen=True)
 class EffectSettings:
-    """효과 패널 — 그레인과 비네팅."""
+    """The Effects panel - grain and vignetting."""
 
     grain_amount: int = 0    # 0~100
     grain_size: int = 25     # 1~100
-    vignette_amount: int = 0  # -100(어둡게) ~ +100(밝게)
+    vignette_amount: int = 0  # -100 (darker) ~ +100 (brighter)
     vignette_midpoint: int = 50
 
 
@@ -485,7 +562,7 @@ class CropRatio(str, Enum):
 
     @property
     def value_ratio(self) -> float | None:
-        """가로/세로 비. FREE와 ORIGINAL은 계산 시점에 정해집니다."""
+        """Width/height ratio. FREE and ORIGINAL are decided when computed."""
         return {
             CropRatio.SQUARE: 1.0,
             CropRatio.FOUR_THREE: 4 / 3,
@@ -496,27 +573,29 @@ class CropRatio(str, Enum):
 
 @dataclass(frozen=True)
 class GeometrySettings:
-    """도형 패널 — 크롭, 수평 보정, 회전.
+    """The Geometry panel - crop, straightening, rotation.
 
-    크롭은 0~1 정규화 좌표로 저장합니다. 미리보기(축소본)에서 지정한 값이
-    원본 해상도에서도 그대로 통해야 하기 때문입니다.
+    The crop is stored in normalised 0~1 coordinates, because a value set on
+    the preview (a downscaled copy) has to hold at the original resolution
+    just the same.
     """
 
     crop_left: float = 0.0
     crop_top: float = 0.0
     crop_right: float = 1.0
     crop_bottom: float = 1.0
-    straighten: float = 0.0    # 도 단위, -45 ~ +45
-    rotate_quarters: int = 0   # 90도 단위 회전 (0~3)
+    straighten: float = 0.0    # in degrees, -45 ~ +45
+    rotate_quarters: int = 0   # rotation in 90° steps (0~3)
     flip_horizontal: bool = False
     flip_vertical: bool = False
     ratio: CropRatio = CropRatio.FREE
 
     def __post_init__(self) -> None:
-        """ratio가 문자열로 들어와도 enum으로 맞춥니다.
+        """Coerce ratio to the enum even when it comes in as a string.
 
-        PySide6는 str을 상속한 Enum을 콤보박스 데이터로 저장할 때 평범한
-        str로 바꿔 버립니다. 여기서 흡수하지 않으면 .value 접근이 터집니다.
+        When PySide6 stores an Enum that inherits from str as combo box
+        data, it turns it into a plain str. Absorb that here or accessing
+        .value blows up.
         """
         if not isinstance(self.ratio, CropRatio):
             try:
@@ -541,7 +620,7 @@ class GeometrySettings:
 
 
 class WatermarkPosition(str, Enum):
-    """3×3 정렬 위치. 세밀한 배치는 offset으로 합니다."""
+    """The 3x3 alignment positions. Fine placement is done with offset."""
 
     TOP_LEFT = "top_left"
     TOP_CENTER = "top_center"
@@ -555,7 +634,9 @@ class WatermarkPosition(str, Enum):
 
     @property
     def anchor(self) -> tuple[float, float]:
-        """(가로, 세로) 정렬 비율. 0=왼쪽/위, 0.5=가운데, 1=오른쪽/아래."""
+        """(horizontal, vertical) alignment ratio. 0=left/top, 0.5=centre,
+        1=right/bottom.
+        """
         horizontal = {"left": 0.0, "center": 0.5, "right": 1.0}
         vertical = {"top": 0.0, "middle": 0.5, "bottom": 1.0}
         if self is WatermarkPosition.CENTER:
@@ -566,37 +647,38 @@ class WatermarkPosition(str, Enum):
 
 @dataclass(frozen=True)
 class WatermarkSettings:
-    """워터마크 — 텍스트 또는 이미지."""
+    """Watermark - text or image."""
 
     enabled: bool = False
     text: str = ""
     image_path: str = ""
     position: WatermarkPosition = WatermarkPosition.BOTTOM_RIGHT
     opacity: int = 70          # 0~100
-    scale: int = 5             # 이미지 긴 변 대비 %
-    margin: int = 3            # 여백 %
+    scale: int = 5             # % of the image's long edge
+    margin: int = 3            # margin %
 
     offset_x: float = 0.0
-    """가로 미세조정 (이미지 폭 대비 %). 양수는 오른쪽."""
+    """Horizontal fine adjustment (% of image width). Positive is right."""
 
     offset_y: float = 0.0
-    """세로 미세조정 (이미지 높이 대비 %). 양수는 아래쪽."""
+    """Vertical fine adjustment (% of image height). Positive is down."""
 
     rotation: int = 0
-    """워터마크 회전 (도). 대각선 배치용."""
+    """Watermark rotation (degrees). For a diagonal placement."""
 
     font_path: str = ""
-    """워터마크 글꼴 파일 경로. 비우면 기본 글꼴을 씁니다.
+    """Path to the watermark font file. Empty means the default font.
 
-    글꼴 '이름'이 아니라 파일 경로를 저장합니다. 렌더는 PIL이 하는데 PIL은
-    파일을 직접 열어야 하고, 이름→파일 매핑은 OS마다 달라 깨지기 쉽습니다.
+    We store the file path rather than the font 'name'. PIL does the
+    rendering and PIL has to open the file directly, and the name -> file
+    mapping differs per OS and breaks easily.
     """
 
     color: tuple[int, int, int] = (255, 255, 255)
-    shadow: bool = True        # 밝은 배경에서도 읽히게
+    shadow: bool = True        # so it reads on a bright background too
 
     def __post_init__(self) -> None:
-        """position이 문자열로 들어와도 enum으로 맞춘다 (GeometrySettings와 같은 이유)."""
+        """Coerce position to the enum from a string (as GeometrySettings)."""
         if not isinstance(self.position, WatermarkPosition):
             try:
                 object.__setattr__(self, "position", WatermarkPosition(self.position))
@@ -607,7 +689,8 @@ class WatermarkSettings:
         return self.enabled and bool(self.text or self.image_path)
 
 
-# 내보낼 때 넣을 수 있는 EXIF 항목. 키는 내부 이름, 값은 표시명.
+# EXIF items that can be embedded on export. The key is the internal name,
+# the value is the display name.
 EXIF_FIELDS = {
     "camera": "카메라 (제조사/모델)",
     "lens": "렌즈",
@@ -622,10 +705,11 @@ EXIF_FIELDS = {
 
 @dataclass(frozen=True)
 class MetadataSettings:
-    """EXIF 삽입 — 선택한 항목만 나갑니다.
+    """EXIF embedding - only the selected items go out.
 
-    기본은 전부 끔. 사진을 밖으로 내보낼 때 촬영 장비나 시각이 딸려
-    나가는 것을 원치 않는 경우가 많으므로, 넣는 쪽을 명시적 선택으로 둡니다.
+    Everything off by default. People often do not want the gear they shot
+    with or the time they shot at tagging along when a photo leaves, so
+    including it is left as an explicit choice.
     """
 
     enabled: bool = False
@@ -639,10 +723,11 @@ class MetadataSettings:
 
 @dataclass(frozen=True)
 class OpticsSettings:
-    """광학 패널 — 렌즈 왜곡, 비네팅, 색수차.
+    """The Optics panel - lens distortion, vignetting, chromatic aberration.
 
-    자동은 lensfun DB 프로필, 수동은 직접 조정입니다. DB에 없는 렌즈가
-    흔하므로(실측: 탐론 A069 미등록) 둘 다 필요합니다.
+    Automatic uses the lensfun DB profiles, manual is direct adjustment.
+    Lenses missing from the DB are common (measured: the Tamron A069 is not
+    registered), so we need both.
     """
 
     auto_enabled: bool = False
@@ -651,10 +736,11 @@ class OpticsSettings:
     auto_chromatic: bool = True
 
     lens_override: str = ""
-    """사용자가 직접 고른 렌즈 이름입니다.
+    """A lens name the user picked by hand.
 
-    EXIF 렌즈명이 비어 있거나(어댑터 사용) 데이터베이스 이름과 다를 때
-    자동 조회가 실패합니다. 그때 직접 지정할 수 있어야 합니다.
+    The automatic lookup fails when the EXIF lens name is empty (an adapter
+    was used) or differs from the database name. It has to be possible to
+    specify it directly in that case.
     """
 
     distortion: int = 0
@@ -663,10 +749,10 @@ class OpticsSettings:
     defringe_green: int = 0
 
     defringe_purple_hue: int = 145
-    """보라 언저리로 볼 색조 중심입니다. 스포이드로 지정합니다."""
+    """Centre hue treated as purple fringing. Set with the eyedropper."""
 
     defringe_green_hue: int = 65
-    """녹색 언저리로 볼 색조 중심입니다."""
+    """Centre hue treated as green fringing."""
 
     def is_neutral(self) -> bool:
         return (
@@ -679,10 +765,10 @@ class OpticsSettings:
 
 @dataclass(frozen=True)
 class ExifStripSettings:
-    """이미지 하단 정보 띠.
+    """The information strip along the bottom of the image.
 
-    EXIF는 SNS에 올리면 대부분 지워집니다. 화면에 보이는 글자로 박아 두면
-    어디로 가든 남습니다.
+    EXIF is mostly stripped once a photo is posted to social media. Burned
+    in as visible text, it stays wherever the photo goes.
     """
 
     enabled: bool = False
@@ -697,7 +783,7 @@ class ExifStripSettings:
         return self.enabled and bool(self.include or self.custom_text)
 
 
-# 띠에 넣을 수 있는 항목
+# Items that can go in the strip
 STRIP_FIELDS = {
     "filename": "파일명",
     "camera": "카메라",
@@ -710,26 +796,52 @@ STRIP_FIELDS = {
 }
 
 
-# ---------------------------------------------------------------- 마스크(국소 보정)
+# ---------------------------------------------------------------- masks (local)
+
+
+class MaskCombine(str, Enum):
+    """How a refinement piece changes the mask area (the same three as
+    Lightroom).
+
+    The alpha is soft (feathered), so the set operations are defined softly
+    too:
+      ADD        max(a, b)      - widens
+      SUBTRACT   a x (1 - b)    - takes away
+      INTERSECT  a x b          - keeps only the overlap
+
+    Why the product: where two alphas half overlap at a boundary, cutting
+    with min/max leaves a stair step. The product bridges the gap between
+    them. ADD is the only max, so that the overlapping interior does not go
+    past 1 and clump (a+b-ab has the same property, but leaving flat areas
+    as they are makes the result easier to predict).
+    """
+
+    ADD = "add"
+    SUBTRACT = "subtract"
+    INTERSECT = "intersect"
 
 
 class MaskType(str, Enum):
-    """마스크 종류. 얼굴/눈/배경은 이미지에서 매번 재생성됩니다."""
+    """Mask kinds. Face/eye/background are rebuilt from the image each time."""
 
-    BRUSH = "brush"          # 손으로 칠한 알파 비트맵
-    RADIAL = "radial"        # 타원 그라디언트
-    LINEAR = "linear"        # 선형 그라디언트
-    FACE = "face"            # 얼굴 인식 (피부/입)
-    EYE = "eye"              # 얼굴 랜드마크 기반 (눈밑/눈동자)
-    BACKGROUND = "background"  # 인물 제외 배경 (GrabCut)
+    BRUSH = "brush"          # hand-painted alpha bitmap
+    RADIAL = "radial"        # elliptical gradient
+    LINEAR = "linear"        # linear gradient
+    FACE = "face"            # face detection (skin/mouth)
+    EYE = "eye"              # from face landmarks (under-eye/iris)
+    BACKGROUND = "background"  # background excluding people (GrabCut)
+    SUBJECT = "subject"      # main subject (U²-Netp trained model)
 
 
 @dataclass(frozen=True)
 class LocalAdjustments:
-    """마스크 영역에만 적용하는 조정. BasicSettings의 부분집합 + 국소 전용.
+    """Adjustments applied only inside a mask. A subset of BasicSettings
+    plus local-only ones.
 
-    색온도는 절대 Kelvin이 아니라 상대 이동(-100~+100, 양수는 따뜻하게)입니다.
-    국소 보정은 '배경 대비 얼마나 밀지'가 자연스러워 전역과 다르게 다룹니다.
+    Colour temperature is a relative shift (-100~+100, positive is warmer),
+    not an absolute Kelvin. For a local adjustment, 'how far to push it
+    against the background' is the natural framing, so it is handled
+    differently from the global one.
     """
 
     exposure: float = 0.0      # EV
@@ -738,25 +850,37 @@ class LocalAdjustments:
     shadows: int = 0
     whites: int = 0
     blacks: int = 0
-    temperature: int = 0       # 상대 이동 (-100 차갑게 ~ +100 따뜻하게)
+    temperature: int = 0       # relative shift (-100 cooler ~ +100 warmer)
     tint: int = 0
     texture: int = 0
     clarity: int = 0
     saturation: int = 0
     sharpen: int = 0           # 0~150
-    smoothing: int = 0         # 피부 부드럽게 (0~100), surface blur
+    smoothing: int = 0         # skin smoothing (0~100), surface blur
+    curve: CurveSettings = field(default_factory=CurveSettings)
+    """A tone curve applied only inside the mask (advanced).
+
+    The same editor and the same values as the global curve. It is for
+    gradation the sliders cannot produce - holding down just the sky, or
+    pulling only the subject towards a film tone. It stays collapsed in the
+    UI by default - leaving a curve editor open per mask would bury the
+    panel in curves.
+    """
 
     def is_neutral(self) -> bool:
-        return all(getattr(self, f.name) == 0 for f in fields(self))
+        return (all(getattr(self, f.name) == 0 for f in fields(self)
+                    if f.name != "curve")
+                and self.curve.is_neutral())
 
 
 @dataclass(frozen=True)
 class Mask:
-    """마스크 하나 = 영역 정의 + 그 영역에 적용할 국소 조정.
+    """One mask = an area definition + the local adjustment for that area.
 
-    얼굴/눈/배경/방사형/선형은 params(정규화 좌표)만 저장하고 렌더 시 다시
-    만든다 — 해상도가 달라도 같은 위치가 나옵니다. 브러시만 bitmap(축소된
-    알파 PNG를 base64로)을 직접 들고 다닙니다.
+    Face/eye/background/radial/linear store only params (normalised
+    coordinates) and are rebuilt at render time - the same position comes
+    out at any resolution. Only brush carries a bitmap directly (a
+    downscaled alpha PNG as base64).
     """
 
     kind: MaskType
@@ -764,22 +888,43 @@ class Mask:
     enabled: bool = True
     invert: bool = False
     opacity: int = 100         # 0~100
-    feather: int = 50          # 경계 부드러움 0~100
+    feather: int = 50          # edge softness 0~100
     size: int = 100
-    """인식 영역 크기 (%, 0~200). 100이 기본입니다.
+    """Detected area size (%, 0~200). 100 is the default.
 
-    얼굴/눈/방사형처럼 도형으로 만드는 영역에만 적용됩니다. 눈밑처럼 좁게
-    잡아야 하는 부위는 사람마다 적정 범위가 달라서 조절이 필요합니다.
+    Applies only to areas built from shapes, such as face/eye/radial. Parts
+    that have to be taken narrowly, like the under-eye, need adjusting
+    because the right range differs from person to person.
     """
     params: dict[str, Any] = field(default_factory=dict)
-    """종류별 정규화 파라미터.
+    """Normalised parameters per kind.
       RADIAL:  cx, cy, rx, ry, rotation
       LINEAR:  x0, y0, x1, y1
-      FACE:    index(몇 번째 얼굴), region("skin"|"mouth")
+      FACE:    index (which face), region("skin"|"mouth")
       EYE:     index, region("under_eye"|"iris")
     """
-    bitmap: str = ""           # BRUSH 전용, base64 PNG(단일 채널, ≈512px)
-    label: str = ""            # 사용자에게 보일 이름
+    bitmap: str = ""           # BRUSH only, base64 PNG (1 channel, ≈512px)
+    label: str = ""            # the name shown to the user
+    combine: MaskCombine = MaskCombine.ADD
+    """Meaningful **only when used as a refinement piece** - whether to
+    widen the parent area (ADD), take away from it (SUBTRACT) or keep only
+    the overlap (INTERSECT).
+
+    It means nothing for a mask in the list itself. Masks relate to one
+    another by laying their own adjustments on in order, not by combining
+    areas."""
+    refine: tuple["Mask", ...] = ()
+    """The pieces that refine this mask's area. combine is applied in order.
+
+    **Only the parent's adjust is used** - a piece defines an area and
+    nothing else. "Smooth the face but leave out the eyes" being one set of
+    adjustments rather than two is the natural reading, and Lightroom uses
+    the same model.
+
+    The depth is one level (a piece's refine is ignored). Allowing nesting
+    would leave no way to express it in the UI, and every combination that
+    is actually needed can be built at one level.
+    """
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, MaskType):
@@ -787,14 +932,21 @@ class Mask:
                 object.__setattr__(self, "kind", MaskType(self.kind))
             except ValueError:
                 object.__setattr__(self, "kind", MaskType.RADIAL)
+        if not isinstance(self.combine, MaskCombine):
+            try:
+                object.__setattr__(self, "combine", MaskCombine(self.combine))
+            except ValueError:
+                object.__setattr__(self, "combine", MaskCombine.ADD)
+        if not isinstance(self.refine, tuple):
+            object.__setattr__(self, "refine", tuple(self.refine or ()))
 
     def is_neutral(self) -> bool:
         return not self.enabled or self.opacity <= 0 or self.adjust.is_neutral()
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "kind": self.kind.value,
-            "adjust": asdict(self.adjust),
+            "adjust": _local_to_dict(self.adjust),
             "enabled": self.enabled,
             "invert": self.invert,
             "opacity": self.opacity,
@@ -804,6 +956,14 @@ class Mask:
             "bitmap": self.bitmap,
             "label": self.label,
         }
+        # Most frames do not use it, so at the default value we leave the
+        # key out - an older version still reads it (unknown keys ignored)
+        # and the file does not grow.
+        if self.combine is not MaskCombine.ADD:
+            data["combine"] = self.combine.value
+        if self.refine:
+            data["refine"] = [piece.to_dict() for piece in self.refine]
+        return data
 
     @classmethod
     def from_dict(cls, data: Any) -> "Mask | None":
@@ -813,10 +973,23 @@ class Mask:
             kind = MaskType(data["kind"])
         except ValueError:
             return None
-        adjust = _merge_known(LocalAdjustments, data.get("adjust"), asdict(LocalAdjustments()))
+        adjust = _local_from_dict(data.get("adjust"))
         params = data.get("params")
-        # 수치는 전부 관대하게 읽습니다. 여기서 int()가 터지면 이 마스크만이
-        # 아니라 프리셋(그리고 대기열) 전체가 열리지 않습니다.
+        try:
+            combine = MaskCombine(data.get("combine", MaskCombine.ADD.value))
+        except ValueError:
+            combine = MaskCombine.ADD
+        # Refinement pieces are read **one level only**. Cutting nesting off
+        # here means the render never has to worry about depth, even if a
+        # nested refine comes in.
+        refine = []
+        for item in data.get("refine") or ():
+            piece = cls.from_dict(item)
+            if piece is not None:
+                refine.append(replace(piece, refine=()))
+        # Every number is read leniently. An int() blowing up here would
+        # stop not just this mask but the whole preset (and the queue) from
+        # opening.
         return cls(
             kind=kind,
             adjust=adjust,
@@ -828,12 +1001,14 @@ class Mask:
             params=dict(params) if isinstance(params, dict) else {},
             bitmap=str(data.get("bitmap", "")),
             label=str(data.get("label", "")),
+            combine=combine,
+            refine=tuple(refine),
         )
 
 
 @dataclass(frozen=True)
 class DevelopSettings:
-    """보정 설정 전체."""
+    """The complete set of adjustment settings."""
 
     basic: BasicSettings = field(default_factory=BasicSettings)
     curve: CurveSettings = field(default_factory=CurveSettings)
@@ -847,13 +1022,14 @@ class DevelopSettings:
     metadata: MetadataSettings = field(default_factory=MetadataSettings)
     exif_strip: ExifStripSettings = field(default_factory=ExifStripSettings)
     masks: tuple[Mask, ...] = ()
-    """국소 보정 마스크들. 컷마다 다르므로(크롭과 같은 성격) 일괄 적용에서 제외됩니다."""
+    """Local adjustment masks. They differ from frame to frame (much like the
+    crop), so they are excluded from batch apply."""
 
     def is_neutral(self) -> bool:
-        """아무것도 바꾸지 않은 상태인지.
+        """Whether nothing at all has been changed.
 
-        워터마크·메타데이터·정보 띠는 픽셀 연산이 아니어도 출력에 영향을
-        주므로 함께 봅니다.
+        Watermark, metadata and the info strip are not pixel operations but
+        they do affect the output, so they are checked alongside the rest.
         """
         return (
             self.basic == BasicSettings()
@@ -870,14 +1046,15 @@ class DevelopSettings:
             and all(m.is_neutral() for m in self.masks)
         )
 
-    # ------------------------------------------------------------ 직렬화
+    # ------------------------------------------------------------ serialise
 
     def to_dict(self) -> dict:
         return {
             "basic": asdict(self.basic),
             "curve": _curve_to_dict(self.curve),
-            # 프리셋은 YAML로 저장됩니다. safe_dump는 Enum을 표현하지 못하므로
-            # (CropRatio·WatermarkPosition과 같은 이유) 문자열로 풀어 둡니다.
+            # Presets are saved as YAML. safe_dump cannot represent an Enum
+            # (the same reason as CropRatio/WatermarkPosition), so we unwrap
+            # it to a string.
             "detail": {
                 **asdict(self.detail),
                 "noise_algorithm": self.detail.noise_algorithm.value,
@@ -910,40 +1087,48 @@ class DevelopSettings:
         }
 
     def without_geometry(self) -> "DevelopSettings":
-        """도형(크롭·기울이기·회전)과 마스크를 뺀 사본. 일괄 적용에 씁니다.
+        """A copy without geometry (crop, straighten, rotate) or masks. Used
+        for batch apply.
 
-        크롭은 컷마다 구도가 달라서 일괄 적용하면 안 됩니다. 한 장에서 잡은
-        크롭을 다른 장에 그대로 씌우면 피사체가 잘려 나갑니다. 마스크도
-        마찬가지로 그 컷의 얼굴·구도에 맞춰 만든 것이라 공유하면 안 됩니다.
-        색보정처럼 전체에 공유해도 되는 것과는 성격이 다릅니다.
+        The crop must not be applied in batch, because the composition
+        differs from frame to frame. Put a crop taken on one frame onto
+        another and the subject gets cut away. Masks are the same: they were
+        built to fit that frame's faces and composition, so they must not be
+        shared. They are of a different nature from colour work, which is
+        fine to share across everything.
         """
         from dataclasses import replace
 
         return replace(self, geometry=GeometrySettings(), masks=())
 
     def for_preset(self) -> "DevelopSettings":
-        """보정 프리셋에 담지 않을 값을 뺀 사본.
+        """A copy with the values an adjustment preset does not carry taken
+        out.
 
-        **도형은 통째로 뺍니다** — 일괄 적용과 같은 이유입니다(위
-        without_geometry). 크롭·수평 보정·회전은 그 컷의 구도와 지평선에
-        맞춘 값이라, 다른 사진에 씌우면 맞춰 주는 것이 아니라 피사체를
-        잘라내고 그만큼 기울입니다. 마스크도 마찬가지입니다.
+        **Geometry is dropped wholesale** - the same reason as batch apply
+        (without_geometry above). Crop, straightening and rotation are
+        values fitted to that frame's composition and horizon, so putting
+        them on another photo does not fit anything; it cuts the subject
+        away and tilts it by that much. The same goes for masks.
 
-        **워터마크**는 따로 저장합니다(presets.watermark_presets). 색보정과
-        성격이 다르고, 같은 워터마크를 여러 색감에 얹거나 같은 색감에 다른
-        워터마크를 얹는 일이 흔합니다 — 한 덩어리로 묶으면 조합마다 프리셋을
-        만들어야 합니다.
+        **Watermarks** are stored separately (presets.watermark_presets).
+        They are of a different nature from colour work, and putting the
+        same watermark on several looks, or different watermarks on the same
+        look, is common - bundle them into one lump and you have to make a
+        preset per combination.
         """
         from dataclasses import replace
 
         return replace(self.without_geometry(), watermark=WatermarkSettings())
 
     def with_preset(self, preset: "DevelopSettings") -> "DevelopSettings":
-        """프리셋을 지금 값 위에 얹습니다. 프리셋이 안 담는 것은 지킵니다.
+        """Lay a preset over the current values, keeping what it does not
+        carry.
 
-        for_preset이 빼는 것들(도형·마스크·워터마크)은 프리셋을 불러도 지금
-        컷의 값이 남아야 합니다. 통째로 갈아 끼우면 프리셋을 고를 때마다
-        잡아 둔 크롭이 풀리고 워터마크가 사라집니다.
+        The things for_preset takes out (geometry, masks, watermark) have to
+        survive loading a preset with the current frame's values intact.
+        Swap the whole thing out and every time you pick a preset the crop
+        you set comes undone and the watermark disappears.
         """
         from dataclasses import replace
 
@@ -956,9 +1141,10 @@ class DevelopSettings:
 
     @classmethod
     def from_dict(cls, data: Any) -> "DevelopSettings":
-        """모르는 키는 무시합니다. 예전 프리셋도 열려야 합니다.
+        """Unknown keys are ignored. Older presets have to open too.
 
-        손상된 파일에서 dict가 아닌 값이 들어와도 기본값으로 넘어갑니다.
+        A damaged file handing us something that is not a dict falls through
+        to the defaults.
         """
         if not isinstance(data, dict):
             data = {}
@@ -976,6 +1162,38 @@ class DevelopSettings:
             exif_strip=_exif_strip_from_dict(data.get("exif_strip")),
             masks=_masks_from_dict(data.get("masks")),
         )
+
+
+def _local_to_dict(adjust: LocalAdjustments) -> dict:
+    """Serialise LocalAdjustments. asdict cannot be used because there is a
+    curve inside - asdict leaves points as tuples rather than turning them
+    into lists, and YAML safe_dump cannot represent a Python tuple, so
+    saving the preset blows up."""
+    data = {f.name: getattr(adjust, f.name) for f in fields(adjust)
+            if f.name != "curve"}
+    if not adjust.curve.is_neutral():
+        # Most frames do not use it, so when neutral we leave the key out
+        data["curve"] = _curve_to_dict(adjust.curve)
+    return data
+
+
+def _local_from_dict(data: Any) -> LocalAdjustments:
+    """Restore LocalAdjustments - the curve separately, the rest leniently.
+
+    _merge_known cannot be used because it only handles scalars. The policy
+    of dropping unknown keys and coercing to the default's type is the same.
+    """
+    defaults = LocalAdjustments()
+    if not isinstance(data, dict):
+        return defaults
+    values = {}
+    for field_ in fields(LocalAdjustments):
+        if field_.name == "curve" or field_.name not in data:
+            continue
+        values[field_.name] = _coerce_scalar(data[field_.name],
+                                             getattr(defaults, field_.name))
+    return LocalAdjustments(curve=_curve_from_dict(data.get("curve")),
+                            **values)
 
 
 def _curve_to_dict(curve: CurveSettings) -> dict:
@@ -1014,10 +1232,11 @@ def _curve_from_dict(data: dict | None) -> CurveSettings:
 
 
 def _detail_from_dict(data: dict | None) -> DetailSettings:
-    """세부 설정을 복원합니다.
+    """Restore the Detail settings.
 
-    노이즈 감소 방식이 없는 예전 프리셋은 기본값(비국소 평균)으로 열립니다.
-    예전 결과를 그대로 재현해야 하면 방식을 '기존 방식'으로 바꾸면 됩니다.
+    An older preset with no noise reduction method opens with the default
+    (non-local means). To reproduce an older result exactly, switch the
+    method to the legacy one.
     """
     data = _as_dict(data)
     algorithm = data.pop("noise_algorithm", NoiseAlgorithm.NLMEANS)
@@ -1055,10 +1274,11 @@ _DEFAULT_WATERMARK_COLOR = (255, 255, 255)
 
 
 def _as_color(value: Any) -> tuple[int, int, int]:
-    """워터마크 색을 항상 세 채널로 맞춥니다.
+    """Always coerce the watermark colour to three channels.
 
-    cv2.putText는 채널 수가 맞지 않으면 **그리는 시점에** 터집니다. 불러올
-    때 조용히 넘어가면 사용자는 몇십 분 걸린 배치가 끝날 때쯤 실패를 봅니다.
+    cv2.putText blows up **at draw time** if the channel count does not
+    match. Let it pass quietly at load time and the user sees the failure
+    around the time a batch that took tens of minutes finishes.
     """
     if not isinstance(value, (list, tuple)) or len(value) < 3:
         return _DEFAULT_WATERMARK_COLOR
@@ -1100,7 +1320,7 @@ def _exif_strip_from_dict(data: dict | None) -> ExifStripSettings:
 
 
 def _masks_from_dict(data: Any) -> tuple[Mask, ...]:
-    """마스크 리스트를 복원합니다. 깨진 항목은 조용히 건너뜁니다."""
+    """Restore the mask list. Broken entries are skipped silently."""
     if not isinstance(data, (list, tuple)):
         return ()
     masks = []

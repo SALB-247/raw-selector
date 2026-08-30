@@ -1,7 +1,8 @@
-"""분석 → 그룹핑 → 등급 판정을 하나로 묶은 진입점.
+"""The entry point that ties analysis -> grouping -> grading together.
 
-CLI와 GUI가 같은 경로를 타야 합니다. 둘이 다른 순서로 호출하면 같은 폴더에
-대해 다른 결과가 나오고, 그것은 디버깅이 매우 어려운 종류의 버급니다.
+The CLI and the GUI have to take the same path. If the two call things in a
+different order, the same folder produces different results, and that is
+the kind of bug that is extremely hard to debug.
 """
 
 from __future__ import annotations
@@ -20,13 +21,14 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class SelectionSession:
-    """한 폴더에 대한 셀렉트 작업 상태."""
+    """The state of the culling work on one folder."""
 
     folder: Path
     config: Config = field(default_factory=Config)
     records: list[ImageRecord] = field(default_factory=list)
     places: list = field(default_factory=list)
-    """GPS로 묶은 장소 목록 (core/places.Place). 위치가 없으면 빕니다."""
+    """The list of places grouped by GPS (core/places.Place). Empty if
+    there is no location."""
 
     def run(
         self,
@@ -35,10 +37,10 @@ class SelectionSession:
         should_cancel: CancelCheck | None = None,
         paths: list[Path] | None = None,
     ) -> list[ImageRecord]:
-        """분석하고 등급까지 매깁니다.
+        """Analyses and assigns grades as well.
 
-        paths를 주면 그 파일들만 봅니다. 폴더 전체를 돌 필요 없이 몇 장만
-        확인하고 싶을 때 씁니다.
+        Given paths, only those files are looked at. Used when you want to
+        check a few frames without going round the whole folder.
         """
         if paths:
             from .cache import default_cache_path
@@ -63,15 +65,17 @@ class SelectionSession:
         return self.records
 
     def regrade(self) -> list[ImageRecord]:
-        """그룹핑과 등급만 다시 계산합니다.
+        """Recomputes the grouping and the grades only.
 
-        임계값을 바꿨을 때 4000장을 재분석할 이유가 없습니다. 이 경로는 즉시
-        끝나야 GUI에서 슬라이더를 움직이며 조정할 수 있습니다.
+        There is no reason to re-analyse 4000 frames when a threshold
+        changes. This path has to finish instantly for the GUI to let you
+        adjust things by dragging a slider.
         """
         grouping.assign_groups(self.records, self.config.group)
         scoring.grade_records(self.records, self.config.score)
-        # 장소는 등급과 무관하지만 여기서 함께 갱신합니다. GPS가 있는 컷이
-        # 하나도 없으면 즉시 끝나므로 비용이 없습니다.
+        # Places have nothing to do with grades, but they are refreshed
+        # here as well. With not one frame carrying GPS it finishes
+        # instantly, so there is no cost.
         from . import places as places_module
 
         self.places = places_module.assign_places(self.records)
@@ -96,7 +100,8 @@ class SelectionSession:
 def analyze_and_grade(
     paths: list[Path], config: Config | None = None, cache_path: Path | None = None
 ) -> list[ImageRecord]:
-    """임의의 파일 목록에 대해 같은 처리를 적용한다 (테스트/부분 재처리용)."""
+    """Applies the same processing to an arbitrary list of files (for tests
+    and partial reprocessing)."""
     config = config or Config()
     records = analyze_paths(paths, config=config, cache_path=cache_path)
     grouping.assign_groups(records, config.group)

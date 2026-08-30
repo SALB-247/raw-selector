@@ -1,21 +1,27 @@
-"""제품 정체성과 저장 위치 한 곳 모음.
+"""Product identity and storage locations, gathered in one place.
 
-이름이 저장 경로에 박혀 있어서, 여기저기 문자열로 흩어져 있으면 제품명을
-바꿀 때 프리셋과 되돌리기 로그를 잃습니다. 실제로 ARW Selector -> RAW_selector
-로 바꾸면서 겪은 문제라, 이후 이름 변경은 이 파일만 고치면 되도록 모았습니다.
+The name is embedded in the storage paths, so with it scattered around as
+strings everywhere, changing the product name loses the presets and the
+undo logs. That is a problem we actually hit while renaming ARW Selector ->
+RAW_selector, so it was gathered here to make any later rename a matter of
+editing this one file.
 
-저장 위치는 두 갈래입니다:
+There are two branches of storage location:
 
-  data_dir()       실행 파일 옆 `data/`. 프리셋·렌즈 프로필·로그처럼 **앱과
-                   함께 다녀야 하는 것**. USB에 통째로 복사하면 그대로 따라갑니다.
-  user_state_dir() %APPDATA% 등. 마지막으로 연 폴더처럼 **그 PC에서만 의미 있는
-                   상태**만 둡니다.
+  data_dir()       `data/` next to the executable. Things that **have to
+                   travel with the app**, such as presets, lens profiles
+                   and logs. Copy the lot to a USB stick and they come
+                   along.
+  user_state_dir() %APPDATA% and the like. Only **state that means
+                   something on that PC alone**, such as the folder last
+                   opened.
 
-예전 이름/위치는 지우지 않습니다:
-  - 예전 설정 폴더는 시작할 때 새 위치로 복사합니다 (원본 보존).
-  - 사진 폴더 옆 캐시/로그는 폴더마다 흩어져 있어 옮길 수 없으므로,
-    새 이름이 없으면 예전 이름을 찾아 씁니다. 그래야 예전 내보내기를
-    계속 되돌릴 수 있습니다.
+Old names and locations are not deleted:
+  - the old settings folder is copied to the new location at startup (the
+    original is preserved).
+  - the cache/log next to a photo folder is scattered across every folder
+    so it cannot be moved; if the new name is not there, the old name is
+    found and used. That is what keeps old exports undoable.
 """
 
 from __future__ import annotations
@@ -26,34 +32,38 @@ from functools import lru_cache
 from pathlib import Path
 
 APP_NAME = "RAW_selector"
-"""사용자에게 보이는 제품명 (창 제목, EXIF Software, 실행 파일 이름)."""
+"""The product name the user sees (window title, EXIF Software, executable
+name)."""
 
 APP_DIR_NAME = "raw_selector"
-"""설정 폴더 이름 (%APPDATA%/... 또는 ~/Library/Application Support/...)."""
+"""Settings folder name (%APPDATA%/... or ~/Library/Application
+Support/...)."""
 
 DATA_DIR_NAME = "data"
-"""실행 파일 옆에 두는 데이터 폴더 이름."""
+"""Name of the data folder kept next to the executable."""
 
 CACHE_DIR_NAME = ".raw_selector_cache"
-"""사진 폴더 옆에 두는 분석 캐시 · 내보내기 되돌리기 로그 폴더."""
+"""The folder kept next to the photo folder for the analysis cache and the
+export undo logs."""
 
 LOG_FILE_NAME = "raw_selector.log"
 
 STATE_FILE_NAME = "state.json"
-"""기기별 상태 파일 (마지막으로 연 폴더 등)."""
+"""Per-machine state file (the folder last opened and so on)."""
 
 LEGACY_APP_DIR_NAMES: tuple[str, ...] = ("arw_selector",)
-"""예전 설정 폴더 이름들. 시작 시 새 폴더로 복사해 옵니다."""
+"""Old settings folder names. Copied into the new folder at startup."""
 
 LEGACY_CACHE_DIR_NAMES: tuple[str, ...] = (".arw_selector_cache",)
-"""예전 캐시/로그 폴더 이름들. 새 이름이 없을 때 대신 읽습니다."""
+"""Old cache/log folder names. Read instead when the new name is absent."""
 
 
 def app_root() -> Path:
-    """실행 파일이 있는 폴더 (소스로 돌릴 때는 저장소 최상위).
+    """The folder the executable is in (the repository root when running
+    from source).
 
-    Nuitka standalone은 컴파일된 모듈에 __compiled__ 를 넣어 줍니다.
-    PyInstaller는 sys.frozen 을 씁니다. 둘 다 아니면 소스 트리입니다.
+    Nuitka standalone puts __compiled__ into the compiled module.
+    PyInstaller uses sys.frozen. Neither one means it is the source tree.
     """
     if getattr(sys, "frozen", False) or "__compiled__" in globals():
         return Path(sys.executable).resolve().parent
@@ -61,7 +71,7 @@ def app_root() -> Path:
 
 
 def _config_root() -> Path:
-    """플랫폼별 사용자 설정 폴더의 부모."""
+    """The parent of the per-platform user settings folder."""
     if sys.platform == "win32":
         base = os.environ.get("APPDATA")
         return Path(base) if base else Path.home() / "AppData" / "Roaming"
@@ -72,19 +82,20 @@ def _config_root() -> Path:
 
 
 def user_state_dir() -> Path:
-    """그 PC에서만 의미 있는 상태를 두는 곳 (마지막으로 연 폴더 등).
+    """Where state that means something on that PC alone lives (the folder
+    last opened and so on).
 
-    프리셋 같은 콘텐츠는 여기 두지 않습니다 — 앱을 다른 PC로 옮기면
-    따라가지 않기 때문입니다.
+    Content such as presets is not kept here - it would not come along if
+    the app were moved to another PC.
     """
     return _config_root() / APP_DIR_NAME
 
 
 def _is_writable(path: Path) -> bool:
-    """실제로 파일을 만들어 보고 판단합니다.
+    """Decides by actually trying to create a file.
 
-    Program Files처럼 권한이 막힌 곳에 설치했을 수 있어서, 존재 여부만으로는
-    알 수 없습니다.
+    It may have been installed somewhere permission-blocked such as Program
+    Files, so existence alone does not tell you.
     """
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -96,25 +107,29 @@ def _is_writable(path: Path) -> bool:
         return False
 
 
-#: 쓰기가 막힌 곳에서 실행할 때 사용자 폴더로 복사해 와야 하는 것들.
-#: logs는 실행 중에 생기는 것이라 넣지 않습니다.
+#: What has to be copied into the user folder when running from a
+#: write-blocked location. logs is left out because it is created at run
+#: time.
 _SEEDED_DIRS = ("select_presets", "develop_presets", "watermark_presets",
                 "lensfun", "calibration")
 
 
 def _seed_from_bundle(target: Path) -> None:
-    """같이 담겨 온 기본 데이터를 사용자 폴더로 옮겨 놓습니다.
+    """Puts the default data shipped alongside into the user folder.
 
-    쓰기가 막힌 곳(맥이면 .app 안, 윈도우면 Program Files)에서 실행하면
-    data/가 사용자 폴더로 물러나는데, 그때 번들에 함께 담긴 **판정 프리셋과
-    렌즈 프로필 XML이 통째로 안 보였습니다**. 보정 프리셋만 코드에서 다시
-    만들어 넣고 있어서(`presets.install_default_profiles`) 그쪽만 멀쩡해
-    더 알아채기 어려웠습니다.
+    Running from a write-blocked location (inside the .app on macOS,
+    Program Files on Windows) makes data/ fall back to the user folder, and
+    at that point the **scoring presets and the lens profile XML bundled
+    with it were invisible wholesale**. Only the adjustment presets are
+    re-generated from code (`presets.install_default_profiles`), so that
+    side alone was fine, which made it harder to notice.
 
-    실측(0.15.1, DMG에서 바로 실행): 판정 프리셋 0개로 자체 점검이 실패하고,
-    렌즈 DB가 바디 1052/렌즈 1609에서 948/1304로 줄었습니다.
+    Measured (0.15.1, run straight from the DMG): the self-check failed
+    with 0 scoring presets, and the lens DB shrank from 1052 bodies / 1609
+    lenses to 948 / 1304.
 
-    이미 있는 파일은 건드리지 않습니다 — 사용자가 고쳐 둔 것이 우선입니다.
+    Files that are already there are not touched - what the user has
+    changed takes priority.
     """
     import shutil
 
@@ -135,28 +150,33 @@ def _seed_from_bundle(target: Path) -> None:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(item, destination)
         except OSError:
-            # 복사에 실패해도 앱은 떠야 합니다. 빠진 것은 자체 점검이 셉니다.
+            # The app has to come up even if the copy fails. The
+            # self-check counts what is missing.
             pass
 
 
 @lru_cache(maxsize=1)
 def data_dir() -> Path:
-    """프리셋·렌즈 프로필·로그를 두는 곳. 기본은 실행 파일 옆입니다.
+    """Where presets, lens profiles and logs live. Next to the executable
+    by default.
 
-    앱 폴더를 통째로 복사하면 프리셋도 같이 따라가는 게 자연스럽습니다.
-    다만 쓰기가 막힌 위치(Program Files, .app 번들 안 등)에 설치했다면
-    저장이 아예 안 되므로, 그때는 사용자 폴더로 물러납니다.
+    It is natural for the presets to come along when the whole app folder
+    is copied. But if it was installed somewhere write-blocked (Program
+    Files, inside the .app bundle, and so on), saving would not work at
+    all, so in that case it falls back to the user folder.
     """
     candidate = app_root() / DATA_DIR_NAME
     if _is_writable(candidate):
         return candidate
     fallback = user_state_dir() / DATA_DIR_NAME
     fallback.mkdir(parents=True, exist_ok=True)
-    # 물러났으면 번들의 기본 데이터를 옮겨 옵니다. lru_cache라 한 번만 돕니다.
+    # Having fallen back, bring over the bundle's default data. lru_cache
+    # means this runs only once.
     _seed_from_bundle(fallback)
     return fallback
 
 
 def is_portable() -> bool:
-    """데이터가 실행 파일 옆에 있는지 (쓰기 불가로 폴백했으면 False)."""
+    """Whether the data is next to the executable (False if it fell back
+    because it was not writable)."""
     return data_dir() == app_root() / DATA_DIR_NAME

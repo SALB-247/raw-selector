@@ -1,1 +1,1 @@
-"""PySide6 데스크톱 UI. 코어 로직은 arw_selector.core에만 있습니다."""
+"""PySide6 desktop UI. The core logic lives only in arw_selector.core."""
