@@ -216,6 +216,11 @@ class ImageView(QWidget):
         if ratio:
             self._center_ratio_crop(ratio)
             self._emit_crop()
+            # A ratio lays a *finished* crop out, not a drag in progress.
+            # Announced only as crop_changed, it sat in the sliders silently
+            # and never reached the panel's commit - so with the geometry
+            # section still off it was dropped the moment crop mode closed.
+            self.crop_finished.emit()
         self.update()
 
     def _center_ratio_crop(self, ratio: float) -> None:

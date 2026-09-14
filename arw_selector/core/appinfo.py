@@ -11,7 +11,8 @@ There are two branches of storage location:
   data_dir()       `data/` next to the executable. Things that **have to
                    travel with the app**, such as presets, lens profiles
                    and logs. Copy the lot to a USB stick and they come
-                   along.
+                   along. **Except inside a macOS .app**, where it is always
+                   the user folder - see data_dir() for why.
   user_state_dir() %APPDATA% and the like. Only **state that means
                    something on that PC alone**, such as the folder last
                    opened.
@@ -41,6 +42,16 @@ Support/...)."""
 
 DATA_DIR_NAME = "data"
 """Name of the data folder kept next to the executable."""
+
+DATA_DIR_ENV = "RAW_SELECTOR_DATA_DIR"
+"""Environment variable that points data_dir() somewhere else.
+
+It exists so a check can start from nothing. The build runs the bundled
+app's self-check with this set to an empty folder: without it the check
+reads whatever the build machine's user folder has collected, and a bundle
+missing its presets or lens profiles passes because an earlier run left
+copies there - the same way a release once passed its check with the
+scoring presets missing altogether."""
 
 CACHE_DIR_NAME = ".raw_selector_cache"
 """The folder kept next to the photo folder for the analysis cache and the
@@ -155,6 +166,19 @@ def _seed_from_bundle(target: Path) -> None:
             pass
 
 
+def _inside_macos_bundle() -> bool:
+    """Whether this is the executable inside a macOS .app bundle.
+
+    A source checkout is never a bundle: app_root() is the repository root
+    there, not `Something.app/Contents/MacOS`.
+    """
+    if sys.platform != "darwin":
+        return False
+    root = app_root()
+    return (root.name == "MacOS" and root.parent.name == "Contents"
+            and root.parent.parent.suffix == ".app")
+
+
 @lru_cache(maxsize=1)
 def data_dir() -> Path:
     """Where presets, lens profiles and logs live. Next to the executable
@@ -162,16 +186,43 @@ def data_dir() -> Path:
 
     It is natural for the presets to come along when the whole app folder
     is copied. But if it was installed somewhere write-blocked (Program
-    Files, inside the .app bundle, and so on), saving would not work at
-    all, so in that case it falls back to the user folder.
+    Files and the like), saving would not work at all, so in that case it
+    falls back to the user folder.
+
+    **Inside a macOS .app it is always the user folder**, even though a
+    bundle dragged into Applications belongs to the user and is writable.
+    Two things go wrong when the app writes into its own bundle:
+
+    - The bundle is sealed by its code signature. The first launch writes
+      a log and the default scoring presets into it, and from then on
+      `codesign --verify` reports "a sealed resource is missing or
+      invalid" - the state Gatekeeper refuses as damaged the next time it
+      assesses the app.
+    - Updating replaces the whole bundle. Every preset, colour calibration
+      and measured lens profile saved inside it goes with the old copy,
+      and measured profiles are built up one focal length and aperture at
+      a time.
+
+    Windows keeps the portable layout: a new version is unzipped into its
+    own folder, so nothing is overwritten.
     """
+    override = os.environ.get(DATA_DIR_ENV)
+    if override:
+        target = Path(override)
+        target.mkdir(parents=True, exist_ok=True)
+        _seed_from_bundle(target)
+        return target
     candidate = app_root() / DATA_DIR_NAME
-    if _is_writable(candidate):
+    # The bundle check comes first: _is_writable() probes by creating a
+    # file, and doing that inside the bundle is what breaks the seal.
+    if not _inside_macos_bundle() and _is_writable(candidate):
         return candidate
     fallback = user_state_dir() / DATA_DIR_NAME
     fallback.mkdir(parents=True, exist_ok=True)
-    # Having fallen back, bring over the bundle's default data. lru_cache
-    # means this runs only once.
+    # Bring over the bundle's default data - and, since every file is
+    # copied, anything a user had saved inside a bundle the app is now
+    # running from. Nothing already there is overwritten. lru_cache means
+    # this runs only once.
     _seed_from_bundle(fallback)
     return fallback
 

@@ -216,6 +216,24 @@ A section that is not applying anything reads **(off)** in its header, and a
 photo you have not edited opens with every section off; touching any control
 switches its section back on.
 
+For a lens the lensfun database does not know, **Measure lens profile from
+this camera JPEG** fits one from the shot itself. The camera has already
+corrected its embedded JPEG — corners brightened, distortion straightened —
+and the neutral develop has not: the brightness ratio is the vignetting the
+camera applied, the patch-by-patch displacement (phase correlation) is its
+distortion. Distortion terms are fitted *through lensfunpy itself*, so what
+is minimised is exactly what the engine will apply. It reproduces the camera
+(vignetting ×1.14 at the corner on a Tamron 150-500 where lensfun's
+flat-field profile says ×2.2; distortion to under 1px on a 50MP frame), refuses
+frames that cannot be measured (dark corners, no texture, body correction
+off), and gathers focal/aperture pairs of the same lens into one profile. Not
+tied to one maker: the camera JPEG is first brought onto the neutral
+develop's tone (learnt from the frame's middle, where no lens vignettes), so
+picture styles cancel — verified on Sony A1, Canon R6 Mark II/III, Nikon Z 9
+and Panasonic S1R / S5 II X (whose 1920px embedded preview is compared at
+its own size, and whose wide end's 240px corner moves are read coarse to
+fine).
+
 **Match camera JPEG** fits exposure, tone curve and saturation to the RAW's own
 embedded camera render (~16ms), so a develop starts where the JPEG you culled by
 looked instead of at a flat neutral one — measured on 31 real files, luma MAE
@@ -245,10 +263,14 @@ files, and place-grouping is pure coordinate maths with no outside network call.
 
 ## Presets
 
-Both judging and develop settings save as presets, in `data/` next to the
-executable (repo root when run from source), falling back to the user folder
-(`%APPDATA%\raw_selector\` / `~/Library/Application Support/raw_selector/`) only
-where that's read-only. They're plain YAML you can edit or hand to someone else.
+Both judging and develop settings save as presets. On Windows they live in
+`data/` next to the executable (the repo root when run from source), falling
+back to `%APPDATA%\raw_selector\data\` only where that's read-only. The macOS
+app always keeps them in `~/Library/Application Support/raw_selector/data/`:
+writing inside the signed bundle breaks its seal, and replacing the app to
+update would take everything saved in it along. Colour calibrations and
+measured lens profiles sit in the same folder. Presets are plain YAML you can
+edit or hand to someone else.
 
 ## Cache
 

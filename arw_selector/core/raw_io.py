@@ -605,23 +605,57 @@ class WhiteBalance:
         return (self.camera, self.daylight)
 
 
+_PER_FILE_CACHE_LIMIT = 512
+_WB_CACHE: dict = {}
+"""White balance by file key (path, mtime, size). Filled by the demosaic,
+which has the file open anyway - reading it separately opens and unpacks
+the RAW again, 0.18s on a 50MP ARW, on every switch of shot."""
+
+
+def _file_key(path: Path):
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return None
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
+def _remember(cache: dict, key, value) -> None:
+    if key is None:
+        return
+    if len(cache) >= _PER_FILE_CACHE_LIMIT:
+        cache.clear()
+    cache[key] = value
+
+
+def _white_balance_of(raw) -> "WhiteBalance | None":
+    camera = tuple(float(x) for x in raw.camera_whitebalance)
+    daylight = tuple(float(x) for x in raw.daylight_whitebalance)
+    if len(camera) < 3 or len(daylight) < 3 or daylight[1] == 0:
+        return None
+    return WhiteBalance(camera, daylight, _estimate_as_shot_kelvin(camera, daylight))
+
+
 def read_white_balance(path: Path) -> "WhiteBalance | None":
     """Read WB multipliers from a RAW and estimate the as-shot kelvin.
 
     Fast, because it reads metadata only, with no demosaic. On failure it
     returns None so the caller can carry on without any colour temperature
-    adjustment.
+    adjustment. A file the demosaic has already opened is answered from
+    the cache without touching the file.
     """
+    key = _file_key(path)
+    if key in _WB_CACHE:
+        return _WB_CACHE[key]
     try:
         with rawpy.imread(str(path)) as raw:
-            camera = tuple(float(x) for x in raw.camera_whitebalance)
-            daylight = tuple(float(x) for x in raw.daylight_whitebalance)
+            wb = _white_balance_of(raw)
     except Exception:  # noqa: BLE001 - adjustment goes on even without WB
         return _white_balance_without_libraw(path)
-
-    if len(camera) < 3 or len(daylight) < 3 or daylight[1] == 0:
+    if wb is None:
         return _white_balance_without_libraw(path)
-    return WhiteBalance(camera, daylight, _estimate_as_shot_kelvin(camera, daylight))
+    _remember(_WB_CACHE, key, wb)
+    return wb
 
 
 NIKON_DAYLIGHT_FALLBACK = (1.9578, 0.945, 1.1413)
@@ -808,7 +842,8 @@ def load_demosaiced(
         # per-channel offset difference casts it magenta. We estimate it
         # from the sensor data directly and correct it. Supported bodies are
         # left alone.
-        black_override = _repair_black_level(raw)
+        file_key = _file_key(path)
+        black_override = _black_level_for(raw, file_key)
         if black_override is not None:
             params["user_black"] = black_override
 
@@ -847,6 +882,15 @@ def load_demosaiced(
         else:
             params["use_camera_wb"] = True
         rgb = raw.postprocess(**params)
+        # The file is open here - keep what the develop view asks for
+        # next, so it does not open the file again. After postprocess:
+        # read before it, the multipliers cost 0.16s.
+        try:
+            wb = _white_balance_of(raw)
+            if wb is not None:
+                _remember(_WB_CACHE, file_key, wb)
+        except Exception:  # noqa: BLE001 - only a cache
+            pass
     # postprocess has already applied the camera flip. We move 16-bit
     # (0~65535) to float 0~255 - the fraction survives, so the gradation
     # stays intact.
@@ -896,9 +940,16 @@ def _channel_floors(raw) -> list[float] | None:
     if image.size == 0:
         return None
 
+    phase = _bayer_phase(colors)
     floors: list[float] = []
     for index in range(4):
-        values = image[colors == index]
+        if phase is not None:
+            # A 2x2 Bayer: each colour is one strided plane. Four boolean
+            # masks over a 32MP frame took 0.55s (R6M3, on every load).
+            oy, ox = phase[index]
+            values = image[oy::2, ox::2].ravel()
+        else:
+            values = image[colors == index]
         if values.size < 256:
             return None
         # Median of the darkest 0.1%. A median rather than a mean, so hot
@@ -907,6 +958,77 @@ def _channel_floors(raw) -> list[float] | None:
         darkest = np.partition(values, count)[:count]
         floors.append(float(np.median(darkest)))
     return floors
+
+
+def _bayer_phase(colors: np.ndarray) -> "dict[int, tuple[int, int]] | None":
+    """Colour index -> (row, column) offset of its plane in a 2x2 Bayer
+    mosaic, read off the array's own first cell. None for anything else
+    (X-Trans), where the caller falls back to masks."""
+    try:
+        cell = np.asarray(colors[:2, :2])
+    except Exception:  # noqa: BLE001
+        return None
+    if cell.shape != (2, 2):
+        return None
+    phase = {int(cell[y, x]): (y, x) for y in range(2) for x in range(2)}
+    if len(phase) != 4 or colors.shape[0] < 4 or colors.shape[1] < 4:
+        return None
+    # the pattern has to actually repeat with period 2
+    if not np.array_equal(np.asarray(colors[2:4, 2:4]), cell):
+        return None
+    return phase
+
+
+_BLACK_CACHE: dict = {}
+"""The black-level decision by file key: (user_black or None, per-colour
+pedestal to add back). Measuring the floors is a quarter second on a
+32MP body LibRaw does not know, and the develop view demosaics the same
+file twice (half for the screen, full for Full Render)."""
+
+
+def _add_pedestal(raw, extras: "list[int]") -> None:
+    """Add extras[colour] back into the sensor data in place (see
+    _repair_black_level), clamped at the white level."""
+    image = raw.raw_image  # writable view - postprocess uses these values
+    colors = raw.raw_colors
+    white = int(raw.white_level)
+    phase = _bayer_phase(colors)
+    for index in range(4):
+        extra = int(extras[index])
+        if extra <= 0:
+            continue
+        if phase is not None:
+            oy, ox = phase[index]
+            plane = image[oy::2, ox::2]
+            plane[...] = np.minimum(plane.astype(np.int32) + extra,
+                                    white).astype(image.dtype)
+        else:
+            mask = colors == index
+            # Adding near saturation overflows white. Clamp at the white
+            # level.
+            image[mask] = np.minimum(
+                image[mask].astype(np.int32) + extra, white
+            ).astype(image.dtype)
+
+
+def _black_level_for(raw, file_key) -> int | None:
+    """_repair_black_level, with the decision kept by file key (see
+    _file_key) between the two demosaics of one file - measuring the
+    floors is a quarter second on a 32MP body LibRaw does not know. The
+    pedestal is still added to this raw's own pixels, which are fresh."""
+    if file_key is None:
+        return _repair_black_level(raw)
+    if file_key in _BLACK_CACHE:
+        override, extras, fallback = _BLACK_CACHE[file_key]
+        if extras is not None:
+            try:
+                _add_pedestal(raw, extras)
+            except Exception:  # noqa: BLE001 - a failure here must not stop develop
+                return fallback
+        return override
+    decision = _decide_black_level(raw)
+    _remember(_BLACK_CACHE, file_key, decision)
+    return decision[0]
 
 
 def _repair_black_level(raw) -> int | None:
@@ -932,19 +1054,26 @@ def _repair_black_level(raw) -> int | None:
     normal body throws it off badly instead (measured: R6 Mark II error
     0.109 -> 0.785).
     """
+    return _decide_black_level(raw)[0]
+
+
+def _decide_black_level(raw) -> "tuple[int | None, list[int] | None, int | None]":
+    """(user_black or None, pedestal added per colour or None, the value
+    to fall back on when adding the pedestal fails). Adds the pedestal to
+    this raw's pixels on the way."""
     try:
         black = list(raw.black_level_per_channel)
         sample = raw.raw_image_visible[::3, ::3]
     except Exception:  # noqa: BLE001
-        return None
+        return None, None, None
     if not black or sample.size == 0:
-        return None
+        return None, None, None
 
     floor = float(np.percentile(sample, 0.5))
     # Reported black far below the sensor floor = the pedestal was missed.
     # Anything else is a supported body, so we do nothing.
     if max(black) >= floor * 0.5:
-        return None
+        return None, None, None
 
     reported_spread = max(black) - min(black)
     if reported_spread <= 32:
@@ -952,41 +1081,30 @@ def _repair_black_level(raw) -> int | None:
         # A bright scene has no true black, so the sensor floor measures
         # high; without this condition we would wrongly crush a bright photo
         # from a camera whose black really is 0.
-        return None
+        return None, None, None
 
     measured = _channel_floors(raw)
     if measured is None:
-        return int(floor)
+        return int(floor), None, None
     measured_spread = max(measured) - min(measured)
 
     # A reported channel spread much larger than the measured one is
     # imaginary. The margin (32) is there to clear the measurement spread
     # that noise produces.
     if reported_spread <= measured_spread + 32:
-        return int(floor)  # real channel offset - fill the pedestal only
+        return int(floor), None, None  # real channel offset - fill the pedestal only
 
     low = min(black)
+    extras = [int(b - low) for b in black]
     try:
-        image = raw.raw_image  # writable view - postprocess uses these values
-        colors = raw.raw_colors
-        white = int(raw.white_level)
-        for index in range(4):
-            extra = black[index] - low
-            if extra <= 0:
-                continue
-            mask = colors == index
-            # Adding near saturation overflows white. Clamp at the white
-            # level.
-            image[mask] = np.minimum(
-                image[mask].astype(np.int32) + extra, white
-            ).astype(image.dtype)
+        _add_pedestal(raw, extras)
     except Exception:  # noqa: BLE001 - a failure here must not stop develop
-        return int(floor)
+        return int(floor), None, None
 
     # We added (cblack[c] - low) to the pixels, so the global black has to
     # come down by the same amount for exactly floor to be subtracted from
     # every channel.
-    return int(floor) - low
+    return int(floor) - low, extras, int(floor)
 
 
 def to_display(image: np.ndarray) -> np.ndarray:
@@ -1018,6 +1136,22 @@ def to_display(image: np.ndarray) -> np.ndarray:
 def _flip_to_orientation(flip: int) -> int:
     """Convert LibRaw's flip value to an EXIF Orientation."""
     return {0: 1, 3: 3, 5: 8, 6: 6}.get(flip, 1)
+
+
+def image_area(path: Path) -> tuple[int, int] | None:
+    """The camera's own image area (width, height) in sensor orientation -
+    the frame its JPEG covers - from LibRaw's crop rectangle. None when
+    the file carries none. Opens the file without decoding it."""
+    try:
+        with rawpy.imread(str(path)) as raw:
+            sizes = raw.sizes
+    except Exception:  # noqa: BLE001 - not a RAW, or one LibRaw cannot open
+        return None
+    width = int(getattr(sizes, "crop_width", 0) or 0)
+    height = int(getattr(sizes, "crop_height", 0) or 0)
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
 
 
 # ---------------------------------------------------------------- metadata

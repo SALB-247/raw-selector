@@ -9,6 +9,7 @@ keeps breaking.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -260,6 +261,81 @@ def _remap_box(
     return (x, y, w, h)
 
 
+_BASE_CACHE: dict = {}
+_BASE_CACHE_LOCK = threading.Lock()
+BASE_CACHE_SLOTS = 6
+"""Preview bases - the half demosaic shrunk to PREVIEW_LONG_EDGE, about
+16MB each at 50MP - by (file, colour temperature, highlight recovery).
+
+Filled ahead of time for the shots next to the one on screen
+(BasePrefetchWorker) and by the window's own load, so stepping to the
+next shot - or back to the last - finds the base ready instead of
+demosaicing on the main thread (0.6s at 50MP; 2s before the profile
+curve went to a table). Six slots: the shot on screen, two ahead, one
+behind, and room for the direction to turn."""
+
+
+def _base_key(path: Path, kelvin: int, highlight: bool):
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return None
+    return (str(path), stat.st_mtime_ns, stat.st_size, int(kelvin), bool(highlight))
+
+
+def _cached_base(key):
+    with _BASE_CACHE_LOCK:
+        return _BASE_CACHE.get(key)
+
+
+def _store_base(key, value) -> None:
+    if key is None:
+        return
+    with _BASE_CACHE_LOCK:
+        _BASE_CACHE.pop(key, None)
+        _BASE_CACHE[key] = value
+        while len(_BASE_CACHE) > BASE_CACHE_SLOTS:
+            _BASE_CACHE.pop(next(iter(_BASE_CACHE)))
+
+
+def build_preview_base(path: Path, kelvin: int, highlight: bool):
+    """The develop view's base for one shot: the half demosaic at this
+    colour temperature and highlight setting, shrunk to PREVIEW_LONG_EDGE,
+    with the sensor width the ROI coordinates are scaled by."""
+    from ..core.raw_io import load_demosaiced, resize_long_edge
+
+    full = load_demosaiced(path, half_size=True, target_kelvin=kelvin or None,
+                           highlight_recovery=highlight)
+    return resize_long_edge(full, PREVIEW_LONG_EDGE), full.shape[1] * 2
+
+
+class BasePrefetchWorker(QThread):
+    """Builds the preview bases of the shots next to the one on screen,
+    in the order they are likely to be wanted. A base already in the
+    cache is skipped; cancel() stops it between files (a demosaic under
+    way runs to its end, as any rawpy call does)."""
+
+    def __init__(self, jobs: "list[tuple[Path, int, bool]]"):
+        super().__init__()
+        self._jobs = jobs
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        for path, kelvin, highlight in self._jobs:
+            if self._cancelled:
+                return
+            key = _base_key(path, kelvin, highlight)
+            if key is None or _cached_base(key) is not None:
+                continue
+            try:
+                _store_base(key, build_preview_base(path, kelvin, highlight))
+            except Exception:  # noqa: BLE001 - the window loads it itself then
+                log.debug("이웃 컷 베이스 준비 실패: %s", path.name, exc_info=True)
+
+
 class FinalRenderWorker(QThread):
     """Actually demosaics the RAW to build the Full Render preview.
 
@@ -276,6 +352,12 @@ class FinalRenderWorker(QThread):
        While zooming and panning the same shot, the 5.1s is not spent again.
     2. When zoomed in, only **the region visible on screen** is adjusted. At
        4x zoom the adjustments go from 3.4s -> 0.22s (measured).
+
+    Later measurement (2026-09-14, A1 50MP): of the 7.4s "demosaic", LibRaw
+    itself was 1.3s and the profile curve on 150M values 5s - the curve is
+    a table now and the load is 2.3s. The optical correction the zoomed
+    region needs is read for that region only (engine.apply_optics_stage
+    with `region`), 0.3s instead of 13s on the whole frame per pan.
     """
 
     done = Signal(object)     # the finished BGR image
@@ -343,21 +425,18 @@ class FinalRenderWorker(QThread):
             settings = self._settings
             scene_hw = None
             if self.region is not None:
-                # Apply optical correction **before cutting**. Distortion and
-                # vignetting are computed from the frame centre and size, so
-                # applying them to a piece treats that piece as the whole
-                # frame (measured 25.9 levels on average, +52.7 at the
-                # corners). The settings that come back have optics
-                # neutralised, so apply_settings below does not apply them a
-                # second time.
-                image, settings = engine.apply_optics_stage(
-                    image, settings, self._path, self._metadata)
-                if self._cancelled:
-                    return
-
-                # The visible region only. Leaving the crop settings in place
-                # after cutting would crop twice, so geometry is passed on
-                # neutralised here.
+                # The visible region only, corrected **as part of the whole
+                # frame**. Distortion and vignetting are computed from the
+                # frame centre and size, so applying them to a piece treats
+                # that piece as the whole frame (measured 25.9 levels on
+                # average, +52.7 at the corners). The optics stage takes the
+                # whole frame and the piece's bounds, corrects only the
+                # pixels the piece draws from, and hands the piece back -
+                # correcting the whole 50MP frame first and cutting
+                # afterwards was 13 seconds on every pan. The settings that
+                # come back have optics neutralised, so apply_settings below
+                # does not apply them a second time; geometry is passed on
+                # neutralised too, or the crop would be applied twice.
                 height, width = image.shape[:2]
                 left, top, right, bottom = self.region
                 x0 = max(0, min(width - 1, int(left * width)))
@@ -365,7 +444,11 @@ class FinalRenderWorker(QThread):
                 x1 = max(x0 + 1, min(width, int(right * width)))
                 y1 = max(y0 + 1, min(height, int(bottom * height)))
                 frame_hw = (height, width)          # scene size before crop
-                image = _np.ascontiguousarray(image[y0:y1, x0:x1])
+                image, settings = engine.apply_optics_stage(
+                    image, settings, self._path, self._metadata,
+                    region=(x0, y0, x1, y1))
+                if self._cancelled:
+                    return
                 # The main-subject coordinates are re-based on the cut piece
                 # too. Otherwise the mask moves to the wrong face, but only
                 # when zoomed in.
@@ -516,6 +599,10 @@ class LoupeDialog(QDialog):
         self._source: np.ndarray | None = None
         self._wb = None  # raw_io.WhiteBalance - for absolute Kelvin
         self._final_worker = None  # the Full Render thread
+        self._prefetch_worker: BasePrefetchWorker | None = None
+        self._step_direction = 1
+        """Which way the last step went, so the bases prepared ahead are
+        the ones about to be shown."""
         # Workers cancelled but still running. Drop the reference and Qt
         # kills the process.
         self._retired_workers: list[FinalRenderWorker] = []
@@ -738,7 +825,11 @@ class LoupeDialog(QDialog):
         self.preview = ImageView()
         self.preview.set_message(tr("Loading…"))
         self.preview.crop_changed.connect(self._on_crop_dragged)
-        self.preview.crop_finished.connect(self._on_settings_changed)
+        # Through the panel, not straight to the render: the drag pushed
+        # its values in silently, and the panel is where a switched-off
+        # section wakes. Straight to the render, an off geometry section
+        # handed back no crop at all.
+        self.preview.crop_finished.connect(self._commit_external_edit)
         self.preview.zoom_changed.connect(self._on_zoom)
         self.preview.pan_finished.connect(self._schedule_full_render)
         viewer.addWidget(self.preview, 1)
@@ -789,6 +880,7 @@ class LoupeDialog(QDialog):
         self.panel = DevelopPanel()
         self.panel.settings_changed.connect(self._on_settings_changed)
         self.panel.camera_match_requested.connect(self._match_camera_look)
+        self.panel.lens_profile_requested.connect(self._measure_lens_profile)
         self.panel.crop_mode_changed.connect(self._on_crop_mode)
         self.panel.pick_mode_changed.connect(self._on_pick_mode)
         self.panel.mask_overlay_changed.connect(self._render)
@@ -799,7 +891,7 @@ class LoupeDialog(QDialog):
         self.preview.brush_painted.connect(self._on_brush_paint)
         self.preview.clicked.connect(self._on_preview_clicked)
         self.preview.shape_changed.connect(self._on_shape_dragged)
-        self.preview.shape_finished.connect(self._on_settings_changed)
+        self.preview.shape_finished.connect(self._commit_external_edit)
         right.addWidget(self.panel, 1)
 
         container = QWidget()
@@ -1015,6 +1107,7 @@ class LoupeDialog(QDialog):
         previous_path = self.record.path
         self.index = target
         self.record = self.records[target]
+        self._step_direction = 1 if delta > 0 else -1
         # Moving shots makes the held demosaic source (about 390MB) useless
         self._drop_demosaic()
         self._load_current()
@@ -1049,6 +1142,50 @@ class LoupeDialog(QDialog):
             kelvin = 0      # no sensor data, so the demosaic ignores it
         self._load_base(basic.highlight_recovery, kelvin)
         self._load_context()
+        self._prefetch_neighbours()
+
+    @staticmethod
+    def _base_request(record) -> "tuple[Path, int, bool]":
+        """What _load_current would demosaic for this record: the saved
+        colour temperature (as-shot for a JPEG) and highlight setting."""
+        from ..core.raw_io import is_editable_image
+
+        basic = (record.develop or DevelopSettings()).basic
+        kelvin = int(basic.temperature) if basic.temperature > 0 else 0
+        if is_editable_image(record.path):
+            kelvin = 0
+        return record.path, kelvin, bool(basic.highlight_recovery)
+
+    def _prefetch_neighbours(self) -> None:
+        """Prepares the bases of the shots about to be stepped to: two
+        ahead in the direction of travel, one behind."""
+        offsets = (1, 2, -1) if self._step_direction >= 0 else (-1, -2, 1)
+        jobs = [self._base_request(self.records[self.index + d])
+                for d in offsets if 0 <= self.index + d < len(self.records)]
+        jobs = [job for job in jobs
+                if _cached_base(_base_key(*job)) is None]
+        self._cancel_prefetch()
+        if not jobs:
+            return
+        worker = BasePrefetchWorker(jobs)
+        self._prefetch_worker = worker
+        worker.start()
+
+    def _cancel_prefetch(self) -> None:
+        """Lets go of the prefetch thread. It is not waited for: a
+        demosaic under way finishes at its own pace, kept alive at module
+        level like a retired render (destroying a running QThread is a
+        crash)."""
+        worker = self._prefetch_worker
+        self._prefetch_worker = None
+        if worker is None:
+            return
+        try:
+            worker.cancel()
+            if worker.isRunning():
+                _detach_until_finished(worker)
+        except RuntimeError:
+            pass
 
     def _load_base(self, highlight_recovery: bool, kelvin: int = 0) -> None:
         """Builds the preview base (demosaic).
@@ -1077,11 +1214,17 @@ class LoupeDialog(QDialog):
             # embedded JPEG's colour and gradation are a camera render, so it
             # is never used here. Done at half-size for responsiveness (the
             # Full Render button goes to full resolution).
-            full = load_demosaiced(self.record.path, half_size=True,
-                                   target_kelvin=kelvin or None,
-                                   highlight_recovery=highlight_recovery)
-            self._source = resize_long_edge(full, PREVIEW_LONG_EDGE)
-            self._roi_scale = self._resolve_roi_scale(full.shape[1] * 2)
+            # Ready already, when a neighbour was prepared ahead or the
+            # shot was stepped back to (see _BASE_CACHE); built here
+            # otherwise, and kept for the same reasons.
+            key = _base_key(self.record.path, kelvin, highlight_recovery)
+            ready = _cached_base(key) if key is not None else None
+            if ready is None:
+                ready = build_preview_base(self.record.path, kelvin,
+                                           highlight_recovery)
+                _store_base(key, ready)
+            self._source, sensor_width = ready
+            self._roi_scale = self._resolve_roi_scale(sensor_width)
             self._base_kelvin = kelvin
             self._degraded = False
             self._degraded_reason = ""
@@ -1257,6 +1400,71 @@ class LoupeDialog(QDialog):
         self.panel.preset_bar.mark_modified()
         self._on_settings_changed()
 
+    def _measure_lens_profile(self) -> None:
+        """The 'Measure vignetting from this camera JPEG' button.
+
+        Measures this shot, stores the profile in the user lens DB, reloads
+        the DB and refreshes the lens line - so a lens that read "not in
+        the DB" a second ago now reads as found, and automatic vignetting
+        correction has something to apply.
+        """
+        from ..core.develop import lens_profile
+        from ..core.develop.optics import find_lens
+        from ..core.raw_io import is_editable_image
+
+        def warn(text: str) -> None:
+            self.panel.set_lens_profile_note(text, ok=False)
+            self.info.setText(
+                f"<b>{self.record.path.name}</b> · "
+                f"<span style='color:{theme.WARNING}'>{text}</span>")
+
+        if (self._source is None or self._degraded
+                or is_editable_image(self.record.path)):
+            warn(tr("Only a RAW with a readable embedded JPEG can be measured."))
+            return
+        # The distortion fit runs lensfun a few dozen times; say so. A
+        # direct repaint, not processEvents - pumping the loop from inside
+        # a handler runs whatever is queued (the deferred base load among
+        # it), which is how a measurement once found its source gone.
+        self.preview.set_busy(True)
+        self.preview.repaint()
+        try:
+            measured = lens_profile.measure_photo(
+                self.record.path, to_display(self._source), self.record.metadata)
+        except Exception as exc:  # noqa: BLE001 - a helper must not take the window down
+            warn(tr("Measurement failed: {error}").format(error=exc))
+            return
+        finally:
+            self.preview.set_busy(False)
+        if measured is None:
+            warn(tr("This file has no lens, focal length or aperture to file "
+                    "the profile under."))
+            return
+        if not measured.usable:
+            warn(tr("Not enough mid-tones out to the corners in this frame "
+                    "(reach {reach:.0%}). Pick a shot lit evenly to the "
+                    "edges and try again.").format(reach=measured.reach))
+            return
+
+        path = lens_profile.store(measured, self.record.metadata)
+        match = find_lens(self.record.metadata)
+        self.panel.set_lens_info(match.summary, match.found)
+        distortion = measured.distortion
+        if distortion is not None and distortion.usable:
+            geometry = tr("distortion fitted to {residual:.1f}px").format(
+                residual=distortion.residual_px)
+        elif distortion is not None and distortion.patches < lens_profile.MIN_PATCHES:
+            geometry = tr("distortion not measured - too little texture")
+        else:
+            geometry = tr("distortion not measured")
+        self.panel.set_lens_profile_note(tr(
+            "Saved: {lens} at {focal:g}mm f/{aperture:g} - corners "
+            "brightened x{gain:.2f}, {geometry}. Profile: {file}"
+        ).format(lens=measured.lens, focal=measured.focal,
+                 aperture=measured.aperture, gain=measured.corner_gain,
+                 geometry=geometry, file=path.name))
+        self._on_settings_changed()
+
     def _maybe_auto_camera_match(self) -> None:
         """Applies automatically if 'Start from camera look' is on in
         preferences.
@@ -1333,6 +1541,19 @@ class LoupeDialog(QDialog):
 
     def _on_settings_changed(self) -> None:
         self._dirty = True
+
+        # The ratio combo lives in the panel, but the crop rectangle it
+        # constrains lives in the preview. While crop mode is up, a change
+        # has to reach the preview here - set_ratio used to run only on
+        # entering crop mode, so picking a ratio with the handles already
+        # showing did nothing. Guarded on a real change: set_ratio commits
+        # through this very handler, and re-laying out on every pass would
+        # loop.
+        if self.preview._crop_mode:
+            wanted = self._ratio_value(
+                self.panel.settings(gated=False).geometry.ratio)
+            if wanted != self.preview._ratio:
+                self.preview.set_ratio(wanted)
 
         # Highlight recovery is a decode-stage option, so reapplying the LUT
         # does not carry it - the base (half demosaic) is rebuilt. It is the
@@ -1445,7 +1666,13 @@ class LoupeDialog(QDialog):
         self.preview.set_busy(False)
 
     def _on_crop_mode(self, enabled: bool) -> None:
-        settings = self.panel.settings().geometry
+        # Ungated on purpose. Crop mode edits the stored rectangle and its
+        # ratio, and the ratio is a constraint on editing rather than an
+        # operation on pixels - so a saved ratio leaves geometry "neutral",
+        # the section opens switched off, and the gated view hands back
+        # FREE. Laying the crop out from here commits it (crop_finished),
+        # which is what switches the section on.
+        settings = self.panel.settings(gated=False).geometry
         self.preview.set_crop(
             settings.crop_left, settings.crop_top,
             settings.crop_right, settings.crop_bottom,
@@ -1467,6 +1694,12 @@ class LoupeDialog(QDialog):
             height, width = self._source.shape[:2]
             return width / height if height else None
         return ratio.value_ratio if ratio else None
+
+    def _commit_external_edit(self) -> None:
+        """The end of a crop or shape drag. Goes through the panel so a
+        switched-off section wakes - see DevelopPanel.commit_external_edit.
+        (A forwarder: the preview is wired up before the panel exists.)"""
+        self.panel.commit_external_edit()
 
     def _on_crop_dragged(self, left: float, top: float, right: float, bottom: float) -> None:
         """Reflects the result of a drag on the image onto the sliders.
@@ -1652,19 +1885,24 @@ class LoupeDialog(QDialog):
             image = clip_overlay(image, show_shadow, show_highlight)
         self._refresh_clip_label()
 
-        # The output markings (watermark, info strip) go on after the
-        # gradation judgement is done.
-        if not self.before_after.isChecked():
-            image = engine.apply_overlays(
-                image, settings, self.record.path, self.record.metadata
-            )
-
+        # Screen markings (the ROI box, the red mask region) go onto the
+        # photo itself, before anything that changes its size. The info
+        # strip is appended below the photo; drawn after it, the ROI was
+        # scaled against photo-plus-strip and sat too high.
         if self._any_overlay_on() and self.record.focus:
             image = self._draw_roi(image)
 
         overlay_mask = self.panel.overlay_mask()
         if overlay_mask is not None:
             image = self._draw_mask_overlay(image, overlay_mask)
+
+        # The output markings (watermark, info strip) go on last, and only
+        # when the screen shows the finished frame - see
+        # _shows_finished_frame.
+        if self._shows_finished_frame():
+            image = engine.apply_overlays(
+                image, settings, self.record.path, self.record.metadata
+            )
 
         self.preview.set_pixmap(bgr_to_pixmap(image))
         self.preview.set_busy(False)
@@ -1799,6 +2037,7 @@ class LoupeDialog(QDialog):
         Waiting freezes the window when the rawpy demosaic runs long, and a
         wait that falls short crashes.
         """
+        self._cancel_prefetch()
         current = self._final_worker
         self._final_worker = None
         retired = self._retired_workers
@@ -2088,15 +2327,31 @@ class LoupeDialog(QDialog):
 
     def _apply_display_overlays(self, image: np.ndarray) -> None:
         """Fast path for blinking - relays only the markings and the ROI,
-        then puts it on screen."""
+        then puts it on screen. Same order as _render: the ROI on the
+        photo first, the strip last."""
         settings = self.panel.settings()
-        if not self.before_after.isChecked():
+        if self._any_overlay_on() and self.record.focus:
+            image = self._draw_roi(image)
+        if self._shows_finished_frame():
             image = engine.apply_overlays(
                 image, settings, self.record.path, self.record.metadata
             )
-        if self._any_overlay_on() and self.record.focus:
-            image = self._draw_roi(image)
         self.preview.set_pixmap(bgr_to_pixmap(to_display(image)))
+
+    def _shows_finished_frame(self) -> bool:
+        """Whether the screen is showing the exported composition rather
+        than an editing frame.
+
+        Only then do the watermark and the info strip go on. While the crop
+        handles or a mask are up, every handle normalises its position
+        against the pixmap - and a strip appended under the photo shifts
+        each y by the strip's height. The crop you drew then cut the photo
+        short, the ratio presets fitted the wrong aspect, and in crop mode
+        the strip looked chopped off by the crop rectangle.
+        """
+        return (not self.before_after.isChecked()
+                and not self.preview._crop_mode
+                and not self._mask_editing_active())
 
     def _resolve_roi_scale(self, sensor_width: int) -> float:
         """The scale to multiply ROI coordinates by when drawing on screen.

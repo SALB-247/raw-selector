@@ -285,6 +285,59 @@ def apply_exposure(levels: np.ndarray, ev: float,
     return from_light(to_light(values, profiled) * (2.0 ** ev), profiled)
 
 
+LEVEL_STEPS = 257
+"""Table resolution for curves indexed by a 0~255 display value: 257
+steps per level, 65536 entries. The demosaic hands over uint16/257, so
+those values land exactly on the grid; anything in between is off by at
+most half a step (0.002 of a level) times the curve's slope."""
+
+LIGHT_STEPS = 262143
+"""Table resolution for curves indexed by light (0~1). Finer than the
+level tables because the display curve is steep at the toe (x12.9), so
+a 1/65536 step there would be 0.05 of a level; at 1/262144 it is 0.012,
+and the table is still 1MB."""
+
+
+@lru_cache(maxsize=2)
+def _light_tables(profiled: bool) -> tuple[np.ndarray, np.ndarray]:
+    """(levels -> light, light -> levels) as float32 lookup tables.
+
+    **Why tables, not np.interp on the pixels.** interp works in float64,
+    single-threaded, and the light conversion runs on every pixel of the
+    frame - twice for vignetting, twice for exposure. On a 50MP frame
+    that was 4.5s each way and 1.2GB of float64 temporaries per pass
+    (the "2.8GB per 27MP" of Full Render was largely this). A gather
+    from a table is 7x faster and stays float32; measured against the
+    interp result, to_light matches to 1e-8 and from_light to 0.02 of a
+    level - below what the curve's own 4096 knots resolve.
+    """
+    linear, display = _baseline_transfer(profiled)
+    levels = np.arange(65536, dtype=np.float64) / (LEVEL_STEPS * 255.0)
+    to = np.interp(levels, display, linear).astype(np.float32)
+    lights = np.arange(LIGHT_STEPS + 1, dtype=np.float64) / LIGHT_STEPS
+    back = (np.interp(lights, linear, display) * 255.0).astype(np.float32)
+    for table in (to, back):
+        table.flags.writeable = False
+    return to, back
+
+
+def _level_index(levels: np.ndarray) -> np.ndarray:
+    """0~255 values -> row of a LEVEL_STEPS table. NaN lands on row 0.
+
+    Three passes over the frame (scale, clip in place, cast) - the cast
+    truncates, so the half added first rounds to nearest. A NaN survives
+    the clip and casts to 0 (numpy warns about the cast; the warning is
+    silenced here, the NaN itself is the upstream fault)."""
+    # np.array copies (the caller's frame is never touched) and the rest
+    # runs in place on that one copy; a 0-d array keeps a scalar working
+    scaled = np.array(levels, dtype=np.float32)
+    scaled *= np.float32(LEVEL_STEPS)
+    scaled += np.float32(0.5)
+    np.clip(scaled, 0.0, 65535.0, out=scaled)
+    with np.errstate(invalid="ignore"):
+        return scaled.astype(np.uint16)
+
+
 def to_light(levels: np.ndarray, profiled: bool = True) -> np.ndarray:
     """0~255 display value -> light (0~1). The space `apply_exposure`
     multiplies in.
@@ -294,9 +347,7 @@ def to_light(levels: np.ndarray, profiled: bool = True) -> np.ndarray:
     found means something different on screen - camera_look actually did
     that, and the value shown on the slider was off by 0.24~0.81 EV.
     """
-    linear, display = _baseline_transfer(profiled)
-    return np.interp(np.clip(np.asarray(levels, dtype=np.float64), 0.0, 255.0)
-                     / 255.0, display, linear)
+    return _light_tables(profiled)[0][_level_index(levels)]
 
 
 def from_light(light: np.ndarray, profiled: bool = True) -> np.ndarray:
@@ -309,11 +360,16 @@ def from_light(light: np.ndarray, profiled: bool = True) -> np.ndarray:
     twice (camera_look's exposure estimation, optics' vignetting).
 
     Light above 1 pins to 255 - the screen cannot draw brighter than
-    that, so it is physically right as well.
+    that, so it is physically right as well. NaN comes out as 0; a caller
+    that needs to notice a NaN checks the light before coming back.
     """
-    linear, display = _baseline_transfer(profiled)
-    return (np.interp(np.asarray(light, dtype=np.float64), linear, display)
-            * 255.0).astype(np.float32)
+    scaled = np.array(light, dtype=np.float32)
+    scaled *= np.float32(LIGHT_STEPS)
+    scaled += np.float32(0.5)
+    np.clip(scaled, 0.0, float(LIGHT_STEPS), out=scaled)
+    with np.errstate(invalid="ignore"):
+        index = scaled.astype(np.int32)
+    return _light_tables(profiled)[1][index]
 
 
 #: The light level where the highlight shoulder starts. Below this
@@ -504,10 +560,12 @@ def apply_camera_profile(image_bgr: np.ndarray) -> np.ndarray:
     adjustments and profile presets are laid on top of it.
     """
     lut = smooth_curve_lut(list(_STANDARD_PROFILE_CURVE))
-    result = _apply_lut(image_bgr.astype(np.float32), lut)
+    # asarray, not astype: on the full 50MP frame each needless copy of
+    # the float32 image is 600MB and a tenth of a second
+    result = _apply_lut(np.asarray(image_bgr, dtype=np.float32), lut)
     if _STANDARD_PROFILE_SATURATION:
         result = _apply_saturation_gain(result, 1.0 + _STANDARD_PROFILE_SATURATION / 100.0)
-    return result.astype(np.float32)
+    return np.asarray(result, dtype=np.float32)
 
 
 def _apply_saturation_gain(image: np.ndarray, gain: float) -> np.ndarray:
@@ -517,9 +575,19 @@ def _apply_saturation_gain(image: np.ndarray, gain: float) -> np.ndarray:
     Each pixel is pushed away from or pulled towards the grey axis while
     its luminance is preserved.
     """
-    gray = image[:, :, 0] * 0.114 + image[:, :, 1] * 0.587 + image[:, :, 2] * 0.299
-    gray = gray[:, :, None]
-    return np.clip(gray + (image - gray) * gain, 0.0, 255.0).astype(np.float32)
+    # gray + (image - gray) * gain, as one 3x3 matrix: gain on the
+    # diagonal, (1 - gain) x the luma weights on every row. cv2.transform
+    # runs it in one multithreaded pass; the numpy version was five
+    # passes over the frame (0.3s of the half-size base on a 50MP shot).
+    weights = np.array([0.114, 0.587, 0.299], dtype=np.float32)
+    matrix = np.float32(gain) * np.eye(3, dtype=np.float32)         + np.float32(1.0 - gain) * weights[None, :]
+    if image.ndim != 3 or image.shape[2] != 3:
+        gray = (image[..., 0] * 0.114 + image[..., 1] * 0.587
+                + image[..., 2] * 0.299)[..., None]
+        return np.clip(gray + (image - gray) * gain, 0.0, 255.0).astype(np.float32)
+    out = cv2.transform(np.ascontiguousarray(image, dtype=np.float32), matrix)
+    np.clip(out, 0.0, 255.0, out=out)
+    return out
 
 
 # The standard regions of the parametric curve - the same quartile
@@ -601,8 +669,13 @@ def _apply_lut(image: np.ndarray, lut: np.ndarray) -> np.ndarray:
     into smooth gradations. Keeping the precision of 14-bit RAW means
     interpolating and applying the curve while still in float.
     """
-    clipped = np.clip(image, 0.0, 255.0)
-    return np.interp(clipped, _IDENTITY, np.clip(lut, 0.0, 255.0)).astype(np.float32)
+    # The 256-knot curve is laid out on the fine level grid once (65536
+    # interp points, well under a millisecond) and the pixels gather from
+    # it - 7x faster than interpolating each pixel in float64, and exact
+    # on the demosaic's own uint16/257 values.
+    fine = np.arange(65536, dtype=np.float64) / LEVEL_STEPS
+    table = np.interp(fine, _IDENTITY, np.clip(lut, 0.0, 255.0)).astype(np.float32)
+    return table[_level_index(image)]
 
 
 # --------------------------------------------------------------- white balance
@@ -1830,6 +1903,7 @@ def apply_optics_stage(
     settings: DevelopSettings,
     source: "Path | None" = None,
     metadata=None,
+    region: "tuple[int, int, int, int] | None" = None,
 ) -> "tuple[np.ndarray, DevelopSettings]":
     """Apply only the optical corrections - **a stage that needs the
     whole frame**.
@@ -1841,17 +1915,22 @@ def apply_optics_stage(
     25.90 levels off on average with 71.9% of pixels off by more than
     5 levels (+52.7 levels at the patch corners).
 
-    To develop only the region visible when zoomed in, call this
-    **before cropping** and then call apply_settings with the settings it
-    hands back. The returned settings have neutral optics, so it can
-    never be applied twice - this is a place where the picture comes out
-    wrong if the order is not kept, so the contract blocks it.
+    To develop only the region visible when zoomed in, pass its pixel
+    bounds as `region` (left, top, right, bottom) with the **whole frame**
+    as the image: the piece comes back corrected as part of the whole,
+    and only the pixels it draws from are touched. Then call
+    apply_settings with the settings it hands back. The returned settings
+    have neutral optics, so it can never be applied twice - this is a
+    place where the picture comes out wrong if the order is not kept, so
+    the contract blocks it.
 
     apply_settings uses this function too. If the implementation split in
     two, one of the halves would go stale.
     """
+    from .optics import _piece
+
     if settings.optics.is_neutral():
-        return image_bgr, settings
+        return _piece(image_bgr, region), settings
 
     from ..raw_io import is_editable_image
     from .optics import apply_optics
@@ -1869,7 +1948,7 @@ def apply_optics_stage(
         optics = replace(optics, auto_enabled=False)
 
     profiled = source is None or not is_editable_image(source)
-    corrected = apply_optics(image_bgr, optics, metadata, profiled)
+    corrected = apply_optics(image_bgr, optics, metadata, profiled, region)
     return corrected, replace(settings, optics=OpticsSettings())
 
 

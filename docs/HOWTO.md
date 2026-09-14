@@ -536,6 +536,83 @@ stand in for a lens the profile database does not cover; the **Sample colour** e
 and **💧 Green** let you click the fringing in the preview to set the
 reference hue, which is shown next to them.
 
+##### Measuring a lens profile from the camera JPEG
+
+A lens the database does not know gets no automatic correction at all, and
+nothing tells you so beyond the ✗ on the lens line. **Measure lens profile
+from this camera JPEG** builds one for such a lens from the shot you have
+open. The camera has already corrected the JPEG it embedded in the file —
+brightened the corners, straightened the distortion — while the neutral
+develop has not been touched. The corner brightness ratio between the two
+is the vignetting correction the camera applied; how far each patch of the
+picture has moved between the two is its distortion correction. Both are
+fitted as a lensfun profile for this lens, focal length and aperture, saved
+into the lens profile folder, and the lens line turns ✓ — the automatic
+correction checkboxes now have something to apply. Other focal lengths and
+apertures of the same lens are measured one shot at a time and gather in
+the same profile; measuring the same pair again replaces it. It takes
+several seconds; the viewer shows the busy mark meanwhile.
+
+Three things to know:
+
+- **It reproduces the camera, not a flat field.** Sony's in-camera
+  correction is partial — measured on a lens lensfun does know (Tamron
+  150-500 at 150mm f/5), the camera brightens the corners ×1.14 where the
+  lensfun profile says ×2.2. What you get is the corner brightness of the
+  camera JPEG you culled from, which is the render this program treats as
+  the reference throughout. For a lens the database already covers, the
+  bundled profile is the stronger one and stays available.
+- **Vignetting needs mid-tones out to the corners.** The measurement
+  compares mid-tones only, because the camera's tone curve makes the
+  shadows and highlights say something other than falloff. A stage shot
+  with black corners has nothing to measure there and is refused with a
+  note saying how far out the mid-tones reached; pick a frame lit evenly
+  to the edges — a wall, a sky, an overcast street — and try again.
+- **Distortion needs texture across the frame, and the body's distortion
+  correction switched on when the shot was taken.** With it off the JPEG
+  is as bent as the RAW and there is nothing to read. A flat wall or sky
+  refuses ("too little texture"); a street, foliage, a bookshelf works.
+  Measured on eight test frames (four lenses at both ends of their zoom,
+  f/8), the fitted correction reproduces the camera JPEG to within a pixel
+  across a 50MP frame; for a lens the database also knows, the bundled
+  profile differs from the camera's own by 6–9 pixels at the corners.
+  A wide zoom whose body moves the corners a long way (Panasonic 24-105 at
+  24mm: 240 pixels) is read in two sizes, coarse then fine, and comes out
+  around 5 pixels.
+
+**Other bodies and lenses.** Nothing here is specific to one camera:
+what is needed is that the embedded JPEG carries the corrections and the
+demosaic does not, which is how every RAW format this program reads
+behaves. Verified on Sony (A1, four lenses at both zoom ends), Canon
+(EOS R6 Mark II and Mark III, RF 100-500), Nikon (Z 9, Z 100-400) and
+Panasonic (S1R and S5 II X, S 24-105). Picture styles do not get in the
+way — the camera JPEG is first brought onto the neutral develop's tone,
+learnt from the middle of the frame where no lens vignettes, so Canon's
+stronger curve reads the same as Sony's flatter one. A body whose embedded
+preview is a small downscale (Panasonic RW2, 1920px of 8000) is compared
+at the preview's size: the demosaic is cut to the camera's own image area
+first — LibRaw hands back a few more rows and columns than the camera
+keeps, and stretched onto the preview that margin would read as
+distortion — then resized. A body the lens database has never heard of
+gets its own entry written into the profile, so the profile still pairs
+with it. A measurement the model cannot follow — scene residue the tone
+matching did not remove — is refused rather than saved.
+
+Two things the other bodies taught. Panasonic's JPEG carries no vignetting
+correction unless the body's shading compensation is on (it is off by
+default), so its profile reads ×1.00 at the corner — the truth of that
+JPEG, saved as such. And a camera and lensfun disagree on what stays put
+when distortion is corrected: lensfun scales its corrected frame so the
+corner stays in the corner, a Panasonic keeps the centre and lets the
+corners run off the frame. The fit solves that uniform scale away and
+keeps the shape, so the develop matches the camera JPEG up to a zoom.
+
+Nikon Z 9 files written in High Efficiency RAW cannot be decoded at all by
+this program (the codec is proprietary) and cannot be measured; the
+lossless kind can.
+
+Chromatic aberration is not measured this way yet.
+
 #### Crop and straighten
 
 **✂ Crop directly on the image** toggles on-image cropping: drag a corner to

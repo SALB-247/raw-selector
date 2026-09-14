@@ -392,6 +392,9 @@ class DevelopPanel(QWidget):
     brush_changed = Signal()           # brush size / eraser (redraw circle)
 
     camera_match_requested = Signal()
+    lens_profile_requested = Signal()
+    """Measure this shot's vignetting against its camera JPEG and store a
+    lens profile. The loupe owns the shot, so it does the work."""
     """The 'Match camera JPEG' button. Fitting needs both the original and the
     embedded JPEG, and the loupe holds both, so the panel only raises the
     request."""
@@ -1934,6 +1937,30 @@ class DevelopPanel(QWidget):
         open_db.setToolTip(tr("Drop lensfun XML here to widen the list of recognised gear"))
         open_db.clicked.connect(self._open_lens_db_folder)
         db_row.addWidget(open_db)
+        # For a lens the DB does not know. The camera has already
+        # corrected its own JPEG; the ratio against our neutral render is
+        # that correction, written out as a profile the automatic path
+        # picks up. Measured: Tamron 20-40mm A062, 16 of 23 A1 frames, not
+        # in the DB.
+        self.measure_profile_button = QPushButton(
+            tr("Measure lens profile from this camera JPEG"))
+        self.measure_profile_button.setToolTip(tr(
+            "Compares this shot's neutral develop against the JPEG the "
+            "camera embedded in the file, and saves what the camera "
+            "corrected - corner brightening and distortion - as a lens "
+            "profile for this lens, focal length and aperture. Reproduces "
+            "the camera's own correction, no more. Vignetting needs "
+            "mid-tones reaching the corners; distortion needs texture "
+            "across the frame and the body's distortion correction switched "
+            "on when the shot was taken. Takes a few seconds."))
+        self.measure_profile_button.clicked.connect(self.lens_profile_requested.emit)
+        section.add_widget(self.measure_profile_button)
+        self.lens_profile_note = QLabel()
+        self.lens_profile_note.setWordWrap(True)
+        self.lens_profile_note.setStyleSheet(theme.hint_label())
+        self.lens_profile_note.setVisible(False)
+        section.add_widget(self.lens_profile_note)
+
         reload_db = QPushButton(tr("Reload lens DB"))
         reload_db.setToolTip(tr("Press this if you added XML while the app was running"))
         reload_db.clicked.connect(self._reload_lens_db)
@@ -2238,6 +2265,13 @@ class DevelopPanel(QWidget):
             tr("Reference hue — purple {purple}° · green {green}°").format(
                 purple=purple * 2, green=green * 2)
         )
+
+    def set_lens_profile_note(self, text: str, ok: bool = True) -> None:
+        """The outcome of the last measurement, under the button."""
+        self.lens_profile_note.setText(text)
+        self.lens_profile_note.setStyleSheet(
+            theme.hint_label("#7a9a7a" if ok else "#c9a06a"))
+        self.lens_profile_note.setVisible(bool(text))
 
     def set_lens_info(self, summary: str, found: bool) -> None:
         """Shows the lens matching result the loupe looked up."""
@@ -2840,6 +2874,18 @@ class DevelopPanel(QWidget):
                      else getattr(raw, field) != getattr(previous, field))
             if moved:
                 section.set_section_visible(True)
+
+    def commit_external_edit(self) -> None:
+        """Call once a value pushed in from outside with silent=True is done.
+
+        The crop handles and the mask shapes on the image push their values
+        in silently while dragging, so the render does not chase every
+        pixel. The end of the drag has to come through here rather than
+        straight to the render: this is where a switched-off section wakes
+        up, and an off section hands back its defaults - a crop committed
+        past it was dropped on the way out.
+        """
+        self._emit()
 
     def _emit(self, *_) -> None:
         if self._loading or self._waking:

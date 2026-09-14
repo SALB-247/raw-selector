@@ -600,34 +600,89 @@ def find_lens_by_name(camera_model: str, lens_name: str) -> LensMatch:
         return LensMatch(reason=f"조회 실패: {exc}")
 
 
+Region = "tuple[int, int, int, int]"
+"""(left, top, right, bottom) pixel bounds of a piece of the frame."""
+
+GAIN_MAP_STEP = 8
+"""The vignetting gain is read from lensfun on a frame this many times
+smaller and interpolated. Falloff is a low-order polynomial in the
+radius, so a bilinear read between points 8px apart is off by well under
+a thousandth; reading it per pixel meant handing lensfun a float copy of
+the whole frame (0.6GB at 50MP) even when only a corner was wanted."""
+
+
+def _piece(image: np.ndarray, region: "Region | None") -> np.ndarray:
+    if region is None:
+        return image
+    left, top, right, bottom = region
+    return np.ascontiguousarray(image[top:bottom, left:right])
+
+
+def _vignetting_gain(lens, crop_factor: float, width: int, height: int,
+                     focal: float, aperture: float,
+                     box: "Region") -> "np.ndarray | None":
+    """The vignetting gain over `box`, (h, w) float32, from a
+    GAIN_MAP_STEP-times smaller modifier of the same frame. None when the
+    profile has no vignetting for this setting or produces a value that is
+    not a number."""
+    small_w = max(2, -(-width // GAIN_MAP_STEP))
+    small_h = max(2, -(-height // GAIN_MAP_STEP))
+    small = lensfunpy.Modifier(lens, crop_factor, small_w, small_h)
+    small.initialize(focal, aperture, 10.0, pixel_format=np.float32)
+    ones = np.ones((small_h, small_w, 3), np.float32)
+    if not small.apply_color_modification(ones):
+        return None
+    gain = np.ascontiguousarray(ones[:, :, 1])
+    if not np.all(np.isfinite(gain)):
+        return None
+    left, top, right, bottom = box
+    # pixel centres of the box, in the small map's pixel coordinates
+    xs = (np.arange(left, right, dtype=np.float32) + np.float32(0.5)) \
+        * np.float32(small_w / width) - np.float32(0.5)
+    ys = (np.arange(top, bottom, dtype=np.float32) + np.float32(0.5)) \
+        * np.float32(small_h / height) - np.float32(0.5)
+    map_x, map_y = np.meshgrid(xs, ys)
+    # cubic, not linear: the gain curves upward towards the corner and a
+    # linear read between points 8px apart missed it by 0.25% there
+    return cv2.remap(gain, map_x, map_y, cv2.INTER_CUBIC,
+                     borderMode=cv2.BORDER_REPLICATE)
+
+
 def apply_auto_correction(
-    image: np.ndarray, metadata: RawMetadata | None, settings: OpticsSettings
+    image: np.ndarray, metadata: RawMetadata | None, settings: OpticsSettings,
+    region: "Region | None" = None,
 ) -> np.ndarray:
     """Correct distortion and vignetting with the lensfun profile.
 
     With no profile it returns the original as it is - the failure passes
     quietly and manual correction carries on working after it.
+
+    `region` asks for one piece of the frame: `image` is still the whole
+    frame (every correction here is relative to the frame's centre and
+    size), but only that piece comes back, and only the pixels it draws
+    from are touched. The zoomed Full Render used to correct the whole
+    50MP frame and then cut the piece out - 13 seconds on every pan.
     """
     if not settings.auto_enabled or not LENSFUN_AVAILABLE or metadata is None:
-        return image
+        return _piece(image, region)
 
     db = _database()
     if db is None or not metadata.camera_model:
-        return image
+        return _piece(image, region)
     if not (settings.lens_override or metadata.lens_model):
-        return image
+        return _piece(image, region)
 
     try:
         cameras = _find_cameras_loose(db, metadata.camera_model, metadata.camera_make)
         if not cameras:
-            return image
+            return _piece(image, region)
         camera = cameras[0]
 
         # A lens the user picked themselves takes priority over EXIF
         lens_name = settings.lens_override or metadata.lens_model
         lenses = _find_lenses_loose(db, camera, lens_name)
         if not lenses:
-            return image
+            return _piece(image, region)
 
         height, width = image.shape[:2]
         modifier = lensfunpy.Modifier(
@@ -638,14 +693,49 @@ def apply_auto_correction(
         # result runs away. float32 is taken as 0~1 - the vignetting
         # correction below hands over linear light, so it has to be this
         # format.
+        focal = metadata.focal_length or 50.0
+        aperture = metadata.aperture or 5.6
         modifier.initialize(
-            metadata.focal_length or 50.0,
-            metadata.aperture or 5.6,
+            focal, aperture,
             10.0,            # subject distance (m) - EXIF lacks it, so typical
             pixel_format=np.float32,
         )
 
-        result = image
+        left, top, right, bottom = region or (0, 0, width, height)
+        piece_w, piece_h = right - left, bottom - top
+
+        # Geometry first, as coordinates only: where each pixel of the
+        # piece draws from. Chromatic aberration and distortion combined
+        # are one lensfun call and one resampling per channel - they used
+        # to be two resamplings in a row (linear, then Lanczos), which is
+        # neither sharper nor what lensfun itself does.
+        coords = None
+        interpolation = cv2.INTER_LANCZOS4
+        # the whole frame is asked for without arguments - lensfun's
+        # sub-rectangle evaluation rounds a shade differently (0.14px at
+        # most, measured), and the whole frame should stay bit for bit
+        # what it was
+        window = () if region is None else (left, top, piece_w, piece_h)
+        if settings.auto_chromatic and settings.auto_distortion:
+            coords = modifier.apply_subpixel_geometry_distortion(*window)
+        elif settings.auto_chromatic:
+            coords = modifier.apply_subpixel_distortion(*window)
+            interpolation = cv2.INTER_LINEAR
+        elif settings.auto_distortion:
+            coords = modifier.apply_geometry_distortion(*window)
+
+        # The source pixels the piece draws from: the piece itself, or
+        # the box the coordinates reach into (plus the Lanczos support).
+        box = (left, top, right, bottom)
+        if coords is not None:
+            xy = coords.reshape(-1, 2)
+            margin = 4
+            box = (max(0, int(np.floor(xy[:, 0].min())) - margin),
+                   max(0, int(np.floor(xy[:, 1].min())) - margin),
+                   min(width, int(np.ceil(xy[:, 0].max())) + margin + 1),
+                   min(height, int(np.ceil(xy[:, 1].max())) + margin + 1))
+        result = _piece(image, box)
+
         if settings.auto_vignetting:
             # **It has to be applied to the amount of light.** Vignetting
             # is the lens having cut light away, so the multiplier that
@@ -686,55 +776,49 @@ def apply_auto_correction(
             # is preserved on the way back.
             from .engine import from_light, to_light
 
-            # It has to be a copy. lensfun fixes the array in place, and
-            # ascontiguousarray hands back the original as it is when it
-            # is already contiguous, so the image the caller passed in
-            # gets destroyed along with it.
-            buffer = np.ascontiguousarray(to_light(result),
-                                          dtype=np.float32).copy()
-            if modifier.apply_color_modification(buffer):
-                corrected = from_light(buffer)
+            # The gain is applied where the light was lost - at the source
+            # pixels, before they are moved - so the box is corrected and
+            # the resampling below reads corrected pixels, exactly as the
+            # whole-frame correction did.
+            gain = _vignetting_gain(lenses[0], camera.crop_factor, width,
+                                    height, focal, aperture, box)
+            if gain is not None:
+                light = to_light(result)
+                light *= gain[:, :, None]
+                result = np.clip(from_light(light), 0, 255).astype(image.dtype)
+            else:
                 # If the profile and the shooting conditions disagree,
                 # abnormal values can still come out. Used as they are
                 # the pixels turn to rubbish, so we check and throw away.
-                if np.all(np.isfinite(corrected)):
-                    result = np.clip(corrected, 0, 255).astype(image.dtype)
-                else:
-                    log.warning(
-                        "비네팅 프로필이 비정상 값을 냈다 — 건너뛴다 (%s)",
-                        lenses[0].model,
-                    )
+                log.warning(
+                    "비네팅 프로필이 비정상 값을 냈다 — 건너뛴다 (%s)",
+                    lenses[0].model,
+                )
 
-        if settings.auto_chromatic:
-            # Lateral chromatic aberration - the colour fringe that comes
-            # of each channel having a slightly different magnification.
-            # Per-channel coordinates have to be taken separately and
-            # each one remapped.
-            coords = modifier.apply_subpixel_distortion()
-            if coords is not None:
-                channels = list(cv2.split(result))
+        if coords is not None:
+            origin = np.array([box[0], box[1]], dtype=np.float32)
+            if coords.ndim == 4:
                 # lensfun gives (h, w, 3, 2) - per-channel (x, y) coords
+                channels = list(cv2.split(result))
                 for index in range(3):
                     channels[index] = cv2.remap(
                         channels[index],
-                        np.ascontiguousarray(coords[:, :, index, :]),
-                        None, cv2.INTER_LINEAR,
-                        borderMode=cv2.BORDER_REPLICATE,
+                        np.ascontiguousarray(coords[:, :, index, :]) - origin,
+                        None, interpolation, borderMode=cv2.BORDER_REPLICATE,
                     )
                 result = cv2.merge(channels)
-
-        if settings.auto_distortion:
-            coords = modifier.apply_geometry_distortion()
-            if coords is not None:
+            else:
                 result = cv2.remap(
-                    result, coords, None, cv2.INTER_LANCZOS4,
-                    borderMode=cv2.BORDER_REPLICATE,
+                    result, np.ascontiguousarray(coords) - origin, None,
+                    interpolation, borderMode=cv2.BORDER_REPLICATE,
                 )
+        elif box != (left, top, right, bottom):
+            result = _piece(image, (left, top, right, bottom))
 
         return result
     except Exception as exc:  # noqa: BLE001 - a failure must not block develop
         log.warning("자동 렌즈 보정 실패: %s", exc)
-        return image
+        return _piece(image, region)
 
 
 def apply_manual_distortion(image: np.ndarray, amount: int) -> np.ndarray:
@@ -924,7 +1008,8 @@ def apply_defringe(
 
 def apply_optics(
     image: np.ndarray, settings: OpticsSettings,
-    metadata: RawMetadata | None = None, profiled: bool = True
+    metadata: RawMetadata | None = None, profiled: bool = True,
+    region: "Region | None" = None,
 ) -> np.ndarray:
     """All of optical correction, applied automatic profile -> manual.
 
@@ -935,9 +1020,14 @@ def apply_optics(
     original as well - and there the curve to undo with is different.
     """
     if settings.is_neutral():
-        return image
+        return _piece(image, region)
 
-    result = apply_auto_correction(image, metadata, settings)
+    if region is not None and (settings.distortion or settings.manual_vignetting):
+        # The manual corrections work from the frame's centre and know
+        # nothing of a piece; correct the whole frame and cut afterwards.
+        return _piece(apply_optics(image, settings, metadata, profiled), region)
+
+    result = apply_auto_correction(image, metadata, settings, region)
     result = apply_manual_distortion(result, settings.distortion)
     result = apply_manual_vignetting(result, settings.manual_vignetting,
                                      profiled)
