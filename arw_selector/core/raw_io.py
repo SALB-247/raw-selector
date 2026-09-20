@@ -171,8 +171,10 @@ class RawMetadata:
     English).
 
     maker_meta.af_area_mode fills this in. Only verified values get a name;
-    an unknown value stays None - a blank beats a quietly wrong name. It is
-    close to a proper noun, much like a lens name, so we do not translate it.
+    a value without one is shown as its number ("Mode 3") - a number is
+    honest where a guessed name would not be. It is close to a proper noun,
+    much like a lens name, so we do not translate it. None only when it
+    cannot be read at all.
     """
 
     orientation: int = 1  # EXIF Orientation (1~8)
@@ -645,8 +647,11 @@ def read_white_balance(path: Path) -> "WhiteBalance | None":
     the cache without touching the file.
     """
     key = _file_key(path)
-    if key in _WB_CACHE:
-        return _WB_CACHE[key]
+    # one read, not "in" then "[]": the cache is cleared whole when it
+    # fills, and another thread's clear between the two steps was a KeyError
+    cached = _WB_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
         with rawpy.imread(str(path)) as raw:
             wb = _white_balance_of(raw)
@@ -731,6 +736,7 @@ def load_demosaiced(
     apply_profile: bool = True,
     calibration=None,
     highlight_recovery: bool = False,
+    demosaic: str = "fast",
 ) -> np.ndarray:
     """Actually demosaic a RAW into an orientation-corrected BGR image.
 
@@ -756,6 +762,14 @@ def load_demosaiced(
 
     With highlight_recovery on, saturated highlights are rebuilt from the
     channels that are left (see BasicSettings.highlight_recovery). RAW only.
+
+    demosaic picks who develops the full-size sensor data. "fast" is our
+    own pipeline on the unpacked Bayer frame (see fast_develop): LibRaw's
+    scaling, matrix and curve reproduced exactly, and OpenCV's edge-aware
+    demosaic instead of AHD - the full frame loads in 0.8s instead of
+    1.8s at 50MP. "quality" is LibRaw AHD, what export uses. The
+    half-size frame, highlight recovery, and anything the fast path does
+    not handle (X-Trans, four-colour sensors) go to LibRaw regardless.
 
     **For a non-RAW (JPEG/HEIF) there is nothing to demosaic.** The file is
     lifted straight to float BGR and used as the starting point of the
@@ -847,6 +861,7 @@ def load_demosaiced(
         if black_override is not None:
             params["user_black"] = black_override
 
+        pre_mul = None
         if target_kelvin and target_kelvin > 0:
             from .develop.engine import NEUTRAL_KELVIN, _kelvin_to_rgb
 
@@ -879,9 +894,27 @@ def load_demosaiced(
                 mult = daylight * (_kelvin_to_rgb(NEUTRAL_KELVIN)
                                    / _kelvin_to_rgb(target_kelvin))
             params["user_wb"] = [float(mult[0]), float(mult[1]), float(mult[2]), float(mult[1])]
+            pre_mul = params["user_wb"]
         else:
             params["use_camera_wb"] = True
-        rgb = raw.postprocess(**params)
+        rgb = None
+        linear = False
+        # The fast path pays off at full size only (0.8s against 1.8s at
+        # 50MP). At half size LibRaw's own binning is as quick as ours
+        # and is the reference, so it stays.
+        if demosaic == "fast" and not highlight_recovery and not half_size:
+            try:
+                # linear, not encoded: the output curve is folded into
+                # the finish table below, one pass instead of two
+                rgb = fast_develop(raw, half_size=half_size, pre_mul=pre_mul,
+                                   user_black=black_override, encode=False)
+                linear = rgb is not None
+            except Exception:  # noqa: BLE001 - LibRaw is the fallback
+                log.debug("fast develop failed, LibRaw instead: %s", path.name,
+                          exc_info=True)
+                rgb = None
+        if rgb is None:
+            rgb = raw.postprocess(**params)
         # The file is open here - keep what the develop view asks for
         # next, so it does not open the file again. After postprocess:
         # read before it, the multipliers cost 0.16s.
@@ -893,25 +926,297 @@ def load_demosaiced(
             pass
     # postprocess has already applied the camera flip. We move 16-bit
     # (0~65535) to float 0~255 - the fraction survives, so the gradation
-    # stays intact.
-    image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR).astype(np.float32) / 257.0
-
-    # If there is a body calibration measured on this PC, apply it first. It
-    # has to come before the profile (the colour look) - calibration is
-    # "matching the reference", the profile is a look laid on top of that,
-    # so reversing the order twists the look along with it.
+    # stays intact - and lay the body calibration and the profile curve on
+    # in the same step (see _finish_encoded). Calibration comes before the
+    # profile (the colour look): calibration is "matching the reference",
+    # the profile is a look laid on top of that, so reversing the order
+    # twists the look along with it.
+    gains = None
     if calibration is not False:
-        image = _apply_calibration(image, path, calibration)
+        gains = _calibration_gains(path, calibration)
+    return _finish_encoded(rgb, gains, apply_profile, linear=linear)
 
+
+def _calibration_gains(path: Path, calibration) -> "tuple[float, float, float] | None":
+    """The body calibration's channel gains (BGR), or None when there is
+    none or it is neutral."""
+    from .develop import calibration as calib
+
+    try:
+        if calibration is None:
+            metadata = read_metadata(path)
+            key = calib.camera_key(metadata.camera_make, metadata.camera_model)
+            calibration = calib.load(key)
+        if calibration is None or calibration.is_neutral():
+            return None
+        return tuple(float(g) for g in calibration.gain[:3])
+    except Exception:  # noqa: BLE001 - a failure here must not stop develop
+        log.debug("기종 보정 적용 실패: %s", path.name, exc_info=True)
+        return None
+
+
+def _finish_encoded(rgb16: np.ndarray, gains, apply_profile: bool,
+                    linear: bool = False) -> np.ndarray:
+    """16-bit RGB - LibRaw's encoded output, or fast_develop's linear
+    output (linear=True) - to the float32 BGR 0~255 the pipeline starts
+    from, calibrated and profiled.
+
+    Every per-pixel step here is a function of one channel value: the
+    output curve (when the input is still linear), /257 to float, the
+    calibration gain, the profile curve. So they are composed once into a
+    65536-entry table and the frame is read through it in a single pass.
+    The tables are built by running the very same numpy operations on
+    every possible value, so the result is bit for bit what the steps
+    gave one after another; what changes is four passes over 150M values
+    (well over a second at 50MP) becoming one gather.
+
+    Layout matters as much as the count: one table over the interleaved
+    frame and a cvtColor to BGR is 0.34s at 50MP, where three per-channel
+    gathers through strided views take 0.67s. So the per-channel tables
+    (a body calibration, whose gains differ per channel) go through
+    cv2.split / merge, and the common case - no calibration - uses one
+    table over the whole frame.
+    """
+    values = np.arange(65536, dtype=np.uint16).astype(np.float32) / 257.0
+    if linear:
+        values = values[_output_curve()]           # curve first, then /257
+
+    def table_for(gain) -> np.ndarray:
+        table = values
+        if gain is not None:
+            table = table.astype(np.float32) * np.float32(gain)
+        if apply_profile:
+            from .develop.engine import _STANDARD_PROFILE_CURVE, _apply_lut, smooth_curve_lut
+
+            table = _apply_lut(table, smooth_curve_lut(list(_STANDARD_PROFILE_CURVE)))
+        return np.ascontiguousarray(table, dtype=np.float32)
+
+    if gains is None or len(set(float(g) for g in gains)) == 1:
+        gain = None if gains is None else float(gains[0])
+        out = cv2.cvtColor(table_for(gain)[rgb16], cv2.COLOR_RGB2BGR)
+    else:
+        planes = cv2.split(rgb16)                  # R, G, B
+        out = cv2.merge([table_for(gains[0])[planes[2]],
+                         table_for(gains[1])[planes[1]],
+                         table_for(gains[2])[planes[0]]])
     if apply_profile:
-        from .develop.engine import apply_camera_profile
+        from .develop.engine import _STANDARD_PROFILE_SATURATION, _apply_saturation_gain
 
-        image = apply_camera_profile(image)
-    return image
+        if _STANDARD_PROFILE_SATURATION:
+            out = _apply_saturation_gain(out, 1.0 + _STANDARD_PROFILE_SATURATION / 100.0)
+    return out
+
+
+# --------------------------------------------------------------- fast develop
+
+_XYZ_RGB = np.array([[0.412453, 0.357580, 0.180423],
+                     [0.212671, 0.715160, 0.072169],
+                     [0.019334, 0.119193, 0.950227]])
+"""sRGB primaries -> XYZ (D65), as in dcraw."""
+
+_OUT_RGB = {
+    "srgb": np.eye(3),
+    "adobe_rgb": np.array([[0.715146, 0.284856, 0.000000],
+                           [0.000000, 1.000000, 0.000000],
+                           [0.000000, 0.041166, 0.958839]]),
+    "prophoto": np.array([[0.529317, 0.330092, 0.140588],
+                          [0.098368, 0.873465, 0.028169],
+                          [0.016879, 0.117663, 0.865457]]),
+}
+"""Linear sRGB -> the output space, dcraw's out_rgb tables."""
+
+_BAYER_CODES = {
+    # colours of the visible frame's first row (x=0, x=1) -> the OpenCV
+    # conversion that matches. OpenCV names the pattern by its second
+    # row and column, hence RG -> BayerBG.
+    "RG": cv2.COLOR_BayerBG2RGB_EA,
+    "GB": cv2.COLOR_BayerGR2RGB_EA,
+    "GR": cv2.COLOR_BayerGB2RGB_EA,
+    "BG": cv2.COLOR_BayerRG2RGB_EA,
+}
+
+ADJUST_MAXIMUM_THRESHOLD = 0.75
+"""LibRaw's adjust_maximum: a frame whose brightest sensor value sits
+between this fraction of the white level and the white level has its
+white level lowered to that value. It moves the scale of an
+underexposed-but-nearly-clipping frame by up to a third of a stop, so
+the reproduction has to do it too."""
+
+
+def _dcraw_gamma_curve(power: float = 1 / 2.222, toe: float = 4.5) -> np.ndarray:
+    """dcraw's gamma_curve(), mode 2, as the 16-bit output table. The toe
+    threshold and the offset come out of its bisection, not the BT.709
+    constants - 0.01805 and 0.09926, where the standard says 0.018 and
+    0.099 - and LibRaw's output is this table to the unit."""
+    g = [power, toe, 0.0, 0.0, 0.0]
+    bnd = [0.0, 0.0]
+    bnd[int(g[1] >= 1)] = 1.0
+    if g[1] and (g[1] - 1) * (g[0] - 1) <= 0:
+        for _ in range(48):
+            g[2] = (bnd[0] + bnd[1]) / 2
+            bnd[int((pow(g[2] / g[1], -g[0]) - 1) / g[0] - 1 / g[2] > -1)] = g[2]
+        g[3] = g[2] / g[1]
+        g[4] = g[2] * (1 / g[0] - 1)
+    r = np.arange(0x10000, dtype=np.float64) / 0x10000
+    curve = np.where(r < g[3], r * g[1], np.power(r, g[0]) * (1 + g[4]) - g[4]) * 0x10000
+    return np.clip(curve, 0, 0xffff).astype(np.uint16)
+
+
+_GAMMA_CURVE: "np.ndarray | None" = None
+
+
+def _output_curve() -> np.ndarray:
+    global _GAMMA_CURVE
+    if _GAMMA_CURVE is None:
+        _GAMMA_CURVE = _dcraw_gamma_curve()
+    return _GAMMA_CURVE
+
+
+def _rgb_cam(raw, use_camera_wb: bool) -> "np.ndarray | None":
+    """LibRaw's camera -> linear sRGB matrix for this file: dcraw's
+    cam_xyz_coeff from the model's XYZ coefficients.
+
+    Never the matrix embedded in the file, even though LibRaw has a
+    use_camera_matrix rule for it: LibRaw decides that rule once, in
+    identify(), with the parameters the file was *opened* with - and
+    rawpy opens with use_camera_wb off and only sets it for postprocess().
+    So for every non-DNG file LibRaw ends up on cam_xyz whatever
+    postprocess is asked, and the export, the half-size base and the
+    body calibration all went that way while the screen, honouring the
+    rule literally, went through the embedded matrix on Olympus, Pentax
+    and Phase One files (Sony, Canon, Nikon, Panasonic carry none, which
+    is why the seven-file check never saw it). For DNG the two matrices
+    are the same numbers, so cam_xyz is right there too."""
+    cam_xyz = np.asarray(raw.rgb_xyz_matrix, dtype=np.float64)[:3]
+    if not np.any(cam_xyz):
+        return None
+    cam_rgb = cam_xyz @ _XYZ_RGB
+    cam_rgb = cam_rgb / cam_rgb.sum(axis=1, keepdims=True)   # rows sum to 1: white stays white
+    return np.linalg.pinv(cam_rgb)
+
+
+def _visible_phase(raw) -> "dict[int, tuple[int, int]] | None":
+    """Colour index -> (row, column) offset of its plane in the visible
+    frame, from the sensor's 2x2 pattern and the visible frame's margins.
+    None for anything that is not a 2x2 Bayer mosaic."""
+    pattern = raw.raw_pattern
+    if pattern is None or np.asarray(pattern).shape != (2, 2):
+        return None
+    pattern = np.asarray(pattern)
+    top, left = int(raw.sizes.top_margin), int(raw.sizes.left_margin)
+    phase = {int(pattern[(y + top) % 2, (x + left) % 2]): (y, x)
+             for y in range(2) for x in range(2)}
+    return phase if len(phase) == 4 else None
+
+
+def fast_develop(raw, *, half_size: bool, pre_mul=None, user_black=None,
+                 encode: bool = True) -> "np.ndarray | None":
+    """LibRaw's postprocess for the parameters this program uses, without
+    LibRaw's demosaic: black and white balance scaling, demosaic, the
+    camera matrix into the working space, the output curve, the camera
+    flip. Returns encoded 16-bit RGB the way postprocess does, or None
+    for a sensor it does not handle.
+
+    Everything but the demosaic is LibRaw's own arithmetic, checked on
+    real files to the 16-bit unit: the scale is pre_mul / min(pre_mul)
+    x 65535 / (white - black) with the black subtracted per channel; the
+    matrix is dcraw's cam_xyz_coeff (or the file's own); the curve is
+    dcraw's gamma_curve. The half-size frame is LibRaw's own 2x2 binning
+    - one sample of each colour, the two greens averaged - so it is the
+    same picture to the unit. The full-size demosaic is OpenCV's
+    edge-aware interpolation: on the test frames it sits where LibRaw's
+    linear interpolation sits against LibRaw's best (DHT), a little
+    behind AHD per pixel and level with it once shrunk to the screen.
+
+    pre_mul: the four multipliers (a target colour temperature); None
+    means the camera's as-shot balance. user_black: the global black to
+    use instead of the file's (the missed-pedestal repair), whose pedestal
+    has already been added back into this raw's pixels. encode=False
+    returns the linear working-space values before the output curve, for
+    a caller that folds the curve into its own table (load_demosaiced).
+    """
+    bayer = raw.raw_image_visible
+    phase = _visible_phase(raw)
+    if phase is None or getattr(raw, "color_desc", b"") != b"RGBG":
+        return None
+    if bayer.ndim != 2:
+        return None
+    height, width = bayer.shape
+    if height % 2 or width % 2:
+        # LibRaw rounds a half-size frame up and demosaics to the full
+        # odd size; pad by repeating the last row / column so the planes
+        # are whole, and cut back below.
+        bayer = cv2.copyMakeBorder(bayer, 0, height % 2, 0, width % 2,
+                                   cv2.BORDER_REPLICATE)
+    per_channel = [int(v) for v in raw.black_level_per_channel]
+    white = int(raw.white_level)
+    use_camera_wb = pre_mul is None
+    if use_camera_wb:
+        pre_mul = [float(v) for v in raw.camera_whitebalance]
+    pre_mul = list(pre_mul) + [0.0] * (4 - len(pre_mul))
+    if pre_mul[1] == 0:
+        pre_mul[1] = 1.0
+    if pre_mul[3] == 0:
+        pre_mul[3] = pre_mul[1]
+    if min(pre_mul[:3]) <= 0:
+        return None
+    matrix = _rgb_cam(raw, use_camera_wb)
+    if matrix is None:
+        return None
+
+    # LibRaw's adjust_bl: the part common to all channels is the global
+    # black, the rest stays per channel; user_black replaces the global
+    # part and the white level is measured from it.
+    common = min(per_channel)
+    cblack = [v - common for v in per_channel]
+    black = int(user_black) if user_black is not None else common
+    # LibRaw's adjust_maximum runs after the black is taken off, on the
+    # black-subtracted maximum against 0.75 of the black-subtracted white
+    # - compared with the black still in, a dim frame whose brightest
+    # sensor value fell just under 0.75 x white was pulled up on screen
+    # by a third of a stop and not in the export.
+    maximum = white - black
+    data_max = int(bayer.max()) - black
+    if maximum * ADJUST_MAXIMUM_THRESHOLD < data_max < maximum:
+        maximum = data_max
+    if maximum <= 0:
+        return None
+    dmin = min(pre_mul)
+    scale = [pre_mul[c] / dmin * 65535.0 / maximum for c in range(4)]
+
+    def scaled_plane(c: int) -> np.ndarray:
+        oy, ox = phase[c]
+        plane = bayer[oy::2, ox::2].astype(np.float32)
+        plane -= np.float32(black + cblack[c])
+        plane *= np.float32(scale[c])
+        np.clip(plane, 0.0, 65535.0, out=plane)
+        return plane.astype(np.uint16)
+
+    if half_size:
+        planes = {c: scaled_plane(c) for c in range(4)}
+        green = (planes[1].astype(np.uint32) + planes[3]) >> 1
+        camera = np.dstack([planes[0], green.astype(np.uint16), planes[2]])
+    else:
+        scaled = np.empty(bayer.shape, np.uint16)
+        for c in range(4):
+            oy, ox = phase[c]
+            scaled[oy::2, ox::2] = scaled_plane(c)
+        at = {pos: c for c, pos in phase.items()}
+        first_row = "RGBG"[at[(0, 0)]] + "RGBG"[at[(0, 1)]]
+        camera = cv2.cvtColor(scaled, _BAYER_CODES[first_row])[:height, :width]
+
+    from .develop.icc import WORKING_SPACE
+
+    out_cam = (_OUT_RGB[WORKING_SPACE] @ matrix).astype(np.float32)
+    linear = cv2.transform(camera, out_cam)          # uint16 in, saturated uint16 out
+    result = _output_curve()[linear] if encode else linear
+    return apply_orientation(result, _flip_to_orientation(raw.sizes.flip))
 
 
 def _apply_calibration(image, path: Path, calibration):
-    """Apply the stored body calibration. Returns the image as-is if none."""
+    """Apply the stored body calibration. Returns the image as-is if none.
+    (load_demosaiced folds this into _finish_encoded; kept for callers
+    that hold a float frame.)"""
     from .develop import calibration as calib
 
     try:
@@ -1018,8 +1323,9 @@ def _black_level_for(raw, file_key) -> int | None:
     pedestal is still added to this raw's own pixels, which are fresh."""
     if file_key is None:
         return _repair_black_level(raw)
-    if file_key in _BLACK_CACHE:
-        override, extras, fallback = _BLACK_CACHE[file_key]
+    cached = _BLACK_CACHE.get(file_key)     # one read - see _white_balance
+    if cached is not None:
+        override, extras, fallback = cached
         if extras is not None:
             try:
                 _add_pedestal(raw, extras)
@@ -1134,8 +1440,10 @@ def to_display(image: np.ndarray) -> np.ndarray:
 
 
 def _flip_to_orientation(flip: int) -> int:
-    """Convert LibRaw's flip value to an EXIF Orientation."""
-    return {0: 1, 3: 3, 5: 8, 6: 6}.get(flip, 1)
+    """Convert LibRaw's flip value to an EXIF Orientation. dcraw's flip is
+    three bits - 1 mirror horizontal, 2 mirror vertical, 4 transpose - so
+    the mirrored ones map too, even though cameras do not write them."""
+    return {0: 1, 1: 2, 2: 4, 3: 3, 4: 5, 5: 8, 6: 6, 7: 7}.get(flip, 1)
 
 
 def image_area(path: Path) -> tuple[int, int] | None:

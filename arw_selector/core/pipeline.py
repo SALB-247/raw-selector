@@ -41,6 +41,11 @@ class Progress:
     failed: int
     elapsed: float
     current: Path | None = None
+    fresh: tuple = ()
+    """The records finished since the previous report - every cache hit in
+    the first one, then each photo as its worker returns it. Ungraded: the
+    grade is relative to the whole batch and comes at the end. The grid
+    shows them as they land instead of a bare progress bar for minutes."""
 
     @property
     def ratio(self) -> float:
@@ -85,12 +90,17 @@ def analyze_file(
         # read (read_metadata failed) has an unknown orientation too, so it
         # is skipped.
         af_box = None
+        af_tracking = False
         if metadata is not None:
             from .maker_meta import af_preview_box
 
             af_box = af_preview_box(
                 path, metadata.orientation, preview.shape[1], preview.shape[0]
             )
+            # A tracking frame is the subject itself (see analyze_focus).
+            # Sony "Tracking" / "Face tracking", Nikon "3D-tracking",
+            # Canon "Face + Tracking" - the mode name carries it.
+            af_tracking = "tracking" in (metadata.af_area_mode or "").lower()
 
         # The reduced copy is made once here and shared by all three.
         # Previously the three each reduced from 6192x4128 on their own -
@@ -109,6 +119,7 @@ def analyze_file(
             center_priority=config.center_priority,
             noise_compensation=config.noise_compensation,
             reduced=reduced,
+            af_tracking=af_tracking,
         )
         # While the preview is up in memory, the scene fingerprint and the
         # thumbnail are taken at the same time. Getting them later would
@@ -361,6 +372,27 @@ def estimate_analysis_seconds(count: int, workers: int | None = None,
 # ---------------------------------------------------------------- batch run
 
 
+def _flush(cache: AnalysisCache, fresh: list[ImageRecord]) -> AnalysisCache | None:
+    """Writes a batch into the cache.
+
+    When that fails the cache is given up for the rest of the run and the
+    analysis carries on. A card that fills up or is pulled part-way, a
+    share that locks - each of those used to surface here as an exception
+    that took several thousand finished results down with it. The cache
+    is the thing that may be lost, never the results.
+    """
+    try:
+        cache.put_many(fresh)
+        return cache
+    except Exception as exc:  # noqa: BLE001 - the cache must not block this
+        log.warning("캐시 저장 실패, 이후 결과는 캐시에 남지 않는다: %s", exc)
+        try:
+            cache.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+
 def analyze_paths(
     paths: Sequence[Path],
     config: Config | None = None,
@@ -398,7 +430,8 @@ def analyze_paths(
     done = len(results)
 
     if progress_cb:
-        progress_cb(Progress(done, total, cached_count, failed, 0.0))
+        progress_cb(Progress(done, total, cached_count, failed, 0.0,
+                             fresh=tuple(results[p] for p in paths if p in results)))
 
     if pending:
         workers = resolve_workers(config.workers, pending)
@@ -442,20 +475,24 @@ def analyze_paths(
                             Progress(
                                 done, total, cached_count, failed,
                                 time.perf_counter() - started, path,
+                                fresh=(record,),
                             )
                         )
 
                     # Flushed periodically so that everything up to here
                     # is saved even if it is cut off part way
                     if cache and len(fresh) >= 200:
-                        cache.put_many(fresh)
+                        cache = _flush(cache, fresh)
                         fresh.clear()
             finally:
                 if cache and fresh:
-                    cache.put_many(fresh)
+                    cache = _flush(cache, fresh)
 
     if cache:
-        cache.close()
+        try:
+            cache.close()
+        except Exception as exc:  # noqa: BLE001 - see _flush
+            log.warning("캐시 닫기 실패: %s", exc)
 
     ordered = [results[p] for p in paths if p in results]
     log.info(

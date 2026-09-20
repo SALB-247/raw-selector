@@ -46,7 +46,7 @@ class AnalysisStartDialog(QDialog):
 
     def __init__(self, photo_count: int, cached_count: int,
                  analyze: AnalyzeConfig, parent=None,
-                 small_preview_count: int = 0):
+                 small_preview_count: int = 0, cache_note: str = ""):
         super().__init__(parent)
         self.setWindowTitle(tr("Start analysis"))
         self._photo_count = photo_count
@@ -69,6 +69,15 @@ class AnalysisStartDialog(QDialog):
             cache_text = tr("Cache: none — everything will be analysed fresh")
         self.cache_label = QLabel(cache_text)
         layout.addWidget(self.cache_label)
+        # Where the cache is going, when that is not the usual place: a
+        # locked card or a read-only drive used to leave the user guessing
+        # why nothing was ever remembered.
+        self.cache_note = None
+        if cache_note:
+            self.cache_note = QLabel(cache_note)
+            self.cache_note.setWordWrap(True)
+            self.cache_note.setStyleSheet("color: palette(mid);")
+            layout.addWidget(self.cache_note)
 
         # ---------------- Cache
         self.use_cache = QCheckBox(tr("Use cached results"))
@@ -205,10 +214,11 @@ class AnalysisStartDialog(QDialog):
 
     @staticmethod
     def ask(photo_count: int, cached_count: int, analyze: AnalyzeConfig,
-            parent=None, small_preview_count: int = 0) -> AnalysisOptions | None:
+            parent=None, small_preview_count: int = 0,
+            cache_note: str = "") -> AnalysisOptions | None:
         """Puts the dialog up; None on cancel."""
         dialog = AnalysisStartDialog(photo_count, cached_count, analyze, parent,
-                                     small_preview_count)
+                                     small_preview_count, cache_note)
         dialog.setModal(True)
         accepted = dialog.exec() == QDialog.Accepted
         options = dialog.options() if accepted else None

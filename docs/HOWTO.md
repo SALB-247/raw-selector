@@ -83,6 +83,12 @@ From top to bottom: the toolbar (open, analyse, develop, queue, export, cache,
 preferences), the filter-and-sort row, the thumbnail grid, the score card for
 the selected photo, and the status bar.
 
+### First-run hints
+
+The empty grid says what to do next; the first completed analysis appends a
+one-line key reminder to its summary, and the first Develop window puts one
+in the status bar. Both of those appear once per machine.
+
 ### The status bar
 
 The bar along the bottom shows the current status message, a progress bar, and
@@ -107,6 +113,10 @@ tabs:
 
 If the app ever hits an unhandled error, an "Error" dialog appears and points
 to a written error report.
+
+**Move to the next photo after grading in the develop window** (off by
+default) makes `1`, `2` and `3` in the loupe advance to the next photo, so a
+long series can be culled from the keyboard alone.
 
 ## Opening photos
 
@@ -152,8 +162,11 @@ take.
 
 ### Progress and cancelling
 
-Progress appears in the status bar ("Analysing {done}/{total} (cached …,
-failed …)") with a time estimate. **Stop** (`Esc`) cancels after the photo in
+Photos appear in the grid as they are measured — every cached photo at
+once, then each new one as its worker finishes — with a grey "Analysing…"
+band in place of the grade, because grades are relative to the whole batch
+and are assigned when it completes. Progress appears in the status bar
+("Analysing {done}/{total} (cached …, failed …)") with a time estimate. **Stop** (`Esc`) cancels after the photo in
 progress finishes; partial results are kept and labelled "Cancelled — results
 so far". When analysis completes, a summary line reports the totals ("{total}
 photos · {scenes} scenes · keep/review/reject counts").
@@ -172,7 +185,19 @@ the built-in library defaults.
 The **Cache** toolbar button (its label shows the current size, or "No cache")
 opens the "Clear cache" dialog. It lists the analysis entries, thumbnails,
 total size, and the estimated time to rebuild; confirm with **Yes** to clear.
-Undo records for past exports are kept.
+Undo records for past exports are kept, and so are your grades and edits.
+
+**Your decisions are saved with the folder.** Manual grades, develop edits
+and hand-picked main subjects are written to `edits.json` next to the cache a
+moment after each change and when the window closes, and put back the next
+time the folder is analysed — a re-analysis with the cache off restores them
+too. Like the cache they are keyed by the path inside the folder, so they
+follow the card; on a locked card they go to your user folder instead.
+A save only rewrites the photos on screen, so opening a few files, cancelling
+a run or turning off subfolders never discards what was decided about the
+rest. Saved main-subject picks are put back by the analysis worker once the
+measurements are in — the status bar reads "Restoring saved main-subject
+picks 12/50" and **Stop** skips the rest, which stay on file for next time.
 
 The cache is keyed on the analysis options as well as the file, because a
 result measured with different options is not the same result. Those options
@@ -181,6 +206,22 @@ analysing a folder meant that the next time you opened the program the
 options fell back to their defaults, the key no longer matched, and a full
 cache counted as nothing: the folder asked to be analysed again from
 scratch.
+
+The cache travels with the folder. Entries are keyed by each file's path
+relative to the folder, not its absolute path, so the same card mounted
+under a different name, given a different drive letter, or read on another
+computer reuses what was analysed before.
+
+A folder that cannot be written - a card with its lock switch on, an NTFS
+drive on macOS, a read-only share - gets its cache in your user folder
+instead (`~/Library/Application Support/raw_selector/cache/` on macOS,
+`%APPDATA%\raw_selector\cache\` on Windows), one per folder. That cache
+is named by the volume's own identity (its serial number on Windows, its
+volume UUID on macOS) plus the path inside the volume, so the same card
+under a different drive letter or mount name still finds it, and adding
+photos never changes it. A cache already inside such a folder is still
+read; only new results are not written back. And if the card fills up or is pulled while analysing, the
+analysis finishes with what it has and just the cache is lost.
 
 ## Reviewing and culling
 
@@ -208,12 +249,28 @@ shows the score, grade, lens, ISO, shutter, aperture, and the grading reasons.
 - Selection is extended multi-select; double-click or `Space` opens the
   selected photo in the loupe.
 
+### Comparing shots side by side
+
+Select two to four photos and press `C` (or the **Compare** toolbar button)
+to see them next to each other. A wheel on one tile zooms every tile and a
+drag pans them together; `Z` puts each tile on its own focus region so the
+eyes of every frame can be judged at once, and `R` resets the views. The
+active tile has the bright border — click a tile or use `←` / `→` — and
+`1` / `2` / `3` grade it, `0` clears the manual grade. `Esc` closes. Grades
+set here show in the grid at once and are saved like any other.
+
 ### Grading from the keyboard
 
 With photos selected in the grid: `1` grades keep, `2` review, `3` reject, and
 `0` clears the manual grade so the automatic grade applies again. `D` opens
 the Develop window for the selection and `Q` adds the selection to the export
-queue.
+queue. `Ctrl+Shift+C` copies the selected photo's develop settings and
+`Ctrl+Shift+V` pastes them onto every selected photo — each photo keeps its
+own crop, masks and watermark, the same rule as the loupe's apply-to-all.
+`[` and `]` jump to the first photo of the previous or next scene and
+the status bar says which scene you are in ("Scene 12/300 · 5 photos"); a
+shoot is worked burst by burst, and in file order each scene is one run of
+thumbnails. The same keys work in the loupe.
 
 ### The score card
 
@@ -282,6 +339,10 @@ The overlays follow the crop, rotation and straighten, so they mark the same
 spot of the photo whichever way the frame is set.
 - **Full Render** — re-develops at full resolution whenever you stop
   adjusting; when zoomed in, only the visible region is rendered more finely.
+  The screen demosaics with a fast edge-aware interpolation and the export
+  with LibRaw's AHD; at the pixel the two differ by a few levels on noisy
+  frames, about one level once shrunk to the screen — nothing the eye sees,
+  but a 1:1 crop of the export is not bit for bit the Full Render.
 
 The **Original** toggle compared — the untouched source on the left, the
 current develop on the right:
@@ -524,7 +585,11 @@ Film-style finishing: **Grain**, **Grain size**, **Correct vignetting**, and
 
 Lens corrections. The **Auto lens profile** checkbox applies the matched lens
 profile, with **Distortion** / **Vignetting** / **Chromatic aberration**
-sub-checks and a ✓/✗ lens-match readout. If the lens is misidentified, pick
+sub-checks and a ✓/✗ lens-match readout. **Chromatic aberration is off by
+default**: the colour fringing a lens leaves is part of its look for some
+people, so it is removed only when you tick it. The three sub-checks remember
+your last choice on this machine and offer it on the next photo, and they are
+greyed out while the profile is off. If the lens is misidentified, pick
 one in the **Lens override** editable combo. **Lens profile folder** opens the
 folder where you can drop your own lensfun XML profiles, and **Reload lens
 DB** re-reads it, with a coverage readout. **Manage camera color calibration**
@@ -615,13 +680,21 @@ Chromatic aberration is not measured this way yet.
 
 #### Crop and straighten
 
-**✂ Crop directly on the image** toggles on-image cropping: drag a corner to
-resize, drag inside to move, double-click to reset to the whole frame. The
+**✂ Crop directly on the image** puts the crop handles up: drag a corner to
+resize, drag inside to move, double-click to reset to the whole frame. While
+the handles are up the button gives way to **✓ Apply crop** (Enter), which
+keeps the crop and puts the handles down, and **✕ Cancel** (Esc), which puts
+the crop and the ratio back the way they were when the handles came up. The
 **Ratio** combo offers **Free**, **Original ratio**, 1:1, 4:3, 3:2, and 16:9.
 **Straighten** rotates ±45°, with **Left** / **Right** / **Top** / **Bottom**
 crop sliders for precise edges. **⟲ 90°** and **⟳ 90°** rotate in steps, and
 **Flip horizontal** / **Flip vertical** mirror the frame; the current
-rotation is shown.
+rotation is shown. A crop already placed turns and flips with the picture,
+so it keeps framing the same content (a fixed ratio such as 3:2 does not
+survive a turn and is refitted around the crop's centre; 1:1 and Original
+ratio do). Only one editing mode is up at a time: the crop handles, the
+brush and the eyedropper put each other away, and stepping to another shot
+puts the eyedropper away.
 
 #### Capture info strip
 
@@ -702,6 +775,11 @@ There are three ways in: the **Export** toolbar button (the whole analysed
 session), **Export** in the loupe (a single shot), and **Export queue**. Each
 asks for a destination folder, then opens the "Export options" dialog.
 
+At the top of the dialog, **Preset** recalls a saved set of options — format,
+size, naming and folders — under a name such as "web 2048 JPEG"; **Save…**
+stores the current settings and **Delete** removes the chosen one. Which
+grades to export is about the batch at hand, so a preset never changes it.
+
 ![Export options](screenshots/export-dialog.png)
 
 - **Files** group — **Grades to export** (keep / review / reject checkboxes;
@@ -725,6 +803,14 @@ asks for a destination folder, then opens the "Export options" dialog.
   work, but looks desaturated in viewers that ignore colour profiles.
   Pair it with **16-bit** where the format allows: an 8-bit file in the
   wider space loses shadow steps.
+
+  **Parallel rendering** (**Auto**, 1–4) develops several photos at once.
+  Auto counts on about 4 GB of free memory per photo for a plain develop and
+  up to 9 GB with a lens profile or noise reduction (measured on a 50 MP
+  body), so a laptop usually gets one and a workstation three or four; pin a
+  number only when you know the memory is there, because two renders that do
+  not fit swap and finish later than one. Originals are still copied in
+  order, each after its own render, so a move never outruns the develop.
 - **Filename** group — a **Pattern** field with click-to-insert token buttons
   **{name}**, **{index}**, **{grade}**, **{date}**, **{time}**, **{score}**.
   **{date}** and **{time}** are the time the shutter fired. If the analysis
@@ -867,7 +953,11 @@ GUI-only.
 | `Space` | Open the selected photo in the loupe |
 | `D` | Open the Develop window for the selection |
 | `Q` | Add the selection to the export queue |
+| `C` | Compare two to four selected photos side by side |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy the selected photo's develop settings / paste onto the selection |
+| `[` / `]` | Select the first photo of the previous / next scene |
 | `Esc` | Stop the running task (analysis or export) |
+| `F1` | Keyboard shortcut sheet (also the **Keys** toolbar button) |
 | Double-click | Open the photo (**Preview** or **Develop**, per the toolbar mode) |
 
 ### Loupe (Develop window)
@@ -875,6 +965,7 @@ GUI-only.
 | Key | Action |
 |---|---|
 | `←` / `→` | Previous / next photo |
+| `[` / `]` | First photo of the previous / next scene |
 | `1` / `2` / `3` | Grade keep / review / reject |
 | `B` | **Original** — before/after toggle |
 | `F` | **Focus** overlay (grading region) |
@@ -883,6 +974,18 @@ GUI-only.
 | `P` | **AF point** overlay |
 | `Z` | **Zoom to focus** |
 | `Q` | **Add to queue** |
+| `F1` | Keyboard shortcut sheet |
 | Mouse wheel | Zoom |
 | Drag | Pan |
 | Double-click (image) | Reset the view |
+
+### Compare window
+
+| Key | Action |
+|---|---|
+| `1` / `2` / `3` / `0` | Grade the active tile / clear its manual grade |
+| `←` / `→` | Move the active tile |
+| Wheel / drag | Zoom and pan every tile together |
+| `Z` | Every tile on its own focus region |
+| `R` | Reset the views |
+| `Esc` | Close |

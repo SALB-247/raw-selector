@@ -138,6 +138,10 @@ def convert_space(rgb_linear: np.ndarray, source: str, target: str) -> np.ndarra
     matrix = _space_matrix(source, target)
     if rgb_linear.dtype == np.float32:
         matrix = matrix.astype(np.float32)
+    if rgb_linear.ndim == 3 and rgb_linear.shape[2] == 3 and rgb_linear.dtype in (np.float32, np.float64):
+        # cv2.transform: one multithreaded pass, half of numpy's matmul
+        # on a 50MP frame; the 16-bit round trip stays exact
+        return cv2.transform(np.ascontiguousarray(rgb_linear), matrix)
     return rgb_linear @ matrix.T
 
 

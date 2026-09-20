@@ -6,4 +6,4 @@ CR3, NEF, RAF, ORF, RW2, DNG and the rest. The product name and the storage
 paths are gathered in core/appinfo.py.
 """
 
-__version__ = "0.15.11"
+__version__ = "0.15.12"

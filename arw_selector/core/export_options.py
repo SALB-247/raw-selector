@@ -126,6 +126,10 @@ class ExportOptions:
     """Whether to export the original RAW too. Off, only the developed
     image goes out."""
 
+    render_workers: int = 0
+    """How many photos are developed at once. 0 picks by free memory
+    (export.resolve_render_workers); 1 is the old one-at-a-time export."""
+
     image_format: ExportFormat = ExportFormat.JPEG
     quality: int = 95
 

@@ -127,6 +127,14 @@ class PreferencesDialog(QDialog):
             "already edited are never touched. Off by default."
         ))
         develop_layout.addWidget(self.camera_match_check)
+        self.advance_check = QCheckBox(
+            tr("Move to the next photo after grading in the develop window"))
+        self.advance_check.setChecked(state.advance_after_grade())
+        self.advance_check.setToolTip(tr(
+            "Press 1, 2 or 3 and the next photo comes up, so a long series\n"
+            "can be culled from the keyboard alone. Off by default."
+        ))
+        develop_layout.addWidget(self.advance_check)
         outer.addWidget(develop_box)
 
         update_box = QGroupBox(tr("Updates"))
@@ -223,6 +231,7 @@ class PreferencesDialog(QDialog):
         state.set_language(self.language_combo.currentData() or None)
         state.set_update_check(self.update_check.isChecked())
         state.set_camera_match_on_open(self.camera_match_check.isChecked())
+        state.set_advance_after_grade(self.advance_check.isChecked())
         super().accept()
 
     def language_changed_from(self, previous: str | None) -> bool:

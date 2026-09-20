@@ -639,14 +639,33 @@ def jpeg_af_area(path: Path) -> tuple[int, int, int, int, int, int] | None:
 def _rotate_box(x: float, y: float, w: float, h: float,
                 frame_w: float, frame_h: float, orientation: int):
     """Moves a centre box in sensor orientation to coordinates after the
-    EXIF rotation. (x,y) is the centre."""
-    if orientation == 6:      # 90° CW - the display size is (H, W)
-        return frame_h - 1 - y, x, h, w
-    if orientation == 8:      # 90° CCW
-        return y, frame_w - 1 - x, h, w
+    EXIF orientation is applied. (x,y) is the centre.
+
+    Mirrors the eight cases of raw_io.apply_orientation exactly, so the box
+    lands on the same pixels the preview was moved to. The mirrored ones
+    (2, 4, 5, 7) come from scanners rather than cameras, but a file that
+    carries one would otherwise get a box on the wrong side of the frame.
+    """
+    if orientation == 2:      # mirrored horizontally
+        return frame_w - 1 - x, y, w, h
     if orientation == 3:      # 180°
         return frame_w - 1 - x, frame_h - 1 - y, w, h
+    if orientation == 4:      # mirrored vertically
+        return x, frame_h - 1 - y, w, h
+    if orientation == 5:      # mirrored, then 90° CCW = transpose
+        return y, x, h, w
+    if orientation == 6:      # 90° CW - the display size is (H, W)
+        return frame_h - 1 - y, x, h, w
+    if orientation == 7:      # mirrored, then 90° CW
+        return frame_h - 1 - y, frame_w - 1 - x, h, w
+    if orientation == 8:      # 90° CCW
+        return y, frame_w - 1 - x, h, w
     return x, y, w, h
+
+
+def _rotates_frame(orientation: int) -> bool:
+    """Whether the orientation turns the frame on its side (W and H swap)."""
+    return orientation in (5, 6, 7, 8)
 
 
 #: The JPEG extensions to try reading AF from. HEIF has a different
@@ -658,8 +677,10 @@ JPEG_SUFFIXES = (".jpg", ".jpeg")
 #
 # For display in the details panel. The values are returned in the camera's
 # own terms (in English) and not translated - they are closer to proper
-# nouns, like lens names. An unknown value gives None: better not to show
-# that line at all than to quietly attach a wrong name.
+# nouns, like lens names. A value with no verified name is shown as its
+# number ("Mode 3"): a number is honest where a guessed name would not be,
+# and the line stays so the shooter can tell the modes apart (it used to
+# be dropped altogether, which hid a Sony body's most-used modes).
 
 #: Canon AFInfo2 blob offset 2 (u16). It is the public table from
 #: exiftool's Canon.pm and is common across bodies. Confirmed on the user's
@@ -687,10 +708,28 @@ NIKON_AF_AREA_MODES_Z = {         # AFInfo2 0300 and above
 
 #: Sony MakerNote 0x201C AFAreaModeSetting (1 byte, plain text - outside
 #: the 0x94xx encrypted block). Only values verified against real files:
-#: 11=Zone from 48 A6700 zone-AF frames.
+#: 11=Zone from 48 A6700 zone-AF frames. An A1 card of 620 frames held
+#: 0 (332), 3 (195) and 1 (90) as well - shown as "Mode 0/3/1" until
+#: someone matches them to the menu.
 SONY_AF_AREA_MODES = {
     11: "Zone",
 }
+
+#: Sony MakerNote 0x2021 AFTracking (1 byte, plain text). exiftool's names;
+#: 2 is what an A1 writes for real-time tracking (20 frames, all with
+#: 0x201C = 0 - the area mode value that goes with it is not yet verified
+#: and stays unnamed). A tracking shot used to show no AF line at all,
+#: because the area mode was the only thing read and its value was
+#: unknown.
+SONY_AF_TRACKING = {
+    1: "Face tracking",
+    2: "Tracking",
+}
+
+
+def _mode_name(table: dict[int, str], value: int) -> str:
+    """The verified name, or the bare number as "Mode N"."""
+    return table.get(value) or f"Mode {value}"
 
 
 def _nikon_mode_from_blob(blob: bytes) -> str | None:
@@ -701,12 +740,12 @@ def _nikon_mode_from_blob(blob: bytes) -> str | None:
     except ValueError:
         return None
     table = NIKON_AF_AREA_MODES_Z if version >= 300 else NIKON_AF_AREA_MODES_DSLR
-    return table.get(blob[5])
+    return _mode_name(table, blob[5])
 
 
 def af_area_mode(path: Path) -> str | None:
-    """The name of the AF area mode the camera recorded. None if it cannot
-    be read or the value is unverified.
+    """The name of the AF area mode the camera recorded - "Mode N" for a
+    value with no verified name. None if it cannot be read at all.
 
     Sony is a plain-text MakerNote tag; Canon and Nikon are a different
     offset in the same AFInfo2 blob af_preview_box opens. For JPEG the
@@ -726,10 +765,19 @@ def af_area_mode(path: Path) -> str | None:
             (count,) = struct.unpack_from(endian + "H", buf, maker_off)
             start = maker_off if 0 < count < 512 else maker_off + 12
             maker = _read_ifd(buf, start, endian)
+            mode = None
             entry = maker.get(0x201C)
-            if entry is None or not entry[2]:
-                return None
-            return SONY_AF_AREA_MODES.get(entry[2][0])
+            if entry is not None and entry[2]:
+                mode = _mode_name(SONY_AF_AREA_MODES, entry[2][0])
+            tracking = None
+            entry = maker.get(0x2021)
+            if entry is not None and entry[2] and entry[2][0]:
+                # 0 is "not tracking" - no word for it. Another value we
+                # have no name for is still tracking of some kind.
+                tracking = SONY_AF_TRACKING.get(entry[2][0]) or f"Tracking {entry[2][0]}"
+            if mode and tracking:
+                return f"{mode} + {tracking}"
+            return mode or tracking
 
         return _with_header(path, sony_reader)
 
@@ -759,8 +807,8 @@ def af_area_mode(path: Path) -> str | None:
         if blob is None or len(blob[0]) < 4:
             return None
         payload, endian = blob
-        return CANON_AF_AREA_MODES.get(
-            struct.unpack_from(endian + "H", payload, 2)[0])
+        return _mode_name(CANON_AF_AREA_MODES,
+                          struct.unpack_from(endian + "H", payload, 2)[0])
 
     if suffix in JPEG_SUFFIXES:
         def jpeg_reader(buf):
@@ -783,8 +831,8 @@ def af_area_mode(path: Path) -> str | None:
                 entry = maker.get(0x0026)
                 if entry is None or len(entry[2]) < 4:
                     return None
-                return CANON_AF_AREA_MODES.get(
-                    struct.unpack_from(endian + "H", entry[2], 2)[0])
+                return _mode_name(CANON_AF_AREA_MODES,
+                                  struct.unpack_from(endian + "H", entry[2], 2)[0])
             if make.startswith(b"NIKON"):
                 if buf[maker_off:maker_off + 5] != b"Nikon":
                     return None
@@ -832,37 +880,26 @@ def af_preview_box(path: Path, orientation: int,
         else:
             side = max(img_w, img_h) * SONY_POINT_BOX_RATIO  # older bodies
             box_w = box_h = side
-        cx, cy, bw, bh = _rotate_box(ax, ay, box_w, box_h, img_w, img_h, orientation)
-        base_w, base_h = (img_h, img_w) if orientation in (6, 8) else (img_w, img_h)
+        area = (ax, ay, box_w, box_h, img_w, img_h)
     elif suffix == ".nef":
         area = nikon_af_area(path)
-        if area is None:
-            return None
-        ax, ay, aw, ah, full_w, full_h = area
-        cx, cy, bw, bh = _rotate_box(ax, ay, aw, ah, full_w, full_h, orientation)
-        base_w, base_h = (full_h, full_w) if orientation in (6, 8) else (full_w, full_h)
     elif suffix == ".cr3":
         # CR2 is not included because there is no real file to verify
         # against - unverified support is support that is quietly wrong.
         area = canon_af_area(path)
-        if area is None:
-            return None
-        ax, ay, aw, ah, full_w, full_h = area
-        cx, cy, bw, bh = _rotate_box(ax, ay, aw, ah, full_w, full_h, orientation)
-        base_w, base_h = (full_h, full_w) if orientation in (6, 8) else (full_w, full_h)
     elif suffix in JPEG_SUFFIXES:
         # A JPEG the camera produced itself carries the same MakerNote. A
         # JPEG exported by an editor usually has no MakerNote, so it
         # naturally gives None.
         area = jpeg_af_area(path)
-        if area is None:
-            return None
-        ax, ay, aw, ah, full_w, full_h = area
-        cx, cy, bw, bh = _rotate_box(ax, ay, aw, ah, full_w, full_h, orientation)
-        base_w, base_h = (full_h, full_w) if orientation in (6, 8) else (full_w, full_h)
     else:
         return None
+    if area is None:
+        return None
 
+    ax, ay, aw, ah, full_w, full_h = area
+    cx, cy, bw, bh = _rotate_box(ax, ay, aw, ah, full_w, full_h, orientation)
+    base_w, base_h = (full_h, full_w) if _rotates_frame(orientation) else (full_w, full_h)
     if not (base_w and base_h):
         return None
     scale_x = preview_w / base_w

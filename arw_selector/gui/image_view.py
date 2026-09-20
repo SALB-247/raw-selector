@@ -16,6 +16,7 @@ import math
 from enum import Enum, auto
 
 import numpy as np
+from ..core.develop import crop_ratio
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QWidget
@@ -112,6 +113,8 @@ class ImageView(QWidget):
     crop_finished = Signal()
     zoom_changed = Signal(float)
     pan_finished = Signal()
+    view_changed = Signal()
+    """Zoom or pan moved, by wheel or drag - for views kept in step."""
     """Emitted when the screen has been dragged and released.
 
     While zoomed in, only what is visible is rendered at high quality, so
@@ -144,6 +147,7 @@ class ImageView(QWidget):
         self._pixmap: QPixmap | None = None
         self._crop = (0.0, 0.0, 1.0, 1.0)
         self._crop_mode = False
+        self._locked = False
         self._ratio: float | None = None
         self._active = Handle.NONE
         self._drag_origin: QPoint | None = None
@@ -196,6 +200,15 @@ class ImageView(QWidget):
     def crop(self) -> tuple[float, float, float, float]:
         return self._crop
 
+    def set_locked(self, locked: bool) -> None:
+        """While an export reads the settings, the picture takes no edit
+        - no crop handle, shape handle, brush or eyedropper - only the pan
+        (see LoupeDialog.set_locked)."""
+        self._locked = locked
+        self._cancel_shape_drag()
+        self._active = Handle.NONE
+        self.update()
+
     def set_crop_mode(self, enabled: bool) -> None:
         self._crop_mode = enabled
         # Crop and shapes grab different things in the same place. Crop wins,
@@ -207,41 +220,57 @@ class ImageView(QWidget):
     def set_ratio(self, ratio: float | None) -> None:
         """Locks the width/height ratio. None means free.
 
-        Picking a new ratio lays out the largest crop that fits centred on the
-        image. When the user changes the ratio they usually mean "lay the whole
-        thing out again at this ratio", not "keep one corner of the current
-        crop".
+        A crop that already has the ratio is left exactly where it is. One
+        that does not - a different ratio just picked, a saved file, a
+        quarter turn - is fitted around its own centre by
+        crop_ratio.fit: the side that is too long is shortened, so a
+        placed crop keeps its place and the full frame becomes the
+        largest centred crop. It used to lay the crop out afresh, centred
+        and maximal, every time it was called - and it is called on
+        entering and on leaving crop mode - so a placed crop was thrown
+        away at both moments.
+
+        The frame the ratio is measured against is the picture on screen
+        (`_image_rect`), so the caller must have the *editing* frame up -
+        the whole photo, no crop, no info strip - before calling this.
         """
         self._ratio = ratio
-        if ratio:
-            self._center_ratio_crop(ratio)
-            self._emit_crop()
-            # A ratio lays a *finished* crop out, not a drag in progress.
-            # Announced only as crop_changed, it sat in the sliders silently
-            # and never reached the panel's commit - so with the geometry
-            # section still off it was dropped the moment crop mode closed.
-            self.crop_finished.emit()
+        if ratio and not self._crop_fits(ratio):
+            frame = self._frame_ratio()
+            if frame is not None:
+                self._crop = crop_ratio.fit(self._crop, ratio, frame)
+                self._emit_crop()
+                # A ratio lays a *finished* crop out, not a drag in
+                # progress. Announced only as crop_changed, it sat in the
+                # sliders silently and never reached the panel's commit -
+                # so with the geometry section still off it was dropped
+                # the moment crop mode closed.
+                self.crop_finished.emit()
         self.update()
 
-    def _center_ratio_crop(self, ratio: float) -> None:
-        """Builds the largest crop at the given ratio that fits centred on the
-        image."""
+    def set_ratio_only(self, ratio: float | None) -> None:
+        """Stores the ratio for the drags without touching the crop. The
+        loupe fits the crop itself, in the frame the settings describe -
+        the picture on screen can be a render behind (a quarter turn not
+        yet drawn) or the previous shot's."""
+        self._ratio = ratio
+        self.update()
+
+    def _frame_ratio(self) -> float | None:
+        """Width / height of the picture as drawn - the frame the crop is
+        measured against. None before there is a picture."""
         base = self._image_rect()
-        if base.isEmpty():
-            return
+        if base.isEmpty() or base.height() <= 0:
+            return None
+        return base.width() / base.height()
 
-        image_ratio = base.width() / base.height()
-        # Target ratio in normalised space = wanted ratio / image ratio
-        target = ratio / image_ratio
-
-        if target >= 1.0:
-            width, height = 1.0, 1.0 / target
-        else:
-            width, height = target, 1.0
-
-        left = (1.0 - width) / 2.0
-        top = (1.0 - height) / 2.0
-        self._crop = (left, top, left + width, top + height)
+    def _crop_fits(self, ratio: float) -> bool:
+        """Whether the current crop already has this width/height ratio in
+        picture pixels (within crop_ratio.TOLERANCE - the sliders round)."""
+        frame = self._frame_ratio()
+        if frame is None:
+            return False
+        return crop_ratio.fits(self._crop, ratio, frame)
 
     # -------------------------------------------------- coordinate conversion
 
@@ -264,6 +293,20 @@ class ImageView(QWidget):
 
     def zoom(self) -> float:
         return self._zoom
+
+    def pixmap(self) -> QPixmap | None:
+        return self._pixmap
+
+    def view_state(self) -> tuple[float, QPoint]:
+        return self._zoom, QPoint(self._offset)
+
+    def set_view_state(self, zoom: float, offset: QPoint) -> None:
+        """Puts this view where another one is (compare view). Does not
+        emit view_changed, so two views following each other cannot loop."""
+        self._zoom = float(np.clip(zoom, 1.0, 16.0))
+        self._offset = QPoint(offset)
+        self._clamp_offset()
+        self.update()
 
     def visible_region(self, pad: float = 0.06) -> tuple[float, float, float, float]:
         """Returns the part currently visible as a ratio of the image (0~1).
@@ -396,6 +439,7 @@ class ImageView(QWidget):
         step = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
         self.set_zoom(self._zoom * step, event.position().toPoint())
         self.zoom_changed.emit(self._zoom)
+        self.view_changed.emit()
         event.accept()
 
     def _crop_rect(self) -> QRect:
@@ -684,6 +728,15 @@ class ImageView(QWidget):
         if event.button() != Qt.LeftButton:
             return
 
+        if self._locked:
+            # Only the pan; no click either (it sets the main face)
+            if self._zoom > 1.0:
+                self._panning = True
+                self._pan_origin = event.position().toPoint()
+                self._pan_start_offset = QPoint(self._offset)
+                self.setCursor(Qt.ClosedHandCursor)
+            return
+
         if getattr(self, "_brush_mode", False):
             self._brushing = True
             self._brush_pos = event.position().toPoint()
@@ -754,6 +807,7 @@ class ImageView(QWidget):
                 self._offset = self._pan_start_offset + (event.position().toPoint() - self._pan_origin)
                 self._clamp_offset()
                 self.update()
+                self.view_changed.emit()
             else:
                 self.setCursor(
                     Qt.OpenHandCursor if self._zoom > 1.0 else Qt.ArrowCursor
@@ -845,6 +899,8 @@ class ImageView(QWidget):
 
     def mouseDoubleClickEvent(self, event) -> None:
         """In crop mode this resets the crop, otherwise it resets the zoom."""
+        if self._locked and self._crop_mode:
+            return
         if not self._crop_mode:
             self.reset_view()
             self.zoom_changed.emit(self._zoom)
@@ -855,53 +911,25 @@ class ImageView(QWidget):
         self.update()
 
     def _apply_ratio(self, anchor: Handle) -> None:
-        """Adjusts the crop to the locked ratio.
+        """Adjusts the crop to the locked ratio while a handle is dragged.
 
+        The corner opposite the handle stays put (crop_ratio.fit_from_corner).
         The image's real aspect ratio has to be taken into account - 1:1 in
         normalised coordinates is not 1:1 on screen when the source is 3:2.
+        At the picture's edge the crop is shortened so the ratio holds; it
+        used to be pushed back inside and clipped, which broke the ratio
+        exactly there.
         """
-        base = self._image_rect()
-        if base.isEmpty() or not self._ratio:
+        frame = self._frame_ratio()
+        if frame is None or not self._ratio:
             return
-
-        left, top, right, bottom = self._crop
-        image_ratio = base.width() / base.height()
-        # Target ratio in normalised space = wanted ratio / image ratio
-        target = self._ratio / image_ratio
-
-        width = right - left
-        height = bottom - top
-        if height <= 0:
-            return
-
-        if width / height > target:
-            width = height * target
-        else:
-            height = width / target
-
-        # The side being held becomes the anchor point
-        if anchor in (Handle.TOP_LEFT, Handle.LEFT, Handle.TOP):
-            left, top = right - width, bottom - height
-        elif anchor in (Handle.TOP_RIGHT, Handle.RIGHT):
-            right, top = left + width, bottom - height
-        elif anchor in (Handle.BOTTOM_LEFT,):
-            left, bottom = right - width, top + height
-        else:
-            right, bottom = left + width, top + height
-
-        # If it leaves the bounds, push it back inside
-        if left < 0:
-            right, left = right - left, 0.0
-        if top < 0:
-            bottom, top = bottom - top, 0.0
-        if right > 1:
-            left, right = left - (right - 1), 1.0
-        if bottom > 1:
-            top, bottom = top - (bottom - 1), 1.0
-
-        self._crop = (
-            max(0.0, left), max(0.0, top), min(1.0, right), min(1.0, bottom)
-        )
+        fixed_right = anchor in (Handle.TOP_LEFT, Handle.LEFT, Handle.TOP,
+                                 Handle.BOTTOM_LEFT)
+        fixed_bottom = anchor in (Handle.TOP_LEFT, Handle.LEFT, Handle.TOP,
+                                  Handle.TOP_RIGHT, Handle.RIGHT)
+        self._crop = crop_ratio.fit_from_corner(
+            self._crop, self._ratio, frame,
+            fixed_right=fixed_right, fixed_bottom=fixed_bottom)
 
     def _emit_crop(self) -> None:
         self.crop_changed.emit(*self._crop)

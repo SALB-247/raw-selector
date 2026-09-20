@@ -74,6 +74,54 @@ def remember_folder(folder: Path) -> None:
     update_state(last_folder=str(Path(folder)))
 
 
+def hint_seen(name: str) -> bool:
+    """Whether a one-time hint (the first-run guidance lines) was shown."""
+    seen = load_state().get("hints_seen")
+    return isinstance(seen, list) and name in seen
+
+
+def mark_hint_seen(name: str) -> None:
+    seen = load_state().get("hints_seen")
+    seen = list(seen) if isinstance(seen, list) else []
+    if name not in seen:
+        seen.append(name)
+        update_state(hints_seen=seen)
+
+
+def advance_after_grade() -> bool:
+    """Whether grading a photo in the develop window moves to the next one.
+    **Off by default** - on for anyone culling a long series by keys alone."""
+    return bool(load_state().get("advance_after_grade", False))
+
+
+def set_advance_after_grade(enabled: bool) -> None:
+    update_state(advance_after_grade=bool(enabled))
+
+
+OPTICS_DEFAULTS = {"distortion": True, "vignetting": True, "chromatic": False}
+"""Which of the lens-profile corrections a fresh photo is offered.
+Chromatic aberration is off - see OpticsSettings.auto_chromatic."""
+
+
+def optics_defaults() -> dict:
+    """The profile sub-corrections to offer on a photo with no saved
+    settings: the last choice made on this machine, else OPTICS_DEFAULTS."""
+    out = dict(OPTICS_DEFAULTS)
+    saved = load_state().get("optics_auto")
+    if isinstance(saved, dict):
+        for key in out:
+            if isinstance(saved.get(key), bool):
+                out[key] = saved[key]
+    return out
+
+
+def remember_optics(**flags: bool) -> None:
+    """Keeps the user's latest choice of profile sub-corrections."""
+    current = optics_defaults()
+    current.update({key: bool(value) for key, value in flags.items() if key in current})
+    update_state(optics_auto=current)
+
+
 def language() -> str | None:
     """The chosen interface language. None follows the system setting.
 

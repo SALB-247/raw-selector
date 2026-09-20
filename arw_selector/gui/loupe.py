@@ -43,7 +43,7 @@ from ..core.raw_io import (
     resize_long_edge,
     to_display,
 )
-from ..core import face_mesh
+from ..core import face_mesh, state
 from ..core.config import AnalyzeConfig
 from ..core.focus import FACE_DISPLAY_MIN_SCORE
 from ..core.types import Grade, ImageRecord
@@ -286,6 +286,15 @@ def _base_key(path: Path, kelvin: int, highlight: bool):
 def _cached_base(key):
     with _BASE_CACHE_LOCK:
         return _BASE_CACHE.get(key)
+
+
+def clear_base_cache() -> None:
+    """Drops every cached base. The base bakes the body's colour
+    calibration in at demosaic time and the key does not carry it, so a
+    calibration run in between would hand the develop window the old
+    colour while the Full Render showed the new."""
+    with _BASE_CACHE_LOCK:
+        _BASE_CACHE.clear()
 
 
 def _store_base(key, value) -> None:
@@ -600,6 +609,19 @@ class LoupeDialog(QDialog):
         self._wb = None  # raw_io.WhiteBalance - for absolute Kelvin
         self._final_worker = None  # the Full Render thread
         self._prefetch_worker: BasePrefetchWorker | None = None
+        self._ratio_seen: float | None = None
+        """The crop ratio the last settings change carried, so a change of
+        the combo outside crop mode can be told from any other change."""
+        self._crop_before = None
+        """The crop and its ratio as they stood when the handles came up -
+        what Cancel puts back."""
+        self._fitting_depth = 0
+        """How many ratio fits are being committed inside one another. The
+        commit a fit makes raises a settings change, which fits again on
+        the sliders' rounded values - that converges (each pass either
+        changes nothing at slider precision, or shortens a side by a whole
+        percent), but only a few levels are ever needed and none may run
+        away."""
         self._step_direction = 1
         """Which way the last step went, so the bases prepared ahead are
         the ones about to be shown."""
@@ -729,6 +751,12 @@ class LoupeDialog(QDialog):
 
         self._build_ui()
         self._build_shortcuts()
+        # Enter belongs to the crop handles while they are up (Apply). A
+        # QDialog makes every push button autoDefault, and a focused one
+        # - the 90 degree button just clicked, say - clicks itself on
+        # Return before the key ever reaches this window.
+        for button in self.findChildren(QPushButton):
+            button.setAutoDefault(False)
 
         # The splitter decides the panel width, but if the window itself gets
         # narrower than the panel's minimum, the right side (value boxes,
@@ -882,6 +910,7 @@ class LoupeDialog(QDialog):
         self.panel.camera_match_requested.connect(self._match_camera_look)
         self.panel.lens_profile_requested.connect(self._measure_lens_profile)
         self.panel.crop_mode_changed.connect(self._on_crop_mode)
+        self.panel.crop_cancelled.connect(self._cancel_crop)
         self.panel.pick_mode_changed.connect(self._on_pick_mode)
         self.panel.mask_overlay_changed.connect(self._render)
         self.panel.mask_shape_changed.connect(self._sync_mask_shape)
@@ -1087,6 +1116,9 @@ class LoupeDialog(QDialog):
             ("P", lambda: self.show_af.setChecked(not self.show_af.isChecked())),
             ("Z", self.zoom_to_focus),
             ("Q", self.add_to_queue),
+            ("F1", self.show_shortcuts),
+            ("[", lambda: self.step_scene(-1)),
+            ("]", lambda: self.step_scene(1)),
         ):
             action = QAction(self)
             action.setShortcut(QKeySequence(keys))
@@ -1097,6 +1129,14 @@ class LoupeDialog(QDialog):
         self.before_after.setChecked(not self.before_after.isChecked())
 
     # --------------------------------------------------------- Shot navigation
+
+    def step_scene(self, direction: int) -> None:
+        """Moves to the first shot of the previous / next scene."""
+        from ..core.ordering import scene_step
+
+        target = scene_step(self.records, self.index, direction)
+        if target is not None:
+            self.step(target - self.index)
 
     def step(self, delta: int) -> None:
         """Moves to the previous/next shot. Stops at the ends of the list."""
@@ -1143,6 +1183,15 @@ class LoupeDialog(QDialog):
         self._load_base(basic.highlight_recovery, kelvin)
         self._load_context()
         self._prefetch_neighbours()
+        if self.preview._crop_mode:
+            # Stepped to another shot with the handles up: they still
+            # framed the previous shot's rectangle, and a release would
+            # have committed it into this one.
+            self._on_crop_mode(True)
+        if getattr(self, "_pick_target", ""):
+            # The eyedropper was armed for the previous shot's fringing;
+            # left armed, it swallowed the first click on this one.
+            self.panel.clear_pick_mode()
 
     @staticmethod
     def _base_request(record) -> "tuple[Path, int, bool]":
@@ -1159,12 +1208,17 @@ class LoupeDialog(QDialog):
     def _prefetch_neighbours(self) -> None:
         """Prepares the bases of the shots about to be stepped to: two
         ahead in the direction of travel, one behind."""
+        self._cancel_prefetch()
+        if full_render_in_flight():
+            # A Full Render holds gigabytes; a half-size demosaic on top of
+            # it is the overlap that kills a small PC. The next step
+            # prefetches again.
+            return
         offsets = (1, 2, -1) if self._step_direction >= 0 else (-1, -2, 1)
         jobs = [self._base_request(self.records[self.index + d])
                 for d in offsets if 0 <= self.index + d < len(self.records)]
         jobs = [job for job in jobs
                 if _cached_base(_base_key(*job)) is None]
-        self._cancel_prefetch()
         if not jobs:
             return
         worker = BasePrefetchWorker(jobs)
@@ -1549,11 +1603,24 @@ class LoupeDialog(QDialog):
         # showing did nothing. Guarded on a real change: set_ratio commits
         # through this very handler, and re-laying out on every pass would
         # loop.
+        geometry = self.panel.settings(gated=False).geometry
+        wanted = self._ratio_value(geometry.ratio)
         if self.preview._crop_mode:
-            wanted = self._ratio_value(
-                self.panel.settings(gated=False).geometry.ratio)
+            # A ratio just picked, a quarter turn or a crop slider that
+            # took the crop off its ratio, a slider nudged by hand: mirror
+            # and fit (a fitting crop is left alone, so the commit this
+            # makes cannot loop back here).
             if wanted != self.preview._ratio:
-                self.preview.set_ratio(wanted)
+                self.preview.set_ratio_only(wanted)
+            self._fit_crop_to_ratio()
+        else:
+            # Whatever moved - the combo, a quarter turn that took the crop
+            # off a fixed ratio, an old file's crop - the sliders are made
+            # to agree with what the engine cuts. Cheap when they already
+            # do (the common case), and the commit it makes when they do
+            # not comes back here to find them agreeing.
+            self._apply_ratio_to_settings()
+        self._ratio_seen = wanted
 
         # Highlight recovery is a decode-stage option, so reapplying the LUT
         # does not carry it - the base (half demosaic) is rebuilt. It is the
@@ -1635,6 +1702,11 @@ class LoupeDialog(QDialog):
         that must be.
         """
         self._locked = locked
+        if locked:
+            # The picture is an editor too: a handle, the brush or the
+            # eyedropper would commit past the disabled panel.
+            self._leave_other_modes(keep="")
+        self.preview.set_locked(locked)
         self.panel.setEnabled(not locked)
         for button in self.grade_buttons.values():
             button.setEnabled(not locked)
@@ -1666,6 +1738,20 @@ class LoupeDialog(QDialog):
         self.preview.set_busy(False)
 
     def _on_crop_mode(self, enabled: bool) -> None:
+        # Leaving: nothing to push. The handles reported every drag into
+        # the sliders and the release committed it; pushing the ratio in
+        # again here is what used to lay the placed crop out afresh.
+        if enabled:
+            self._leave_other_modes(keep="crop")
+        self.preview.set_crop_mode(enabled)
+        # The editing frame first - the whole photo, no crop, no strip.
+        # The ratio is measured against the picture on screen, and until
+        # this render the screen still shows the *finished* frame: the
+        # previous crop with the info strip under it. Fitted against that,
+        # a 1:1 crop on a 3:2 photo came out as the full frame.
+        self._render()
+        if not enabled:
+            return
         # Ungated on purpose. Crop mode edits the stored rectangle and its
         # ratio, and the ratio is a constraint on editing rather than an
         # operation on pixels - so a saved ratio leaves geometry "neutral",
@@ -1673,27 +1759,148 @@ class LoupeDialog(QDialog):
         # FREE. Laying the crop out from here commits it (crop_finished),
         # which is what switches the section on.
         settings = self.panel.settings(gated=False).geometry
+        # What Cancel puts back: the rectangle and the ratio as saved, before
+        # the fit below touches an old file's crop.
+        self._crop_before = (
+            (settings.crop_left, settings.crop_top,
+             settings.crop_right, settings.crop_bottom),
+            settings.ratio,
+        )
         self.preview.set_crop(
             settings.crop_left, settings.crop_top,
             settings.crop_right, settings.crop_bottom,
         )
-        self.preview.set_ratio(self._ratio_value(settings.ratio))
-        self.preview.set_crop_mode(enabled)
-        self._render()
+        self.preview.set_ratio_only(self._ratio_value(settings.ratio))
+        self._fit_crop_to_ratio()
+
+    def _cancel_crop(self) -> None:
+        """The Cancel button (or Esc) with the handles up: the crop and its
+        ratio go back to what they were when the handles came up, and the
+        handles go down. Every release in between was committed, so this is
+        a restore, not a discard - the sliders, the record and the picture
+        all follow through one commit."""
+        if self.preview._crop_mode and self._crop_before is not None:
+            crop, ratio = self._crop_before
+            self.panel.set_ratio_silently(ratio)
+            self._on_crop_dragged(*crop)
+            self.preview.set_crop(*crop)
+        self.panel.crop_mode_button.setChecked(False)
+        self.panel.commit_external_edit()
+
+    def keyPressEvent(self, event) -> None:
+        """Enter applies and Esc cancels while the crop handles are up.
+        A dialog closes on Esc, and closing the loupe was what Esc did in
+        the middle of a crop."""
+        if self.preview._crop_mode:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self.panel.crop_apply_button.click()
+                event.accept()
+                return
+            if event.key() == Qt.Key_Escape:
+                self.panel.crop_cancel_button.click()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _fit_crop_to_ratio(self) -> None:
+        """Crop mode: bring the crop onto the ratio, in the frame the crop
+        applies to - the source after the quarter turns, from the settings
+        - and push the result to the handles and the sliders alike.
+
+        Not the frame on screen: the render can be a step behind (a
+        quarter turn just made is drawn by a timer) and it used to be the
+        finished frame, cropped and with the strip, on entering. And not
+        the handles' rectangle alone: a slider nudged by hand lives in the
+        panel only until it is mirrored here. The sliders round to a
+        percent, so the exact rectangle wins when the two agree to that.
+        """
+        from ..core.develop import crop_ratio
+
+        geometry = self.panel.settings(gated=False).geometry
+        wanted = self._ratio_value(geometry.ratio)
+        frame = self._frame_ratio()
+        panel_crop = (geometry.crop_left, geometry.crop_top,
+                      geometry.crop_right, geometry.crop_bottom)
+        preview_crop = self.preview.crop()
+        agree = max(abs(a - b) for a, b in zip(panel_crop, preview_crop)) <= 0.006
+        crop = preview_crop if agree else panel_crop
+        if not agree:
+            self.preview.set_crop(*panel_crop)
+        if not wanted or frame is None or crop_ratio.fits(crop, wanted, frame):
+            return
+        if self._fitting_depth >= self._FIT_DEPTH_LIMIT:
+            return
+        fitted = crop_ratio.fit(crop, wanted, frame)
+        self._fitting_depth += 1
+        try:
+            self.preview.set_crop(*fitted)
+            self._on_crop_dragged(*fitted)
+            self.panel.commit_external_edit()
+        finally:
+            self._fitting_depth -= 1
 
     def _ratio_value(self, ratio) -> float | None:
         """Ratio setting -> an actual number.
 
-        ORIGINAL is the source aspect ratio, so it takes looking at the image
-        to decide. It is not in the fixed table, so it used to behave quietly
-        like 'free'.
+        ORIGINAL is the source aspect ratio **as it stands after the quarter
+        turns** - the frame the crop is applied to. It is not in the fixed
+        table, so it used to behave quietly like 'free', and then it read
+        the unrotated source, so a turned photo got the wrong way round.
         """
         from ..core.develop import CropRatio
 
-        if ratio is CropRatio.ORIGINAL and self._source is not None:
-            height, width = self._source.shape[:2]
-            return width / height if height else None
+        if ratio is CropRatio.ORIGINAL:
+            frame = self._frame_ratio()
+            return frame
         return ratio.value_ratio if ratio else None
+
+    def _frame_ratio(self) -> float | None:
+        """Width / height of the frame the crop applies to: the source
+        after the quarter turns (see crop_ratio.frame_ratio)."""
+        from ..core.develop import crop_ratio
+
+        if self._source is None:
+            return None
+        height, width = self._source.shape[:2]
+        quarters = self.panel.settings(gated=False).geometry.rotate_quarters
+        return crop_ratio.frame_ratio(width, height, quarters)
+
+    _FIT_DEPTH_LIMIT = 8
+
+    def _apply_ratio_to_settings(self) -> None:
+        """The ratio combo changed while crop mode is off: fit the stored
+        crop to it in frame space and commit, so the picture follows the
+        combo at once instead of waiting for the next visit to crop mode.
+        """
+        from ..core.develop import crop_ratio
+
+        geometry = self.panel.settings(gated=False).geometry
+        ratio = self._ratio_value(geometry.ratio)
+        frame = self._frame_ratio()
+        if not ratio or frame is None:
+            return
+        crop = (geometry.crop_left, geometry.crop_top,
+                geometry.crop_right, geometry.crop_bottom)
+        if crop_ratio.fits(crop, ratio, frame):
+            return
+        fitted = crop_ratio.fit(crop, ratio, frame)
+        # The sliders hold whole percents. A small crop can sit further
+        # off its ratio than the tolerance and still round back to the
+        # very same percents - pushing those in and committing came
+        # straight back here, and again, until the stack overflowed. The
+        # engine snaps the cut exactly whatever the sliders hold, so when
+        # the fit changes nothing at slider precision there is nothing to
+        # commit; and a fit is never started from inside its own commit.
+        if all(round(a * 100.0) == round(b * 100.0) for a, b in zip(fitted, crop)):
+            return
+        if self._fitting_depth >= self._FIT_DEPTH_LIMIT:
+            return
+        self._fitting_depth += 1
+        try:
+            self._on_crop_dragged(*fitted)
+            self.panel.commit_external_edit()
+        finally:
+            self._fitting_depth -= 1
 
     def _commit_external_edit(self) -> None:
         """The end of a crop or shape drag. Goes through the panel so a
@@ -1714,7 +1921,22 @@ class LoupeDialog(QDialog):
             self.panel.rows[key].set_value(value, silent=True)
         self._dirty = True
 
+    def _leave_other_modes(self, keep: str) -> None:
+        """One mode on the picture at a time. Each one sets its own cursor
+        and grabs the press first, so two at once left the crop rectangle
+        painting under the brush, or the eyedropper swallowing the click
+        that was meant to set the main face. Leaving crop mode applies
+        the crop (every release was committed); the others just stop."""
+        if keep != "crop" and self.preview._crop_mode:
+            self.panel.crop_mode_button.setChecked(False)
+        if keep != "brush" and self.panel.brush_paint.isChecked():
+            self.panel.brush_paint.setChecked(False)
+        if keep != "pick" and getattr(self, "_pick_target", ""):
+            self.panel.clear_pick_mode()
+
     def _on_pick_mode(self, key: str) -> None:
+        if key:
+            self._leave_other_modes(keep="pick")
         self._pick_target = key
         self.preview.set_pick_mode(bool(key))
         if key:
@@ -1788,6 +2010,12 @@ class LoupeDialog(QDialog):
         point puts the grabbed coordinates out of step from the start (see
         _render).
         """
+        if self.preview._crop_mode:
+            # Crop mode wins: the handles are hidden and grab nothing, and
+            # the crop rectangle lives in the frame after the turns. With a
+            # radial mask still selected, the screen used to drop the
+            # turns as well, and the rectangle sat on the unturned picture.
+            return False
         if getattr(self.preview, "_shape_kind", None) is not None:
             return True
         if getattr(self.preview, "_brush_mode", False):
@@ -1814,6 +2042,13 @@ class LoupeDialog(QDialog):
 
         if self.before_after.isChecked():
             image = self._source
+            shown_geometry = GeometrySettings()
+            if self.preview._crop_mode:
+                # The handles live in the crop frame - the source after
+                # the turns, flips and straighten. Shown raw, the rectangle
+                # sat on the unturned picture.
+                shown_geometry = replace(settings.geometry, **_FULL_CROP)
+                image = engine.apply_geometry(image, shown_geometry)
         else:
             # In crop mode we show the image without applying the crop.
             # Drawing the cut result leaves no way to re-set the crop bounds
@@ -1860,9 +2095,13 @@ class LoupeDialog(QDialog):
         # Record the geometry **actually applied to the screen**, for the
         # overlay coordinate conversion. The before/after comparison is the
         # source as-is, so it has no geometry.
-        self._display_geometry = (GeometrySettings()
+        # The crop as the cut really made it (snapped to the ratio), not
+        # the sliders' whole percents - or the overlays land a percent off
+        # inside a small crop.
+        self._display_geometry = (shown_geometry
                                   if self.before_after.isChecked()
-                                  else settings.geometry)
+                                  else engine.exact_geometry(settings.geometry,
+                                                             *self._source.shape[:2]))
 
         # The before/after source is working-space float, so it is moved to
         # display here; the adjusted render was already moved by the engine
@@ -1893,7 +2132,8 @@ class LoupeDialog(QDialog):
             image = self._draw_roi(image)
 
         overlay_mask = self.panel.overlay_mask()
-        if overlay_mask is not None:
+        if overlay_mask is not None and not self.preview._crop_mode:
+            # Scene coordinates on the crop frame would be off by the turns
             image = self._draw_mask_overlay(image, overlay_mask)
 
         # The output markings (watermark, info strip) go on last, and only
@@ -2253,7 +2493,9 @@ class LoupeDialog(QDialog):
         self.preview.set_busy(False)
         # The geometry applied to this result - used by the overlay
         # coordinate conversion (_draw_roi).
-        self._display_geometry = worker._settings.geometry
+        self._display_geometry = (
+            engine.exact_geometry(worker._settings.geometry, *self._source.shape[:2])
+            if self._source is not None else worker._settings.geometry)
         image = to_display(image)
         if self._final_region is not None:
             image = self._compose_region(image, self._final_region)
@@ -2454,39 +2696,12 @@ class LoupeDialog(QDialog):
         just the face pinned, so the ROI, the sharpness, and the background
         sharpness all become relative to the new face.
         """
-        from ..core.focus import analyze_focus
-        from ..core.raw_io import load_preview
+        from ..core.main_face import reanalyze_with_main_face
 
-        # It has to be re-run with **the same settings** as the batch.
-        # Without the arguments, laplacian_k and the noise subtraction fall
-        # back to defaults and, with no af_box, af_face dies at -1 - only the
-        # main subject changed, yet the score differs from the batch and the
-        # AF confidence badge disappears.
-        config = self._analyze_config
-        try:
-            preview = load_preview(self.record.path)
-            af_box = None
-            if self.record.metadata is not None:
-                from ..core.maker_meta import af_preview_box
-
-                af_box = af_preview_box(
-                    self.record.path, self.record.metadata.orientation,
-                    preview.shape[1], preview.shape[0],
-                )
-            focus = analyze_focus(
-                preview,
-                detect_long_edge=config.detect_long_edge,
-                laplacian_k=config.laplacian_k,
-                tenengrad_k=config.tenengrad_k,
-                force_main_face=index,
-                af_box=af_box,
-                use_af_roi=config.af_roi_hint,
-                center_priority=config.center_priority,
-                noise_compensation=config.noise_compensation,
-            )
-        except Exception:  # noqa: BLE001 - develop must go on regardless
-            log.warning("%s: 주 피사체 재판정 실패", self.record.path.name,
-                        exc_info=True)
+        # Re-run with the batch's own settings (see main_face) - the same
+        # code the edits store uses to put a saved pick back.
+        focus = reanalyze_with_main_face(self.record, self._analyze_config, index)
+        if focus is None:
             return
 
         self.record.focus = focus
@@ -2679,17 +2894,26 @@ class LoupeDialog(QDialog):
         mask = self.panel.shape_mask()
         if mask is None:
             self.preview.set_shape(None)
-            # When the handles disappear the screen has to go back from the
-            # scene frame to the crop-applied view (_mask_editing_active).
-            # It is a display-frame transition, so a re-render is needed.
+        else:
+            # The size applies to radial only. Multiplying it onto a linear
+            # mask amounts to shrinking a radius that does not exist, and
+            # the screen and the result go out of step.
+            size = _size_factor(mask) if mask.kind in SIZE_KINDS else 1.0
+            self.preview.set_shape(mask.kind.value, mask.params, size=size)
+        # Handles up or down is a display-frame transition (the scene frame
+        # while they are up, the crop-applied view when they go). Drawn now,
+        # not by the timer: the handles are live the moment they are up,
+        # and a drag begun before the timer fired measured itself against
+        # the still-cropped picture, so the ellipse jumped when the render
+        # landed - the same stale frame that broke the ratio crop.
+        if self.panel._loading:
+            # A shot being loaded: the source on screen is still the last
+            # shot's, and _load_context draws the new one in a moment.
             self._render_timer.start()
-            return
-        # The size applies to radial only. Multiplying it onto a linear mask
-        # amounts to shrinking a radius that does not exist, and the screen
-        # and the result go out of step.
-        size = _size_factor(mask) if mask.kind in SIZE_KINDS else 1.0
-        self.preview.set_shape(mask.kind.value, mask.params, size=size)
-        self._render_timer.start()      # the reverse transition is the same
+        elif (self.preview._crop_mode, self._mask_editing_active()) != self._rendered_frame:
+            self._render()
+        else:
+            self._render_timer.start()
 
     def _on_shape_dragged(self, params: dict) -> None:
         """Stores the shape coordinates dragged on the image into the mask.
@@ -2710,6 +2934,8 @@ class LoupeDialog(QDialog):
     def _on_brush_mode(self, enabled: bool) -> None:
         """Paint mode switches off crop and the eyedropper, taking only the
         brush."""
+        if enabled:
+            self._leave_other_modes(keep="brush")
         self.preview.set_brush_mode(enabled)
         self._sync_brush_cursor()
         if enabled:
@@ -2794,6 +3020,13 @@ class LoupeDialog(QDialog):
         self.record.manual_grade = grade
         self._refresh_header()
         self.records_changed.emit()
+        if state.advance_after_grade():
+            self.step(1)
+
+    def show_shortcuts(self) -> None:
+        from .shortcuts_dialog import show_shortcuts
+
+        show_shortcuts(self)
 
     def apply_to_all(self) -> None:
         """Applies the develop dialled in here to the whole list.

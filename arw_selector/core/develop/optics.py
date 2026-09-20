@@ -615,6 +615,8 @@ def _piece(image: np.ndarray, region: "Region | None") -> np.ndarray:
     if region is None:
         return image
     left, top, right, bottom = region
+    if (left, top, right, bottom) == (0, 0, image.shape[1], image.shape[0]):
+        return image                     # the whole frame: no 600MB copy
     return np.ascontiguousarray(image[top:bottom, left:right])
 
 
@@ -636,11 +638,17 @@ def _vignetting_gain(lens, crop_factor: float, width: int, height: int,
     if not np.all(np.isfinite(gain)):
         return None
     left, top, right, bottom = box
-    # pixel centres of the box, in the small map's pixel coordinates
-    xs = (np.arange(left, right, dtype=np.float32) + np.float32(0.5)) \
-        * np.float32(small_w / width) - np.float32(0.5)
-    ys = (np.arange(top, bottom, dtype=np.float32) + np.float32(0.5)) \
-        * np.float32(small_h / height) - np.float32(0.5)
+    # The box's pixels in the small map's pixel coordinates. lensfun
+    # normalises a frame by its **last pixel index**, n - 1, not by n:
+    # pixel 0 of the small map is pixel 0 of the frame and its last pixel
+    # is the frame's last, so the two grids line up with a plain scale of
+    # (n_small - 1) / (n - 1). Read as "pixel centres over n" the map was
+    # stretched by about GAIN_MAP_STEP - 1 pixels at the corner - on the
+    # steepest part of the falloff, 5% of gain on a 1200px preview.
+    xs = np.arange(left, right, dtype=np.float32) \
+        * np.float32((small_w - 1) / max(1, width - 1))
+    ys = np.arange(top, bottom, dtype=np.float32) \
+        * np.float32((small_h - 1) / max(1, height - 1))
     map_x, map_y = np.meshgrid(xs, ys)
     # cubic, not linear: the gain curves upward towards the corner and a
     # linear read between points 8px apart missed it by 0.25% there
@@ -712,9 +720,10 @@ def apply_auto_correction(
         coords = None
         interpolation = cv2.INTER_LANCZOS4
         # the whole frame is asked for without arguments - lensfun's
-        # sub-rectangle evaluation rounds a shade differently (0.14px at
-        # most, measured), and the whole frame should stay bit for bit
-        # what it was
+        # sub-rectangle evaluation rounds a shade differently (its own
+        # float32 accumulation: ~0.3px on even frame sizes, up to ~0.6px
+        # on odd ones and tiny windows, measured), and the whole frame
+        # should stay bit for bit what it was
         window = () if region is None else (left, top, piece_w, piece_h)
         if settings.auto_chromatic and settings.auto_distortion:
             coords = modifier.apply_subpixel_geometry_distortion(*window)

@@ -558,6 +558,46 @@ def _clip_box(x: float, y: float, w: float, h: float, shape: tuple[int, int]) ->
     return x0, y0, max(0, x1 - x0), max(0, y1 - y0)
 
 
+def _grow_box(box: tuple[int, int, int, int], minimum: int,
+              shape: tuple[int, int]) -> tuple[int, int, int, int]:
+    """Widens a box about its centre to at least `minimum` on each side,
+    clipped to the image.
+
+    For the camera's AF frame. A tracking frame on a small, distant
+    subject can come out under MIN_ROI_PX once scaled to the preview -
+    dropping it there sent the ROI back to the sharpest tile, which is the
+    grass the bird sits in, so tracking silently stopped doing its one job
+    on exactly the frames it exists for. A few pixels of the surroundings
+    are a far smaller error than the wrong subject.
+    """
+    x, y, w, h = box
+    height, width = shape
+    grown_w, grown_h = max(w, minimum), max(h, minimum)
+    # Shifted inward at the frame edge rather than clipped, so the box
+    # keeps its size as long as the image is big enough to hold it.
+    x0 = min(max(int(round(x + w / 2.0 - grown_w / 2.0)), 0), max(0, width - grown_w))
+    y0 = min(max(int(round(y + h / 2.0 - grown_h / 2.0)), 0), max(0, height - grown_h))
+    return _clip_box(x0, y0, grown_w, grown_h, shape)
+
+
+def _face_under(faces, scale: float, af_box: tuple[int, int, int, int]) -> int:
+    """Index of the detected face whose box (full-resolution) contains the
+    AF frame's centre, -1 if none does. For a tracking frame, which sits
+    on the subject itself."""
+    ax, ay = af_box[0] + af_box[2] / 2.0, af_box[1] + af_box[3] / 2.0
+    for index, face in enumerate(faces):
+        if float(face[14]) < FACE_MAIN_MIN_SCORE:
+            # The same bar the main-face pick sets: a detection below it
+            # is a speaker cone or a smudge, and it must not take the
+            # frame away from the AF-box ROI just by lying under it.
+            continue
+        x, y, w, h = (float(face[0]) / scale, float(face[1]) / scale,
+                      float(face[2]) / scale, float(face[3]) / scale)
+        if x <= ax <= x + w and y <= ay <= y + h:
+            return index
+    return -1
+
+
 def _nearest_face(af_box: tuple[int, int, int, int],
                   faces: tuple[tuple[int, int, int, int], ...]) -> int:
     """Index of the face nearest the AF box centre. For the confidence
@@ -733,6 +773,7 @@ def analyze_focus(
     center_priority: bool = False,
     noise_compensation: bool = True,
     reduced: np.ndarray | None = None,
+    af_tracking: bool = False,
 ) -> FocusResult:
     """Measure the focus state of one preview image.
 
@@ -752,6 +793,18 @@ def analyze_focus(
     the scoring to actually follow - change only the display and the score
     stays on the wrong face. So rather than keeping a separate path, this
     function is simply run again.
+
+    af_tracking says the af_box is a **tracking** frame - the camera locked
+    on a subject (Sony real-time / face / animal-eye tracking, Nikon
+    3D-tracking, Canon face + tracking) and af_box is where that subject
+    was at the shutter. Unlike zone AF, which records the zone (the torso)
+    and cannot compete with a detected face, a tracking frame *is* the
+    subject, so it outranks face detection: the face it sits in becomes
+    the main face whatever the others look like, and if it sits in no
+    face at all the frame itself is the ROI - the detections are then
+    something else (a magpie on the grass drew four "faces" out of the
+    turf, and the score was measured on the turf). Without this the app
+    did not follow the tracked subject, which is what tracking is for.
     """
     full_h, full_w = image_bgr.shape[:2]
     shape = (full_h, full_w)
@@ -782,10 +835,15 @@ def analyze_focus(
     face_scores: tuple[float, ...] = ()
     main_face = -1
 
+    tracked_face = -1
+    if af_tracking and af_box is not None and faces is not None:
+        tracked_face = _face_under(faces, scale, af_box)
     if faces is not None:
         face_count = len(faces)
         if force_main_face is not None and 0 <= force_main_face < len(faces):
             index = int(force_main_face)
+        elif tracked_face >= 0:
+            index = tracked_face
         else:
             if center_priority:
                 index = _pick_central_face(faces, gray_full, scale, shape)
@@ -813,6 +871,25 @@ def analyze_focus(
             if min(candidate[2], candidate[3]) >= MIN_ROI_PX:
                 roi, source = candidate, FocusSource.FACE
 
+    if (af_tracking and af_box is not None and force_main_face is None
+            and (tracked_face < 0 or roi is None)):
+        # A tracking frame in no detected face (or in one too small to
+        # measure): the camera's subject is not what the detector found.
+        # The frame is the ROI. The faces stay reported for display, but
+        # they are not the subject, so nothing about them may reach the
+        # score - a face bonus for a patch of grass, "eyes closed" on a
+        # leaf, "camera focused on someone else" while the ROI *is* the
+        # camera's frame.
+        candidate = _grow_box(
+            _clip_box(af_box[0], af_box[1], af_box[2], af_box[3], shape), MIN_ROI_PX, shape)
+        if candidate and min(candidate[2], candidate[3]) >= MIN_ROI_PX:
+            roi, source = candidate, FocusSource.AF
+            if tracked_face < 0:
+                main_face = -1
+                face_count = 0
+                face_confidence = 0.0
+                face_area_ratio = 0.0
+                face_box_small = None
     if roi is None and af_box is not None and use_af_roi:
         # Use the AF position the camera recorded as the ROI (a precise
         # analysis option). We never get here if a face or eye ROI exists -
@@ -821,7 +898,8 @@ def analyze_focus(
         # face detection. Only on frames with no face do we use the
         # camera's actual focus position instead of guessing at "the
         # sharpest tile".
-        candidate = _clip_box(af_box[0], af_box[1], af_box[2], af_box[3], shape)
+        candidate = _grow_box(
+            _clip_box(af_box[0], af_box[1], af_box[2], af_box[3], shape), MIN_ROI_PX, shape)
         if candidate and min(candidate[2], candidate[3]) >= MIN_ROI_PX:
             roi, source = candidate, FocusSource.AF
 

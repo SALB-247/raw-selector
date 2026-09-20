@@ -6,6 +6,7 @@ shots, the user takes it for a dead program.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThread, Signal
@@ -15,6 +16,8 @@ from ..core.config import Config
 from ..core.pipeline import Progress
 from ..core.session import SelectionSession
 from ..core.thumbs import thumbnail_path
+
+log = logging.getLogger(__name__)
 
 
 def silent_disconnect(signal) -> None:
@@ -82,7 +85,7 @@ def stop_worker(worker, timeout_ms: int = 15000) -> bool:
     try:
         if hasattr(worker, "cancel"):
             worker.cancel()
-        for name in ("done", "failed", "finished_ok", "progressed", "finished"):
+        for name in ("done", "failed", "finished_ok", "progressed", "restoring", "finished"):
             signal = getattr(worker, name, None)
             if signal is not None:
                 silent_disconnect(signal)
@@ -97,6 +100,7 @@ class AnalysisWorker(QThread):
     """Runs the folder analysis in the background."""
 
     progressed = Signal(object)   # Progress
+    restoring = Signal(int, int)  # saved main-subject picks put back: done, total
     finished_ok = Signal(object)  # SelectionSession
     failed = Signal(str)
 
@@ -109,6 +113,8 @@ class AnalysisWorker(QThread):
         self.paths = paths
         """None scans the whole folder; a list means only those files."""
         self._cancelled = False
+        self.restored_faces = 0
+        """How many saved main-subject picks the run put back (_restore_main_faces)."""
 
     def cancel(self) -> None:
         self._cancelled = True
@@ -125,9 +131,35 @@ class AnalysisWorker(QThread):
                 should_cancel=self.is_cancelled,
                 paths=self.paths,
             )
+            self.restored_faces = self._restore_main_faces(session)
             self.finished_ok.emit(session)
         except Exception as exc:  # noqa: BLE001 - a thread leak kills the app
             self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+    def _restore_main_faces(self, session: SelectionSession) -> int:
+        """Puts the saved main-subject picks back before the session is
+        handed over.
+
+        Each pick is a preview read and a detector pass, so fifty of them
+        on the GUI thread froze the window for up to a minute at the very
+        moment "analysis complete" appeared, with no progress shown. Here
+        the progress bar is still up (restoring) and the stop button still
+        works. Grades and develop edits are instant and stay with the
+        window (main_window.on_analysis_done). The batch is re-graded when
+        a pick changed a score. A failure here must not fail the analysis.
+        """
+        from ..core import edits as edits_store
+
+        try:
+            faces = edits_store.restore_main_faces(
+                self.folder, session.records, self.config.analyze,
+                progress_cb=self.restoring.emit, should_cancel=self.is_cancelled)
+            if faces:
+                session.regrade()
+            return faces
+        except Exception:  # noqa: BLE001 - the measurements stand on their own
+            log.warning("저장된 주 피사체 선택을 복원하지 못했다", exc_info=True)
+            return 0
 
 
 class ExportWorker(QThread):

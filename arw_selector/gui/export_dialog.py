@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from dataclasses import replace
+
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QInputDialog, QMessageBox
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -30,8 +33,15 @@ from ..core.export_options import (
     ExportOptions,
     ResizeMode,
 )
+from ..core import presets as presets_module
 from . import theme
 from .i18n import tr
+
+
+def export_presets():
+    """The store, behind a module attribute so tests can point it at a
+    temporary folder."""
+    return presets_module.export_presets()
 
 # HEIF/AVIF are not in the list. This OpenCV build has no encoder for them,
 # so saving fails outright (measured). Moving the .HIF original that sits
@@ -132,6 +142,7 @@ class ExportDialog(QDialog):
         header.setWordWrap(True)
         layout.addWidget(header)
 
+        layout.addLayout(self._build_preset_row())
         layout.addWidget(self._build_files_group())
         layout.addWidget(self._build_image_group())
         layout.addWidget(self._build_naming_group())
@@ -152,6 +163,77 @@ class ExportDialog(QDialog):
 
         self._load()
         self._refresh_summary()
+
+    # ------------------------------------------------------------ Presets
+
+    def _build_preset_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addWidget(QLabel(tr("Preset")))
+        self._store = export_presets()
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem(tr("(choose)"), "")
+        for info in self._store.list():
+            self.preset_combo.addItem(info.name, info.name)
+        self.preset_combo.setToolTip(tr(
+            "Saved export settings — format, size, naming and folders.\n"
+            "Choosing one fills the dialog; which grades to export stays as set here."))
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_chosen)
+        row.addWidget(self.preset_combo, 1)
+        self.preset_save = QPushButton(tr("Save…"))
+        self.preset_save.setToolTip(tr("Save the settings below under a name"))
+        self.preset_save.clicked.connect(self._save_preset)
+        row.addWidget(self.preset_save)
+        self.preset_delete = QPushButton(tr("Delete"))
+        self.preset_delete.setEnabled(False)
+        self.preset_delete.clicked.connect(self._delete_preset)
+        row.addWidget(self.preset_delete)
+        return row
+
+    def _on_preset_chosen(self, _index: int = 0) -> None:
+        name = self.preset_combo.currentData()
+        self.preset_delete.setEnabled(bool(name))
+        if not name:
+            return
+        try:
+            data = self._store.load(name)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, tr("Export preset"), str(exc))
+            return
+        # The grades are about this batch, not the preset
+        self.options = replace(ExportOptions.from_dict(data), grades=self.result_options().grades)
+        self._load()
+        self._refresh_summary()
+
+    def save_preset_named(self, name: str) -> None:
+        name = name.strip()
+        if not name:
+            return
+        self._store.save(name, self.result_options().to_dict())
+        if self.preset_combo.findData(name) < 0:
+            self.preset_combo.addItem(name, name)
+        self.preset_combo.setCurrentIndex(self.preset_combo.findData(name))
+
+    def _save_preset(self) -> None:
+        name, ok = QInputDialog.getText(self, tr("Save export preset"), tr("Name"))
+        if ok:
+            self.save_preset_named(name)
+
+    def _delete_preset(self) -> None:
+        name = self.preset_combo.currentData()
+        if not name:
+            return
+        answer = QMessageBox.question(
+            self, tr("Export preset"),
+            tr("Delete the export preset \"{name}\"?").format(name=name))
+        if answer == QMessageBox.Yes:
+            self.delete_preset_named(name)
+
+    def delete_preset_named(self, name: str) -> None:
+        self._store.delete(name)
+        index = self.preset_combo.findData(name)
+        if index >= 0:
+            self.preset_combo.removeItem(index)
+        self.preset_combo.setCurrentIndex(0)
 
     # ------------------------------------------------------------ Build
 
@@ -280,6 +362,22 @@ class ExportDialog(QDialog):
         self.resize_percent.valueChanged.connect(self._refresh_summary)
         resize_row.addWidget(self.resize_percent)
         form.addRow(tr("Size"), resize_row)
+
+        self.render_workers = QComboBox()
+        self.render_workers.addItem(tr("Auto"), 0)
+        for count in (1, 2, 3, 4):
+            self.render_workers.addItem(str(count), count)
+        self.render_workers.setToolTip(tr(
+            "How many photos are developed at once.\n"
+            "Auto counts on about 4 GB of free memory per photo for a plain develop\n"
+            "and up to 9 GB with a lens profile or noise reduction (50 MP), so a laptop\n"
+            "usually gets 1 and a workstation 3 or 4. Pin a number only when you know\n"
+            "the memory is there — two renders that do not fit swap, and end up slower\n"
+            "than one."
+        ))
+        self.apply_develop.toggled.connect(self.render_workers.setEnabled)
+        self.render_workers.setEnabled(self.apply_develop.isChecked())
+        form.addRow(tr("Parallel rendering"), self.render_workers)
 
         self._image_form = form
         self._image_fields = (self.image_format, self.quality, resize_row)
@@ -589,6 +687,8 @@ class ExportDialog(QDialog):
         self._sync_image_controls()
 
         self.pattern.setText(options.filename_pattern)
+        index = self.render_workers.findData(int(getattr(options, "render_workers", 0) or 0))
+        self.render_workers.setCurrentIndex(max(0, index))
 
     def result_options(self) -> ExportOptions:
         return ExportOptions(
@@ -606,6 +706,7 @@ class ExportDialog(QDialog):
             resize_long_edge=self.resize_long_edge.value(),
             resize_percent=self.resize_percent.value(),
             filename_pattern=self.pattern.text() or "{name}",
+            render_workers=int(self.render_workers.currentData() or 0),
             subfolder_by_grade=self.subfolder.isChecked(),
             subfolder_by_place=self.subfolder_place.isChecked(),
         )

@@ -33,10 +33,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core import edits as edits_store
 from ..core import export as export_module
 from ..core import state
 from ..core.appinfo import APP_NAME
-from ..core.cache import cache_stats, clear_cache, default_cache_path
+from ..core.cache import cache_stats, clear_cache, default_cache_path, resolve_cache_dir
 from ..core.config import Config
 from ..core.export_options import ExportOptions
 from ..core.ordering import SortMode, sort_records
@@ -95,6 +96,30 @@ class MainWindow(QMainWindow):
             setattr(self.config.analyze, key, value)
         self.session: SelectionSession | None = None
         self.folder: Path | None = None
+        # Grades and edits are written a moment after the last change, not
+        # on every keystroke through a 4000-frame grid; closing flushes.
+        self._edits_timer = QTimer(self)
+        self._edits_timer.setSingleShot(True)
+        self._edits_timer.setInterval(400)
+        self._edits_timer.timeout.connect(self._flush_edits)
+        # Photos land in the grid as they are measured. Appended in small
+        # batches rather than one row per worker return: 4000 single
+        # inserts would keep the view relayouting the whole time.
+        self._analysis_live = False
+        self._live_buffer: list = []
+        self._live_records: list = []
+        self._compare_dialogs: list = []
+        self._develop_clipboard = None
+        self._saved_edits: dict = {}
+        self._edits_root: Path | None = None
+        """The folder's saved decisions, read as an analysis starts and put on
+        each photo as it lands (on_progress). A grade given mid-run is saved
+        from the partial list on screen; those photos have to carry what the
+        file already said about them, or the save would clear it."""
+        self._live_timer = QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.setInterval(300)
+        self._live_timer.timeout.connect(self._flush_live)
         self.analysis_worker: AnalysisWorker | None = None
         self.export_worker: ExportWorker | None = None
         self.queue = ExportQueue()
@@ -126,6 +151,9 @@ class MainWindow(QMainWindow):
 
         # The grid comes first: the toolbar connects to its slots
         self.grid = ThumbnailGrid(Path.cwd())
+        self.grid.set_placeholder(tr(
+            "Open a folder to analyse it — the photos are sorted into keep / "
+            "review / reject, and 1·2·3 re-grades them by hand."))
         self.grid.record_activated.connect(self.open_loupe)
         self.grid.selectionModel().selectionChanged.connect(self._on_selection_changed)
 
@@ -232,6 +260,13 @@ class MainWindow(QMainWindow):
         stop_action.triggered.connect(self.cancel_running)
         self.addAction(stop_action)
 
+    def _after_calibration(self) -> None:
+        """A calibration changes the colour every base is demosaiced with;
+        the develop window's cached bases were built without it."""
+        from .loupe import clear_base_cache
+
+        clear_base_cache()
+
     def set_status(self, message: str, *, busy: bool = False) -> None:
         """Bottom-bar message. Busy states are colour-coded as well."""
         self.status_label.setText(message)
@@ -328,6 +363,13 @@ class MainWindow(QMainWindow):
         self.develop_button.setEnabled(False)
         bar.addWidget(self.develop_button)
 
+        self.compare_button = QPushButton(tr("Compare"))
+        self.compare_button.setToolTip(tr(
+            "Two to four selected photos side by side, zoomed and panned together (C)"))
+        self.compare_button.setEnabled(False)
+        self.compare_button.clicked.connect(self.compare_selected)
+        bar.addWidget(self.compare_button)
+
         self.queue_add_button = QPushButton(tr("Add to queue"))
         self.queue_add_button.setToolTip(tr(
             "Stack the selected photos, with their current edit, on the "
@@ -413,7 +455,19 @@ class MainWindow(QMainWindow):
         self.preferences_button.clicked.connect(self.open_preferences)
         bar.addWidget(self.preferences_button)
 
+        self.shortcuts_button = QPushButton(tr("Keys"))
+        self.shortcuts_button.setToolTip(tr("Keyboard shortcuts (F1)"))
+        self.shortcuts_button.clicked.connect(self.show_shortcuts)
+        bar.addWidget(self.shortcuts_button)
+        from PySide6.QtGui import QKeySequence, QShortcut
+        QShortcut(QKeySequence("F1"), self, self.show_shortcuts)
+
         return bar
+
+    def show_shortcuts(self) -> None:
+        from .shortcuts_dialog import show_shortcuts
+
+        show_shortcuts(self)
 
     def open_preferences(self) -> None:
         """Preferences. A language change needs a restart — say so once."""
@@ -446,6 +500,22 @@ class MainWindow(QMainWindow):
         loupe.setShortcut(QKeySequence(Qt.Key_Space))
         loupe.triggered.connect(self.open_selected_loupe)
         self.addAction(loupe)
+        compare = QAction(self)
+        compare.setShortcut(QKeySequence("C"))
+        compare.triggered.connect(self.compare_selected)
+        self.addAction(compare)
+        for key, handler in (("Ctrl+Shift+C", self.copy_develop_settings),
+                             ("Ctrl+Shift+V", self.paste_develop_settings)):
+            action = QAction(self)
+            action.setShortcut(QKeySequence(key))
+            action.triggered.connect(handler)
+            self.addAction(action)
+        # Scene by scene - a shoot is worked burst by burst, not frame by frame.
+        for key, direction in (("[", -1), ("]", 1)):
+            jump = QAction(self)
+            jump.setShortcut(QKeySequence(key))
+            jump.triggered.connect(lambda _=False, d=direction: self.jump_scene(d))
+            self.addAction(jump)
 
         develop = QAction(self)
         develop.setShortcut(QKeySequence("D"))
@@ -480,6 +550,11 @@ class MainWindow(QMainWindow):
         # instruction to press it, and 4000 photos get re-analysed.
         changed = chosen != self.folder
 
+        # What was decided about the previous folder goes to that folder's
+        # file before self.folder moves on. _flush_edits writes where the
+        # records belong whatever self.folder says; this only makes sure no
+        # pending save is left waiting for the next flush.
+        self._flush_edits()
         self.folder = chosen
         state.remember_folder(self.folder)
         self._explicit_paths = None  # picking a folder means scan all of it
@@ -500,6 +575,7 @@ class MainWindow(QMainWindow):
         if not paths:
             return
 
+        self._flush_edits()  # the previous folder's decisions, to its own file
         self._explicit_paths = [Path(p) for p in paths]
         self.folder = self._explicit_paths[0].parent
         self.analyze_button.setEnabled(True)
@@ -518,6 +594,9 @@ class MainWindow(QMainWindow):
     def start_analysis(self, *, show_dialog: bool = True) -> None:
         if self.folder is None or (self.analysis_worker and self.analysis_worker.isRunning()):
             return
+        # Anything decided about the previous session goes to disk before
+        # the session is replaced.
+        self._flush_edits()
 
         self.config.recursive = self.recursive_check.isChecked()
 
@@ -540,12 +619,22 @@ class MainWindow(QMainWindow):
         use_cache = getattr(self, "_pending_use_cache", True)
         self._set_busy(True)
         self._begin_task(tr("Preparing to analyse…"))
+        # The grid empties now and fills as results come in - see on_progress.
+        self._analysis_live = True
+        self._live_buffer = []
+        self._live_records = []
+        self._saved_edits, self._edits_root = self._read_saved_edits(self.folder)
+        self.grid.set_placeholder(tr("Analysing — photos appear here as they are measured."))
+        self.grid.set_records(
+            [], default_cache_path(self.folder).parent if self.folder else None,
+            pending=True)
 
         self.analysis_worker = AnalysisWorker(
             self.folder, self.config, use_cache=use_cache,
             paths=self._explicit_paths,
         )
         self.analysis_worker.progressed.connect(self.on_progress)
+        self.analysis_worker.restoring.connect(self.on_restore_progress)
         self.analysis_worker.finished_ok.connect(self.on_analysis_done)
         self.analysis_worker.failed.connect(self.on_worker_failed)
         self.analysis_worker.start()
@@ -571,18 +660,24 @@ class MainWindow(QMainWindow):
             return False
 
         cached = 0
+        cache_note = ""
         try:
-            cache = AnalysisCache(
-                default_cache_path(self.folder), self.config.analyze.cache_key())
+            db_path = default_cache_path(self.folder)
+            cache = AnalysisCache(db_path, self.config.analyze.cache_key())
             cache.open()
             cached = cache.count_ready(paths)
+            if cache.read_only:
+                cache_note = tr("The cache is read-only: this run's results will not be saved.")
+            elif db_path.parent != resolve_cache_dir(self.folder):
+                cache_note = tr("The folder cannot be written: the cache is kept in your user folder.")
             cache.close()
         except Exception:  # noqa: BLE001 - analysis runs without a cache count
             cached = 0
 
         options = AnalysisStartDialog.ask(
             len(paths), cached, self.config.analyze, self,
-            small_preview_count=sum(1 for p in paths if has_small_preview(p)))
+            small_preview_count=sum(1 for p in paths if has_small_preview(p)),
+            cache_note=cache_note)
         if options is None:
             return False
 
@@ -601,7 +696,30 @@ class MainWindow(QMainWindow):
         self._pending_use_cache = options.use_cache
         return True
 
+    @staticmethod
+    def _read_saved_edits(folder: Path) -> tuple[dict, Path | None]:
+        """The folder's edits.json and the root its keys are relative to,
+        for the photos landing mid-run. The analysis does not depend on it."""
+        try:
+            return edits_store.load_edits(folder), edits_store.edits_root(folder)
+        except Exception:  # noqa: BLE001
+            log.debug("저장된 판정을 미리 읽지 못했다: %s", folder, exc_info=True)
+            return {}, None
+
     def on_progress(self, progress) -> None:
+        fresh = getattr(progress, "fresh", ())
+        if fresh and self._analysis_live:
+            if self._saved_edits and self._edits_root is not None:
+                # Saved grades and develop edits go on as the photo lands, so
+                # the live grid shows them and a save mid-run (a grade on a
+                # photo that just arrived) carries them.
+                edits_store.apply_edits(list(fresh), self._saved_edits, self._edits_root)
+            self._live_buffer.extend(fresh)
+            self._live_records.extend(fresh)
+            if len(self._live_buffer) >= 50:
+                self._flush_live()
+            elif not self._live_timer.isActive():
+                self._live_timer.start()
         self.status_progress.setMaximum(progress.total)
         self.status_progress.setValue(progress.done)
         self._set_eta(progress.eta_seconds)
@@ -612,12 +730,45 @@ class MainWindow(QMainWindow):
             busy=True,
         )
 
+    def _flush_live(self) -> None:
+        self._live_timer.stop()
+        if self._live_buffer and self._analysis_live:
+            self.grid.append_records(self._live_buffer)
+        self._live_buffer = []
+
+    def on_restore_progress(self, done: int, total: int) -> None:
+        """The worker putting saved main-subject picks back after the
+        measurements are in - a preview read and a detector pass each, so
+        it gets the progress bar rather than a frozen window."""
+        self.status_progress.setMaximum(max(total, 1))
+        self.status_progress.setValue(done)
+        self._set_eta(None)
+        self.set_status(
+            tr("Restoring saved main-subject picks {done}/{total}…").format(
+                done=done, total=total),
+            busy=True,
+        )
+
     def on_analysis_done(self, session: SelectionSession) -> None:
         # Cancelling also lands here, with the results only partly filled in.
         # Not saying so leaves a 300-of-4000 summary looking like a finished one.
         cancelled = bool(self.analysis_worker and self.analysis_worker.is_cancelled())
+        self._analysis_live = False
+        self._live_timer.stop()
+        self._live_buffer = []
 
         self.session = session
+        self._saved_edits, self._edits_root = {}, None
+        # What was decided last time about these photos comes back before
+        # anything is shown. Grades and develop edits are put back here, a
+        # lookup each; the main-subject picks were put back by the worker,
+        # which had to read every picked photo again
+        # (AnalysisWorker._restore_main_faces), and it re-graded for them.
+        if session.records:
+            grades, develops, _ = edits_store.restore(session.folder, session.records)
+            faces = getattr(self.analysis_worker, "restored_faces", 0)
+            if grades or develops or faces:
+                log.info("저장된 판정 %d·현상 %d·주 피사체 %d 복원", grades, develops, faces)
         self._set_busy(False)
         self._end_task()
         self.export_button.setEnabled(bool(session.records))
@@ -660,6 +811,7 @@ class MainWindow(QMainWindow):
             return
 
         if run_calibration(self, need, manual=True):
+            self._after_calibration()
             self.grid.refresh()
 
     def _offer_calibration(self, session: SelectionSession) -> None:
@@ -678,6 +830,7 @@ class MainWindow(QMainWindow):
             if need is None:
                 return
             if run_calibration(self, need):
+                self._after_calibration()
                 # A new calibration leaves existing thumbnails and previews
                 # carrying the old colour
                 self.grid.refresh()
@@ -685,6 +838,10 @@ class MainWindow(QMainWindow):
             log.warning("colour calibration check failed", exc_info=True)
 
     def on_worker_failed(self, message: str) -> None:
+        self._analysis_live = False
+        self._live_timer.stop()
+        self._live_buffer = []
+        self._saved_edits, self._edits_root = {}, None
         self._set_busy(False)
         self._set_editing_locked(False)
         self._end_task()
@@ -692,7 +849,9 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, tr("Failed"), message)
 
     def _show_summary(self, *, cancelled: bool = False) -> None:
-        if not self.session:
+        # While a run is going, the session, if any, is the previous folder's
+        # and the status bar is the progress report.
+        if not self.session or self._analysis_live:
             return
         summary = self.session.summary
         total = len(self.session.records)
@@ -724,7 +883,19 @@ class MainWindow(QMainWindow):
             text += tr(" · {count} failed to analyse").format(count=failed)
         if cancelled:
             text = tr("Cancelled — results so far: ") + text
+        text += self._hint_once(
+            "grid", tr(" — 1·2·3 grade, Space enlarges, [ ] next scene, F1 lists the keys"))
         self.set_status(text)
+
+    @staticmethod
+    def _hint_once(name: str, text: str) -> str:
+        """A guidance line shown the first time only on this machine. The
+        HOWTO is long and the keys are what a culling session runs on; one
+        line at the moment they matter is what gets them learnt."""
+        if state.hint_seen(name):
+            return ""
+        state.mark_hint_seen(name)
+        return text
 
     def _set_busy(self, busy: bool) -> None:
         self.open_button.setEnabled(not busy)
@@ -754,8 +925,8 @@ class MainWindow(QMainWindow):
 
     def apply_filter(self, selection=None) -> None:
         """Show only what the current filter selects."""
-        if not self.session:
-            return
+        if not self.session or self._analysis_live:
+            return  # while analysing, the grid shows what has landed so far
         if selection is None:
             selection = self.filter_bar.current_grade()
 
@@ -767,6 +938,9 @@ class MainWindow(QMainWindow):
             records = [r for r in self.session.records if r.final_grade == selection]
 
         records = sort_records(records, self.sort_combo.currentData())
+        self.grid.set_placeholder(
+            tr("No photos match this filter.") if self.session.records
+            else tr("No photos were found in this folder."))
         # The thumbnail cache folder has to be passed **here** for the grid to
         # notice the folder changed. Assigning the model's cache_dir directly
         # means set_records sees the two already equal, and the branch that
@@ -775,9 +949,11 @@ class MainWindow(QMainWindow):
             records, default_cache_path(self.session.folder).parent)
 
     def _on_selection_changed(self, *_) -> None:
-        has_selection = bool(self.grid.selectedIndexes())
+        selected = self.grid.selectedIndexes()
+        has_selection = bool(selected)
         self.develop_button.setEnabled(has_selection)
         self.queue_add_button.setEnabled(has_selection)
+        self.compare_button.setEnabled(len(selected) >= 2)
         self._refresh_score_card()
 
     def _refresh_score_card(self) -> None:
@@ -825,6 +1001,125 @@ class MainWindow(QMainWindow):
         self.grid.refresh()
         self.apply_filter()
         self._show_summary()
+        self._save_edits_soon()
+
+    def _save_edits_soon(self) -> None:
+        if self.folder is not None and (self.session is not None or self._analysis_live):
+            self._edits_timer.start()
+
+    def _flush_edits(self) -> None:
+        """Writes grades, develop edits and main-subject picks now.
+
+        While an analysis is running the records on screen are the live
+        ones, not the previous session's - a grade given to a photo that
+        has just landed is saved from that list."""
+        self._edits_timer.stop()
+        # The records say where they go: the folder being analysed for the
+        # live list, the session's own folder for the session. self.folder
+        # is already the next folder while Open folder / Open files replace
+        # the session, and saving under it wrote folder A's decisions into
+        # folder B's file.
+        if self._analysis_live:
+            worker = self.analysis_worker
+            folder = worker.folder if worker is not None else self.folder
+            records = self._live_records
+        elif self.session is not None:
+            folder = getattr(self.session, "folder", None) or self.folder
+            records = self.session.records
+        else:
+            return
+        if folder is None or not records:
+            return
+        if edits_store.save_edits(folder, records) is None:
+            self.set_status(tr("Grades and edits could not be saved — neither the folder "
+                               "nor your user folder would take the file."))
+
+    def jump_scene(self, direction: int) -> None:
+        """Selects the first photo of the previous / next scene in the grid."""
+        from ..core.ordering import scene_position, scene_step
+
+        records = self._visible_records()
+        current = self.grid.currentIndex()
+        row = current.row() if current.isValid() else 0
+        target = scene_step(records, row, direction)
+        if target is None:
+            return
+        index = self.grid.model_.index(target)
+        self.grid.setCurrentIndex(index)
+        self.grid.scrollTo(index)
+        scene, scenes, _, photos = scene_position(records, target)
+        self.set_status(tr("Scene {scene}/{scenes} · {photos} photos").format(
+            scene=scene, scenes=scenes, photos=photos))
+
+    def copy_develop_settings(self) -> None:
+        """Ctrl+Shift+C: the selected photo's develop settings, to paste onto
+        others. Same scene, same light - the most repeated edit there is."""
+        from ..core.develop.settings import DevelopSettings
+
+        records = self.grid.selected_records()
+        if len(records) != 1:
+            self.set_status(tr("Select one photo to copy its develop settings from."))
+            return
+        self._develop_clipboard = records[0].develop or DevelopSettings()
+        self.set_status(tr("Develop settings copied from {name} — Ctrl+Shift+V pastes them "
+                           "onto the selection (each photo keeps its own crop and masks).")
+                        .format(name=records[0].path.name))
+
+    def paste_develop_settings(self) -> None:
+        """Ctrl+Shift+V: the copied settings onto every selected photo. Crop,
+        masks and watermark are each photo's own and stay (the loupe's
+        apply-to-all rule)."""
+        if getattr(self, "_editing_locked", False):
+            self.set_status(tr("Develop edits are locked during an export"))
+            return
+        if self._develop_clipboard is None:
+            self.set_status(tr("Nothing copied yet — Ctrl+Shift+C copies from the selected photo."))
+            return
+        records = self.grid.selected_records()
+        if not records:
+            return
+        # A photo open in a develop window is skipped: that window commits
+        # the values on its panel when it moves on, and would write them
+        # straight back over the paste.
+        open_paths = set(self._loupes)
+        targets = [r for r in records if r.path not in open_paths]
+        shared = self._develop_clipboard.without_geometry()
+        for record in targets:
+            if record.develop is not None:
+                record.develop = record.develop.with_preset(shared)
+            else:
+                record.develop = None if shared.is_neutral() else shared
+        self._on_loupe_changed()
+        text = tr("Develop settings pasted onto {count} photos (crop and masks kept).").format(count=len(targets))
+        if len(targets) < len(records):
+            text += tr(" {count} open in a develop window were skipped.").format(
+                count=len(records) - len(targets))
+        self.set_status(text)
+
+    def compare_selected(self) -> None:
+        """Two to four selected photos side by side (see compare_dialog)."""
+        records = self.grid.selected_records()
+        if len(records) < 2:
+            self.set_status(tr("Select two to four photos to compare them side by side."))
+            return
+        from .compare_dialog import MAX_TILES, CompareDialog
+
+        # No parent, for the same reason as the loupe: an owned window on
+        # Windows always sits above the main window.
+        dialog = CompareDialog(records[:MAX_TILES], None)
+        dialog.records_changed.connect(self._on_loupe_changed)
+        dialog.finished.connect(lambda _=0, d=dialog: self._forget_compare(d))
+        self._compare_dialogs.append(dialog)
+        dialog.show()
+        dialog.raise_()
+
+    def _forget_compare(self, dialog) -> None:
+        if dialog in self._compare_dialogs:
+            self._compare_dialogs.remove(dialog)
+        self.grid.refresh()
+        self.apply_filter()
+        self._show_summary()
+        self._save_edits_soon()
 
     def open_selected_loupe(self) -> None:
         records = self.grid.selected_records()
@@ -885,6 +1180,11 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(lambda _=0, d=dialog: self._on_loupe_closed(d))
 
         self._loupes[record.path] = dialog
+        hint = self._hint_once(
+            "loupe", tr("Develop window: B compares with the original, 1·2·3 grade, "
+                        "← → and [ ] move, F1 lists the keys"))
+        if hint:
+            self.set_status(hint)
         # A window opened during an export has to be locked as well, otherwise
         # there is a way around the lock standing wide open.
         if self._editing_locked:
@@ -899,6 +1199,8 @@ class MainWindow(QMainWindow):
         if self._loupes.get(old_path) is dialog:
             del self._loupes[old_path]
         self._loupes[new_path] = dialog
+        # Stepping commits the develop values of the photo just left.
+        self._save_edits_soon()
 
     def _on_loupe_closed(self, dialog) -> None:
         for path, opened in list(self._loupes.items()):
@@ -907,6 +1209,7 @@ class MainWindow(QMainWindow):
         self.grid.refresh()
         self.apply_filter()
         self._show_summary()
+        self._save_edits_soon()
 
     def _queue_from_loupe(self, records: list) -> None:
         """Queue from the loupe. Takes that photo, not the grid selection."""
@@ -962,6 +1265,11 @@ class MainWindow(QMainWindow):
         its own. This re-grades rather than re-analyses, so it finishes at once
         even at 4000 photos.
         """
+        if self.session is None or self._analysis_live:
+            # Picked on a photo that has only just landed: the record already
+            # carries the new focus, and the run grades everything at its end.
+            self._on_loupe_changed()
+            return
         if record not in self.session.records:
             return
         self.session.regrade()
@@ -975,7 +1283,10 @@ class MainWindow(QMainWindow):
 
     def _on_loupe_changed(self) -> None:
         """Bring the grid and summary in line after a loupe edit."""
+        self._save_edits_soon()
         self.grid.refresh()
+        if self.session is None or self._analysis_live:
+            return  # until the run ends the status bar is its progress report
         developed = sum(1 for r in self.session.records if r.develop is not None)
         summary = self.session.summary
         self.set_status(
@@ -1294,6 +1605,11 @@ class MainWindow(QMainWindow):
         if result.cancelled:
             message += tr("\n\nUndo can clear up whatever was written before "
                           "you stopped.")
+        if result.log_path is None and result.moved and not result.cancelled:
+            # The files are in place; only the record that would let Undo
+            # take them back could not be written (a full drive, usually).
+            message += tr("\n\nThe undo record could not be written (is the drive full?), "
+                          "so this export cannot be undone.")
 
         # Tidy the state first. QMessageBox is modal and spins its own event
         # loop, so anything after it leaves the state inconsistent until the
@@ -1349,12 +1665,13 @@ class MainWindow(QMainWindow):
         # Develop windows are top-level with no parent (so the main window can
         # be brought forward). That means they do not close along with it —
         # closing them here is what lets the app actually exit.
-        for dialog in list(self._loupes.values()):
+        for dialog in list(self._loupes.values()) + list(self._compare_dialogs):
             try:
                 dialog.close()
             except RuntimeError:
                 pass  # window already closed
         self._loupes.clear()
+        self._compare_dialogs.clear()
 
         for name in ("analysis_worker", "export_worker"):
             worker = getattr(self, name, None)
@@ -1384,9 +1701,18 @@ class MainWindow(QMainWindow):
             wait_for_detached_renders()
         except Exception:  # noqa: BLE001
             log.debug("could not wait for outstanding renders", exc_info=True)
+        # A compare window closed while its previews were still being read
+        # let its thread go the same way (compare_dialog._RUNNING_LOADERS).
+        try:
+            from .compare_dialog import wait_for_detached_loaders
+
+            wait_for_detached_loaders()
+        except Exception:  # noqa: BLE001
+            log.debug("could not wait for outstanding preview loads", exc_info=True)
 
     def closeEvent(self, event) -> None:
         """Closing during analysis tidies the workers up on the way out."""
+        self._flush_edits()
         self._shutdown_workers()
         super().closeEvent(event)
 

@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+from .cache import cache_root, relative_key
 from .raw_io import imwrite_unicode, resize_long_edge
 
 log = logging.getLogger(__name__)
@@ -37,9 +39,30 @@ def thumbnail_path(cache_dir: Path, source: Path) -> Path:
     Using the filename as it is means that when a subfolder holds the same
     name (DSC001.ARW) they overwrite each other. That is common in a
     4000-frame batch.
+
+    What is hashed is the path relative to the shoot folder (the cache's
+    parent, or the folder a cache kept elsewhere was made for - see
+    cache.cache_root), the same key the analysis cache uses.
+    Hashing the absolute path meant the same card mounted somewhere else
+    had every thumbnail built again. A thumbnail an older version wrote
+    under the absolute-path name is renamed to the new name the first time
+    it is asked for.
     """
-    digest = hashlib.sha1(str(source).encode("utf-8")).hexdigest()[:20]
-    return thumbnail_dir(cache_dir) / f"{digest}.jpg"
+    cache_dir = Path(cache_dir)
+    folder = thumbnail_dir(cache_dir)
+    current = folder / f"{_digest(relative_key(cache_root(cache_dir), source))}.jpg"
+    if not current.exists():
+        legacy = folder / f"{_digest(str(source))}.jpg"
+        if legacy.exists():
+            try:
+                os.replace(legacy, current)
+            except OSError:
+                pass  # left where it is; a fresh thumbnail gets written instead
+    return current
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:20]
 
 
 def write_thumbnail(image_bgr: np.ndarray, destination: Path, long_edge: int = THUMB_LONG_EDGE) -> bool:

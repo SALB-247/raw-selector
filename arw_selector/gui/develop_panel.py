@@ -47,6 +47,7 @@ from ..core.develop import (
     ColorGradeZone,
     CropRatio,
     CurveSettings,
+    crop_ratio,
     DetailSettings,
     DevelopSettings,
     EffectSettings,
@@ -65,6 +66,7 @@ from ..core.develop import (
     WatermarkSettings,
 )
 from ..core.develop.mask_presets import MASK_PRESETS, build_mask
+from ..core import state
 from ..core.presets import develop_presets, watermark_presets
 from .color_wheel import ColorGradeZoneWidget
 from .curve_editor import CurveEditor
@@ -379,6 +381,9 @@ class DevelopPanel(QWidget):
 
     settings_changed = Signal()
     crop_mode_changed = Signal(bool)
+    crop_cancelled = Signal()
+    """The Cancel button in crop mode: the loupe puts the crop and its
+    ratio back to what they were when the handles came up, then leaves."""
     pick_mode_changed = Signal(str)  # "purple" / "green" / "" (cleared)
     mask_overlay_changed = Signal()  # region display toggle / selection change
     mask_shape_changed = Signal()
@@ -1905,17 +1910,31 @@ class DevelopPanel(QWidget):
         self.optics_auto_vignetting = QCheckBox(tr("Vignetting"))
         self.optics_auto_chromatic = QCheckBox(tr("Chromatic aberration"))
         self.optics_auto_chromatic.setToolTip(tr(
-            "Lateral chromatic aberration — the colour fringing from slight per-channel magnification differences"
+            "Lateral chromatic aberration — the colour fringing from slight per-channel magnification differences.\n"
+            "Off by default: fringing can be part of a lens's look. Your last choice is remembered for new photos."
         ))
+        # Chromatic aberration is a taste decision, so it starts off and the
+        # three choices come back the way they were last left on this
+        # machine. The checked state is set before the signal is connected:
+        # setChecked fires toggled, and nothing here may be remembered or
+        # emitted while the panel is still being built.
+        remembered = state.optics_defaults()
+        self.optics_auto_distortion.setChecked(remembered["distortion"])
+        self.optics_auto_vignetting.setChecked(remembered["vignetting"])
+        self.optics_auto_chromatic.setChecked(remembered["chromatic"])
         for check in (
             self.optics_auto_distortion,
             self.optics_auto_vignetting,
             self.optics_auto_chromatic,
         ):
-            check.setChecked(True)
-            check.toggled.connect(self._emit)
+            check.toggled.connect(self._on_optics_option_toggled)
             auto_row.addWidget(check)
         section.add_layout(auto_row)
+        # The three only mean something while the profile is on. Greyed
+        # otherwise, an unticked Chromatic aberration reads as "not
+        # applied" instead of "broken".
+        self.optics_auto.toggled.connect(self._sync_optics_options)
+        self._sync_optics_options(self.optics_auto.isChecked())
 
         lens_row = QHBoxLayout()
         lens_row.addWidget(QLabel(tr("Lens override")))
@@ -2307,8 +2326,32 @@ class DevelopPanel(QWidget):
             "Drag a corner to resize, drag inside to move,\n"
             "double-click to reset to the whole frame."
         ))
-        self.crop_mode_button.toggled.connect(self.crop_mode_changed.emit)
+        self.crop_mode_button.toggled.connect(self._on_crop_mode_toggled)
         section.add_widget(self.crop_mode_button)
+
+        # While the handles are up the toggle gives way to a pair of
+        # buttons. Pressing the toggle again to finish was easy to miss,
+        # and there was no way back at all: every release is committed,
+        # so a crop gone wrong had to be dragged back by hand.
+        self.crop_apply_button = QPushButton(tr("✓  Apply crop"))
+        self.crop_apply_button.setToolTip(tr(
+            "Keep this crop and put the handles down (Enter)."))
+        self.crop_apply_button.setAutoDefault(False)
+        self.crop_apply_button.clicked.connect(
+            lambda: self.crop_mode_button.setChecked(False))
+        self.crop_cancel_button = QPushButton(tr("✕  Cancel"))
+        self.crop_cancel_button.setToolTip(tr(
+            "Put the crop and the ratio back the way they were when the "
+            "handles came up, and put the handles down (Esc)."))
+        self.crop_cancel_button.setAutoDefault(False)
+        self.crop_cancel_button.clicked.connect(self.crop_cancelled.emit)
+        self.crop_buttons = QWidget()
+        crop_buttons = QHBoxLayout(self.crop_buttons)
+        crop_buttons.setContentsMargins(0, 0, 0, 0)
+        crop_buttons.addWidget(self.crop_apply_button)
+        crop_buttons.addWidget(self.crop_cancel_button)
+        self.crop_buttons.hide()
+        section.add_widget(self.crop_buttons)
 
         ratio_row = QHBoxLayout()
         ratio_row.addWidget(QLabel(tr("Ratio")))
@@ -2338,10 +2381,10 @@ class DevelopPanel(QWidget):
 
         flips = QHBoxLayout()
         self.flip_h = QCheckBox(tr("Flip horizontal"))
-        self.flip_h.toggled.connect(self._emit)
+        self.flip_h.toggled.connect(lambda _on: self._on_flip(horizontal=True))
         flips.addWidget(self.flip_h)
         self.flip_v = QCheckBox(tr("Flip vertical"))
-        self.flip_v.toggled.connect(self._emit)
+        self.flip_v.toggled.connect(lambda _on: self._on_flip(horizontal=False))
         flips.addWidget(self.flip_v)
         section.add_layout(flips)
 
@@ -2551,10 +2594,63 @@ class DevelopPanel(QWidget):
         if path:
             self.watermark_image.setText(path)
 
+    def _on_crop_mode_toggled(self, checked: bool) -> None:
+        """The toggle and the Apply / Cancel pair swap places: one or the
+        other shows, never both."""
+        self.crop_mode_button.setVisible(not checked)
+        self.crop_buttons.setVisible(checked)
+        self.crop_mode_changed.emit(checked)
+
+    def set_ratio_silently(self, ratio: CropRatio) -> None:
+        """The ratio combo without the emit - for the crop cancel, which
+        puts the ratio back along with the rectangle and commits once."""
+        index = self.ratio_combo.findData(ratio)
+        if index < 0:
+            return
+        previous, self._loading = self._loading, True
+        try:
+            self.ratio_combo.setCurrentIndex(index)
+        finally:
+            self._loading = previous
+
+    _CROP_KEYS = ("geo.crop_left", "geo.crop_top", "geo.crop_right", "geo.crop_bottom")
+
+    def _crop_values(self) -> tuple[float, float, float, float]:
+        return tuple(self.rows[key].value() / 100.0 for key in self._CROP_KEYS)
+
+    def _set_crop_silently(self, crop) -> None:
+        for key, value in zip(self._CROP_KEYS, crop):
+            self.rows[key].set_value(value * 100.0, silent=True)
+
     def _rotate(self, direction: int) -> None:
         self._rotate_quarters = (self._rotate_quarters + direction) % 4
         self.rotate_label.setText(tr("Rotation {deg}°").format(deg=self._rotate_quarters * 90))
+        # The crop turns with the picture. It is normalised against the
+        # frame after the turn, so left as it was it landed on other
+        # content (and its pixel aspect inverted). A flip mirrors the
+        # sense of the turn in that frame - see crop_ratio.turned.
+        mirrored = self.flip_h.isChecked() != self.flip_v.isChecked()
+        self._set_crop_silently(
+            crop_ratio.turned(self._crop_values(), direction, mirrored=mirrored))
         self._emit()
+
+    def _on_flip(self, horizontal: bool) -> None:
+        """A flip checkbox: the crop flips with the picture. Not while a
+        shot's settings are being loaded - the saved crop is already in
+        the flipped frame."""
+        if not self._loading:
+            self._set_crop_silently(
+                crop_ratio.mirrored(self._crop_values(), horizontal))
+        self._emit()
+
+    def clear_pick_mode(self) -> None:
+        """Puts the eyedropper away. The buttons announce a click, not a
+        toggle, so the mode is announced here once."""
+        armed = any(button.isChecked() for button in self.defringe_pickers.values())
+        for button in self.defringe_pickers.values():
+            button.setChecked(False)
+        if armed:
+            self.pick_mode_changed.emit("")
 
     def _on_hsl_channel(self) -> None:
         """Hue/saturation/luminance tab switch - refills the slider values from
@@ -2754,9 +2850,21 @@ class DevelopPanel(QWidget):
         # even turn off. (core blocks it too, but the screen has to agree or
         # the user cannot tell what is applied.)
         self.optics_auto.setChecked(optics.auto_enabled and self._is_raw)
-        self.optics_auto_distortion.setChecked(optics.auto_distortion)
-        self.optics_auto_vignetting.setChecked(optics.auto_vignetting)
-        self.optics_auto_chromatic.setChecked(optics.auto_chromatic)
+        if optics.auto_enabled:
+            self.optics_auto_distortion.setChecked(optics.auto_distortion)
+            self.optics_auto_vignetting.setChecked(optics.auto_vignetting)
+            self.optics_auto_chromatic.setChecked(optics.auto_chromatic)
+        else:
+            # Nothing applied yet: offer what was chosen last time on this
+            # machine rather than the dataclass defaults, so someone who
+            # never wants chromatic aberration touched (or always does)
+            # is not re-ticking it on every photo. Inert until the profile
+            # is switched on, at which point it goes into this photo's
+            # settings like any other choice.
+            remembered = state.optics_defaults()
+            self.optics_auto_distortion.setChecked(remembered["distortion"])
+            self.optics_auto_vignetting.setChecked(remembered["vignetting"])
+            self.optics_auto_chromatic.setChecked(remembered["chromatic"])
         self._defringe_hues = {
             "purple": optics.defringe_purple_hue,
             "green": optics.defringe_green_hue,
@@ -2885,6 +2993,22 @@ class DevelopPanel(QWidget):
         up, and an off section hands back its defaults - a crop committed
         past it was dropped on the way out.
         """
+        self._emit()
+
+    def _sync_optics_options(self, enabled: bool) -> None:
+        for check in (self.optics_auto_distortion, self.optics_auto_vignetting,
+                      self.optics_auto_chromatic):
+            check.setEnabled(bool(enabled))
+
+    def _on_optics_option_toggled(self, *_) -> None:
+        """A profile sub-check the user flipped is remembered for the next
+        photo; one flipped while loading a photo's saved settings is not."""
+        if not self._loading:
+            state.remember_optics(
+                distortion=self.optics_auto_distortion.isChecked(),
+                vignetting=self.optics_auto_vignetting.isChecked(),
+                chromatic=self.optics_auto_chromatic.isChecked(),
+            )
         self._emit()
 
     def _emit(self, *_) -> None:

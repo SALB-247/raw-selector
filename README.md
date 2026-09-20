@@ -275,10 +275,21 @@ edit or hand to someone else.
 ## Cache
 
 Each shoot folder gets a `.raw_selector_cache/` with the analysis SQLite,
-512px grid thumbnails, and undo logs. Two version keys
-(`cache.SCHEMA_VERSION`, `focus.ALGORITHM_VERSION`) invalidate it automatically
-when the stored fields or the measurement change, so upgrading re-analyses a
-folder once on first open.
+512px grid thumbnails, and undo logs. Entries and thumbnails are keyed by the
+path *relative to the folder*, so the cache follows the folder: the same card
+mounted under another name, given another drive letter, or read on the other
+machine reuses it. When the folder cannot be written (locked card, NTFS on
+macOS, read-only share) the cache lives in the user folder instead
+(`cache_dir_for`), named by volume identity plus the path inside the volume
+(`volume_identity`: Windows volume serial, macOS volume UUID via `diskutil`)
+so a changed drive letter or mount name finds it again, with a `folder.txt`
+marker naming the folder the keys are relative to (rewritten on every
+visit); a cache already inside such a folder is opened read-only and still
+hits. A cache write that fails mid-analysis (full card, pulled card)
+drops the cache for that run and keeps the results. Two version keys (`cache.SCHEMA_VERSION`,
+`focus.ALGORITHM_VERSION`) invalidate it automatically when the stored fields
+or the measurement change, so upgrading re-analyses a folder once on first
+open.
 
 ## Structure
 

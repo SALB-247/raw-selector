@@ -32,6 +32,7 @@ from .appinfo import (  # noqa: F401 (re-export)
 SELECT_PRESET_DIR = "select_presets"
 DEVELOP_PRESET_DIR = "develop_presets"
 WATERMARK_PRESET_DIR = "watermark_presets"
+EXPORT_PRESET_DIR = "export_presets"
 
 _SAFE_NAME = re.compile(r"[^\w가-힣 _-]+")
 
@@ -211,6 +212,12 @@ def select_presets(root: Path | None = None) -> PresetStore:
 def develop_presets(root: Path | None = None) -> PresetStore:
     """Adjustment presets."""
     return PresetStore(DEVELOP_PRESET_DIR, root)
+
+
+def export_presets(root: Path | None = None) -> PresetStore:
+    """Export option sets - format, size, naming, folders - by name, so
+    "web 2048 JPEG" or "print TIFF" is one pick instead of eight fields."""
+    return PresetStore(EXPORT_PRESET_DIR, root)
 
 
 def watermark_presets(root: Path | None = None) -> PresetStore:

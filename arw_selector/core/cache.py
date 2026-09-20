@@ -8,9 +8,14 @@ as it is.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import sqlite3
+import subprocess
+import sys
+import unicodedata
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -21,9 +26,44 @@ from .types import FocusResult, FocusSource, ImageRecord
 
 log = logging.getLogger(__name__)
 
-from .appinfo import CACHE_DIR_NAME, LEGACY_CACHE_DIR_NAMES
+from .appinfo import (CACHE_DIR_NAME, LEGACY_CACHE_DIR_NAMES, is_writable_dir,
+                      user_state_dir)
 
 CACHE_FILE_NAME = "analysis.sqlite"
+
+ROOT_MARKER = "folder.txt"
+"""Written into a cache that does not live inside its shoot folder: the
+folder the keys are relative to, as an absolute path. See cache_root."""
+
+MTIME_TOLERANCE = 2.0
+"""Seconds of modification-time drift a cached row survives.
+
+FAT32 keeps modification times to 2 seconds, and the two operating systems
+that read the same card turn an exFAT timestamp into a float by different
+arithmetic. Compared for exact equality, a file looked changed when only
+the reading of its clock had. The size still has to match exactly."""
+
+
+def relative_key(root: Path, path: Path) -> str:
+    """The key a file is cached under: its path relative to the shoot folder.
+
+    The cache lives inside the shoot folder, so the folder is the one thing
+    guaranteed to be wherever the cache is. Keying on the absolute path
+    broke the cache's own premise ("move the folder and it comes along"):
+    the same card mounted as /Volumes/Untitled 1 instead of /Volumes/Untitled,
+    given another drive letter on Windows, or read on the other machine,
+    missed every row and analysed everything again. POSIX separators and
+    NFC, so the key is the same string on macOS and Windows.
+
+    A file outside the folder (Open files across folders) gets a `..` key.
+    One on another Windows drive, where no relative path exists, keeps its
+    absolute path.
+    """
+    try:
+        relative = os.path.relpath(path, root)
+    except ValueError:
+        return unicodedata.normalize("NFC", str(path))
+    return unicodedata.normalize("NFC", Path(relative).as_posix())
 
 
 def resolve_cache_dir(folder: Path) -> Path:
@@ -44,7 +84,171 @@ def resolve_cache_dir(folder: Path) -> Path:
             return legacy
     return current
 
-SCHEMA_VERSION = 9
+
+def _mount_root(path: Path) -> Path:
+    """The mount point the path sits on (the drive root on Windows)."""
+    current = path
+    while not os.path.ismount(current):
+        if current.parent == current:
+            break
+        current = current.parent
+    return current
+
+
+def _windows_volume_id(root: Path) -> str | None:
+    import ctypes
+    from ctypes import wintypes
+
+    label = ctypes.create_unicode_buffer(261)
+    filesystem = ctypes.create_unicode_buffer(261)
+    serial = wintypes.DWORD()
+    longest = wintypes.DWORD()
+    flags = wintypes.DWORD()
+    ok = ctypes.windll.kernel32.GetVolumeInformationW(  # type: ignore[attr-defined]
+        str(root), label, 261, ctypes.byref(serial), ctypes.byref(longest),
+        ctypes.byref(flags), filesystem, 261)
+    if not ok:
+        return None
+    return f"{label.value}-{serial.value:08X}"
+
+
+def _macos_volume_id(root: Path) -> str | None:
+    import plistlib
+
+    for tool in ("/usr/sbin/diskutil", "diskutil"):
+        try:
+            run = subprocess.run([tool, "info", "-plist", str(root)],
+                                 capture_output=True, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if run.returncode != 0:
+            return None
+        info = plistlib.loads(run.stdout)
+        uuid = info.get("VolumeUUID")
+        name = info.get("VolumeName") or root.name
+        return f"{name}-{uuid}" if uuid else None
+    return None
+
+
+def volume_identity(folder: Path) -> tuple[str, str] | None:
+    """What stays the same about a folder on removable media across mounts:
+    the volume's own identity and the path inside the volume.
+
+    The absolute path does not. A card reader gets whatever drive letter is
+    free that day, and macOS mounts a second volume of the same name as
+    "Untitled 1" - this machine has "Backup 1" to "Backup 9" in /Volumes
+    from one backup disk. Windows gives every volume a serial number; macOS
+    gives even an exFAT card a volume UUID (diskutil), and asking takes
+    about 0.1s. Both survive re-formatting only as a new identity, which
+    is right: a re-formatted card is a different card.
+
+    None for the system disk, whose paths are stable anyway and for which
+    the question would cost a diskutil call on every folder, and whenever
+    the platform cannot answer; the caller then falls back to the path.
+    """
+    try:
+        resolved = Path(folder).resolve()
+        root = _mount_root(resolved)
+        if sys.platform == "win32":
+            system = (os.environ.get("SystemDrive", "C:") + "\\").upper()
+            if root.anchor.upper() == system:
+                return None
+            volume = _windows_volume_id(root)
+        elif sys.platform == "darwin":
+            if root == Path("/"):
+                return None
+            volume = _macos_volume_id(root)
+        else:
+            volume = root.name if root != Path("/") else None
+        if not volume:
+            return None
+        inside = unicodedata.normalize("NFC", resolved.relative_to(root).as_posix())
+        return volume, inside
+    except (OSError, ValueError):
+        return None
+
+
+def _fallback_cache_dir(folder: Path) -> Path:
+    """Where the cache goes when the shoot folder cannot be written: a
+    per-user directory named after the folder.
+
+    A card with its lock switch on, an NTFS drive on macOS, a DVD or a
+    read-only share cannot hold a cache. The name carries the folder's
+    basename for the human and a hash for uniqueness - two cards both
+    ending in DCIM/100MSDCF must not share one cache. The hash is of the
+    volume's identity plus the path inside it (volume_identity), so the
+    same card found at another drive letter or mount name comes back to
+    the same cache; only when no identity can be had is it the absolute
+    path.
+    """
+    folder = Path(folder)
+    identity = volume_identity(folder)
+    if identity is not None:
+        text = f"{identity[0]}|{identity[1]}"
+    else:
+        text = unicodedata.normalize("NFC", folder.resolve().as_posix())
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+    return user_state_dir() / "cache" / f"{folder.name or 'root'}-{digest}"
+
+
+def cache_dir_for(folder: Path) -> Path:
+    """The cache directory to use for this folder, created if needed.
+
+    Inside the folder whenever that can be written - the cache then travels
+    with the folder. One that already exists inside is used even when it
+    cannot be written (the card was analysed, then locked): its rows still
+    hit, see AnalysisCache.open. Only when the folder refuses a new
+    directory does the per-user fallback take over. Before 0.15.12 such a
+    folder simply had no cache: every opening analysed everything again.
+    """
+    folder = Path(folder)
+    inside = resolve_cache_dir(folder)
+    if inside.is_dir() or is_writable_dir(inside):
+        return inside
+    fallback = _fallback_cache_dir(folder)
+    # The marker names the folder the keys are relative to. It is brought
+    # up to date on every visit: the same card can come back under another
+    # drive letter, and the keys must then be taken relative to that path.
+    current = unicodedata.normalize("NFC", str(folder))
+    try:
+        fallback.mkdir(parents=True, exist_ok=True)
+        marker = fallback / ROOT_MARKER
+        if not marker.exists() or marker.read_text(encoding="utf-8").strip() != current:
+            staging = marker.with_suffix(".tmp")
+            staging.write_text(current, encoding="utf-8")
+            os.replace(staging, marker)
+    except OSError as exc:
+        log.warning("캐시 폴더를 만들 수 없다 (%s), 캐시 없이 진행: %s", fallback, exc)
+        return inside
+    log.info("폴더에 쓸 수 없어 캐시를 사용자 폴더에 둔다: %s", fallback)
+    return fallback
+
+
+def existing_cache_dir(folder: Path) -> Path | None:
+    """The cache directory that exists for this folder, if any - inside it
+    or the per-user fallback. Nothing is created."""
+    inside = resolve_cache_dir(folder)
+    if inside.exists():
+        return inside
+    fallback = _fallback_cache_dir(folder)
+    return fallback if fallback.exists() else None
+
+
+def cache_root(cache_dir: Path) -> Path:
+    """The folder a cache's keys are relative to: its parent, or the folder
+    a fallback cache was made for (recorded in ROOT_MARKER)."""
+    cache_dir = Path(cache_dir)
+    marker = cache_dir / ROOT_MARKER
+    try:
+        if marker.is_file():
+            text = marker.read_text(encoding="utf-8").strip()
+            if text:
+                return Path(text)
+    except OSError:
+        pass
+    return cache_dir.parent
+
+SCHEMA_VERSION = 11
 """Bumped whenever the schema or the payload layout changes. The existing
 cache is then thrown away.
 
@@ -91,6 +295,17 @@ v9: the 35mm-equivalent focal length (focal_length_35mm) and the AF area
 mode (af_area_mode) added to the metadata - for display in the details
 panel. Without a bump the old cache quietly comes back with None and just
 those two lines stay empty in the panel forever.
+
+v10: Sony's AF tracking state (0x2021) joins af_area_mode. A tracking
+shot had no AF line at all - the area mode value it comes with is one
+we have not verified, so it stayed None. Same reason for the bump as v9.
+And a tracking frame now outranks face detection for the ROI (the face
+it sits in, or the frame itself when it sits in none), so the scores of
+tracking shots change with it.
+
+v11: an AF area mode value with no verified name is kept as "Mode N"
+instead of None - a Sony A1 writes 0/1/3 for its everyday modes, and up
+to v10 every one of those frames had an empty AF line. Same reason as v9.
 """
 
 _SCHEMA = """
@@ -110,8 +325,9 @@ CREATE TABLE IF NOT EXISTS meta (
 
 def default_cache_path(folder: Path) -> Path:
     """The cache sits next to the shooting folder. Move the whole folder and
-    it comes along."""
-    return resolve_cache_dir(folder) / CACHE_FILE_NAME
+    it comes along. A folder that cannot be written gets a per-user cache
+    instead - see cache_dir_for."""
+    return cache_dir_for(folder) / CACHE_FILE_NAME
 
 
 @dataclass(frozen=True)
@@ -159,8 +375,8 @@ class CacheStats:
 def cache_stats(folder: Path) -> CacheStats:
     """Inspects the folder's cache state. Empty values if it is missing or
     unreadable."""
-    cache_dir = resolve_cache_dir(folder)
-    if not cache_dir.exists():
+    cache_dir = existing_cache_dir(folder)
+    if cache_dir is None:
         return CacheStats()
 
     db_path = cache_dir / CACHE_FILE_NAME
@@ -210,8 +426,8 @@ def clear_cache(folder: Path, keep_logs: bool = True) -> CacheStats:
     and a user does not expect 'clear cache' to take undo away.
     """
     stats = cache_stats(folder)
-    cache_dir = resolve_cache_dir(folder)
-    if not cache_dir.exists():
+    cache_dir = existing_cache_dir(folder)
+    if cache_dir is None:
         return stats
 
     for suffix in ("", "-wal", "-shm"):
@@ -345,7 +561,31 @@ class AnalysisCache:
     def __init__(self, db_path: Path, params_key: str):
         self.db_path = Path(db_path)
         self.params_key = params_key
+        # <shoot folder>/.raw_selector_cache/analysis.sqlite - the folder
+        # the keys are relative to is two levels up; a cache kept outside
+        # its folder records that folder instead (cache_root).
+        self.root = cache_root(self.db_path.parent)
         self._conn: sqlite3.Connection | None = None
+        #: Set when the cache could only be opened for reading. Rows still
+        #: hit; put_many and clear do nothing.
+        self.read_only = False
+
+    def key_for(self, path: Path) -> str:
+        return relative_key(self.root, path)
+
+    def _wanted(self, paths: list[Path]) -> dict[str, Path]:
+        """Key -> path, under the current key and under the absolute path
+        versions before 0.15.12 wrote, so a cache they built still hits."""
+        wanted: dict[str, Path] = {}
+        for path in paths:
+            wanted[self.key_for(path)] = path
+            wanted.setdefault(str(path), path)
+        return wanted
+
+    @staticmethod
+    def _unchanged(current: tuple[float, int] | None, mtime: float, size: int) -> bool:
+        return (current is not None and current[1] == size
+                and abs(current[0] - mtime) <= MTIME_TOLERANCE)
 
     def __enter__(self) -> "AnalysisCache":
         self.open()
@@ -354,21 +594,108 @@ class AnalysisCache:
     def __exit__(self, *exc_info) -> None:
         self.close()
 
-    def open(self) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path)
-        # The PRAGMAs have to be set right after connecting, before any
-        # transaction opens. Push them behind the schema creation or an
-        # INSERT and sqlite refuses with "Safety level may not be changed
-        # inside a transaction".
-        # Writing 4000 entries is far too slow in the default synchronous
-        # mode, and losing the cache only costs a re-analysis, so we give
-        # up a little durability.
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA synchronous = NORMAL")
-        self._conn.executescript(_SCHEMA)
-        self._check_schema_version()
-        self._conn.commit()
+    def open(self, retry: bool = True) -> None:
+        self.read_only = False
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self.db_path)
+        except (OSError, sqlite3.Error) as exc:
+            self._open_read_only(exc)
+            return
+        try:
+            # The PRAGMAs have to be set right after connecting, before any
+            # transaction opens. Push them behind the schema creation or an
+            # INSERT and sqlite refuses with "Safety level may not be changed
+            # inside a transaction".
+            # Writing 4000 entries is far too slow in the default synchronous
+            # mode, and losing the cache only costs a re-analysis, so we give
+            # up a little durability.
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            # A file on read-only media opens without complaint and only
+            # refuses the first write. Asking for the write lock now finds
+            # that out before any row is trusted to it.
+            conn.execute("BEGIN IMMEDIATE")
+            conn.rollback()
+            conn.executescript(_SCHEMA)
+            self._conn = conn
+            self._check_schema_version()
+            conn.commit()
+        except sqlite3.Error as exc:
+            self._conn = None
+            conn.close()
+            # Plain DatabaseError is what SQLite raises for a file that is
+            # not a database or whose image is malformed; its subclasses
+            # (OperationalError and the rest) cover locks and permissions,
+            # which must not cost anyone their cache.
+            if retry and type(exc) is sqlite3.DatabaseError and self._set_aside_corrupt(exc):
+                self.open(retry=False)
+                return
+            self._open_read_only(exc)
+
+    def _set_aside_corrupt(self, cause: Exception) -> bool:
+        """Renames a corrupt cache file out of the way so a fresh one can
+        be built in its place.
+
+        A cache is only ever a saved re-analysis, so a broken one is worth
+        nothing; left there, it broke every later opening too and the
+        folder never got a cache again. It is renamed rather than deleted,
+        in case someone wants to look at what happened.
+        """
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        aside = self.db_path.with_name(f"{self.db_path.name}.corrupt-{stamp}")
+        try:
+            os.replace(self.db_path, aside)
+            for suffix in ("-wal", "-shm"):
+                Path(str(self.db_path) + suffix).unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("깨진 캐시 파일을 치울 수 없다 (%s): %s", self.db_path, exc)
+            return False
+        log.warning("캐시 파일이 깨져 새로 만든다 (%s → %s): %s", self.db_path.name, aside.name, cause)
+        return True
+
+    def _open_read_only(self, cause: Exception) -> None:
+        """A cache that cannot be written is still worth reading.
+
+        A card with the lock switch on, an NTFS drive on macOS or a
+        read-only share refuses the directory, the WAL switch or the write
+        lock. Opened for reading only, the rows it holds still hit and
+        put_many becomes a no-op.
+
+        Two attempts. mode=ro alone works when the -shm file is there to
+        read (another program still has the cache open), and then sees
+        everything in the write-ahead log. A cleanly closed cache has no
+        -shm, a read-only directory refuses to create one, and SQLite
+        gives up - so the second attempt adds immutable=1, which reads the
+        main file alone; anything not yet checkpointed into it is
+        invisible, and a cleanly closed cache has nothing pending.
+        """
+        if not self.db_path.is_file():
+            raise cause
+        base = self.db_path.resolve().as_uri()
+        row = None
+        conn = None
+        for query in ("?mode=ro", "?mode=ro&immutable=1"):
+            try:
+                conn = sqlite3.connect(base + query, uri=True)
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key = 'schema_version'"
+                ).fetchone()
+                break
+            except sqlite3.Error:
+                if conn is not None:
+                    conn.close()
+                conn = None
+        if conn is None:
+            log.info("캐시를 읽기 전용으로도 열 수 없다 (%s): %s", self.db_path, cause)
+            return
+        if row is None or row[0] != str(SCHEMA_VERSION):
+            conn.close()
+            log.info("읽기 전용 캐시의 스키마가 달라 쓰지 않는다: %s", self.db_path)
+            return
+        self._conn = conn
+        self.read_only = True
+        log.info("캐시를 읽기 전용으로 연다 (%s): %s", self.db_path, cause)
 
     def _check_schema_version(self) -> None:
         assert self._conn is not None
@@ -390,7 +717,8 @@ class AnalysisCache:
 
     def close(self) -> None:
         if self._conn is not None:
-            self._conn.commit()
+            if not self.read_only:
+                self._conn.commit()
             self._conn.close()
             self._conn = None
 
@@ -407,7 +735,7 @@ class AnalysisCache:
         if self._conn is None or not paths:
             return {}
 
-        wanted = {str(p): p for p in paths}
+        wanted = self._wanted(paths)
         hits: dict[Path, ImageRecord] = {}
 
         # split the query so it stays under SQLite's variable limit (999)
@@ -423,8 +751,9 @@ class AnalysisCache:
 
             for path_str, mtime, size, payload in rows:
                 path = wanted[path_str]
-                current = self.fingerprint(path)
-                if current is None or current[0] != mtime or current[1] != size:
+                if path in hits:
+                    continue  # already found under the other key form
+                if not self._unchanged(self.fingerprint(path), mtime, size):
                     continue  # the file changed - it has to be analysed again
                 record = _deserialize(path, payload)
                 if record is not None:
@@ -443,8 +772,8 @@ class AnalysisCache:
         """
         if self._conn is None or not paths:
             return 0
-        wanted = {str(p): p for p in paths}
-        ready = 0
+        wanted = self._wanted(paths)
+        ready: set[Path] = set()
         keys = list(wanted)
         for start in range(0, len(keys), 500):
             chunk = keys[start:start + 500]
@@ -455,31 +784,33 @@ class AnalysisCache:
                 (self.params_key, *chunk),
             ).fetchall()
             for path_str, mtime, size in rows:
-                current = self.fingerprint(wanted[path_str])
-                if current is not None and current[0] == mtime and current[1] == size:
-                    ready += 1
-        return ready
+                path = wanted[path_str]
+                if path not in ready and self._unchanged(self.fingerprint(path), mtime, size):
+                    ready.add(path)
+        return len(ready)
 
     def put_many(self, records: list[ImageRecord]) -> None:
-        if self._conn is None or not records:
+        if self._conn is None or self.read_only or not records:
             return
 
         rows = []
+        stale = []
         for record in records:
             fingerprint = self.fingerprint(record.path)
             if fingerprint is None:
                 continue
-            rows.append(
-                (
-                    str(record.path),
-                    fingerprint[0],
-                    fingerprint[1],
-                    self.params_key,
-                    _serialize(record),
-                )
-            )
+            key = self.key_for(record.path)
+            rows.append((key, fingerprint[0], fingerprint[1], self.params_key,
+                         _serialize(record)))
+            # Versions before 0.15.12 keyed on the absolute path. Left in
+            # place, that row would sit next to this one for the same file.
+            legacy = str(record.path)
+            if legacy != key:
+                stale.append((legacy,))
 
         with closing(self._conn.cursor()) as cursor:
+            if stale:
+                cursor.executemany("DELETE FROM analysis WHERE path = ?", stale)
             cursor.executemany(
                 "INSERT OR REPLACE INTO analysis (path, mtime, size, params_key, payload) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -488,6 +819,6 @@ class AnalysisCache:
         self._conn.commit()
 
     def clear(self) -> None:
-        if self._conn is not None:
+        if self._conn is not None and not self.read_only:
             self._conn.execute("DELETE FROM analysis")
             self._conn.commit()

@@ -44,6 +44,57 @@ _IDENTITY = np.arange(256, dtype=np.float32)
 # ---------------------------------------------------------------- geometry
 
 
+def _ratio_of(geometry: GeometrySettings, width: int, height: int) -> float | None:
+    """The crop ratio as a number for this frame (already turned): a fixed
+    ratio as it is, ORIGINAL as the frame's own, FREE as None."""
+    from .settings import CropRatio
+
+    ratio = getattr(geometry, "ratio", None)
+    if not isinstance(ratio, CropRatio):
+        return None
+    if ratio is CropRatio.ORIGINAL:
+        return width / height if height else None
+    return ratio.value_ratio
+
+
+def _snapped_crop(geometry: GeometrySettings, width: int, height: int
+                  ) -> tuple[float, float, float, float]:
+    """The crop as the cut applies it, in the (already turned) frame:
+    clipped to the frame and snapped exactly onto the ratio.
+
+    The ratio is a promise about the cut, not a hint for the handles. The
+    sliders hold whole percents, so the stored rectangle can be a percent
+    or two off the ratio - enough for a "1:1" export to come out
+    2040x2000. Snapped here, once, so preview, Full Render and export all
+    cut the same exact ratio.
+    """
+    crop = (float(np.clip(geometry.crop_left, 0.0, 1.0)),
+            float(np.clip(geometry.crop_top, 0.0, 1.0)),
+            float(np.clip(geometry.crop_right, 0.0, 1.0)),
+            float(np.clip(geometry.crop_bottom, 0.0, 1.0)))
+    ratio = _ratio_of(geometry, width, height)
+    if ratio:
+        from .crop_ratio import fit
+
+        crop = fit(crop, ratio, width / height if height else 1.0, tolerance=0.0)
+    return crop
+
+
+def exact_geometry(geometry: GeometrySettings, source_height: int,
+                   source_width: int) -> GeometrySettings:
+    """The geometry with the crop the cut really makes (_snapped_crop),
+    for anything that maps coordinates through the crop - the overlays -
+    so they land where the cut did and not a percent off."""
+    if not geometry.has_crop():
+        return geometry
+    width, height = source_width, source_height
+    if geometry.rotate_quarters % 2:
+        width, height = height, width
+    left, top, right, bottom = _snapped_crop(geometry, width, height)
+    return replace(geometry, crop_left=left, crop_top=top,
+                   crop_right=right, crop_bottom=bottom)
+
+
 def apply_geometry(image: np.ndarray, geometry: GeometrySettings) -> np.ndarray:
     """Rotate -> flip -> straighten -> crop.
 
@@ -74,10 +125,11 @@ def apply_geometry(image: np.ndarray, geometry: GeometrySettings) -> np.ndarray:
 
     if geometry.has_crop():
         height, width = result.shape[:2]
-        x0 = int(round(np.clip(geometry.crop_left, 0.0, 1.0) * width))
-        x1 = int(round(np.clip(geometry.crop_right, 0.0, 1.0) * width))
-        y0 = int(round(np.clip(geometry.crop_top, 0.0, 1.0) * height))
-        y1 = int(round(np.clip(geometry.crop_bottom, 0.0, 1.0) * height))
+        crop = _snapped_crop(geometry, width, height)
+        x0 = int(round(crop[0] * width))
+        x1 = int(round(crop[2] * width))
+        y0 = int(round(crop[1] * height))
+        y1 = int(round(crop[3] * height))
         # It must not die even if the crop comes in inverted or zero-sized
         if x1 - x0 >= 8 and y1 - y0 >= 8:
             result = result[y0:y1, x0:x1]
@@ -367,8 +419,10 @@ def from_light(light: np.ndarray, profiled: bool = True) -> np.ndarray:
     scaled *= np.float32(LIGHT_STEPS)
     scaled += np.float32(0.5)
     np.clip(scaled, 0.0, float(LIGHT_STEPS), out=scaled)
-    with np.errstate(invalid="ignore"):
-        index = scaled.astype(np.int32)
+    # clip leaves NaN as NaN, and NaN cast to int32 is INT_MIN - an index
+    # the table does not have. So NaN is made 0 here, as promised above.
+    np.nan_to_num(scaled, copy=False, nan=0.0)
+    index = scaled.astype(np.int32)
     return _light_tables(profiled)[1][index]
 
 
@@ -997,15 +1051,26 @@ def _apply_saturation(image: np.ndarray, basic: BasicSettings) -> np.ndarray:
     if not basic.saturation and not basic.vibrance:
         return image
 
-    luma = image.mean(axis=2, keepdims=True)
-    delta = image - luma
-
     factor = 1.0 + basic.saturation / 100.0
-    if basic.vibrance:
-        current = np.abs(delta).max(axis=2, keepdims=True) / 255.0
-        factor = factor + (basic.vibrance / 100.0) * (1.0 - np.clip(current * 2.0, 0.0, 1.0))
+    image = np.ascontiguousarray(image, dtype=np.float32)
+    if not basic.vibrance:
+        # luma + (image - luma) * factor is one 3x3 matrix - factor on
+        # the diagonal, (1 - factor) / 3 everywhere - and cv2.transform
+        # runs it in a single multithreaded pass. The numpy version was
+        # five passes over the frame: 4.2s of a 50MP export.
+        matrix = (np.float32(factor) * np.eye(3, dtype=np.float32)
+                  + np.float32((1.0 - factor) / 3.0))
+        return cv2.transform(image, matrix)
 
-    return luma + delta * factor
+    # Vibrance needs the per-pixel factor, but the luma and the largest
+    # channel distance come from cv2 too.
+    luma = cv2.transform(image, np.full((1, 3), 1.0 / 3.0, np.float32))
+    delta = image - luma[:, :, None]
+    current = cv2.reduce(np.abs(delta).reshape(-1, 3), 1, cv2.REDUCE_MAX)
+    current = current.reshape(image.shape[:2]) * np.float32(1.0 / 255.0)
+    factor = (np.float32(factor) + np.float32(basic.vibrance / 100.0)
+              * (np.float32(1.0) - np.clip(current * np.float32(2.0), 0.0, 1.0)))
+    return luma[:, :, None] + delta * factor[:, :, None]
 
 
 # ---------------------------------------------------------------- detail
@@ -1208,6 +1273,13 @@ blotching; larger behaves more like a plain blur, which is why
 _reduce_color_noise scales it up with the amount."""
 
 
+GUIDED_SUBSAMPLE_RADIUS = 8
+GUIDED_SUBSAMPLE_MAX = 4
+"""The guided filter runs on a frame subsampled by radius // 8, at most
+4x (see _guided_by_luma). Radii under 16 - every preview, and the Full
+Render at the usual viewport size - run exactly as before."""
+
+
 def _guided_by_luma(plane: np.ndarray, guide: np.ndarray,
                     radius: int, eps: float = GUIDED_EPS) -> np.ndarray:
     """Smooth a chroma plane while following the luminance edges.
@@ -1231,14 +1303,37 @@ def _guided_by_luma(plane: np.ndarray, guide: np.ndarray,
     bleeds one region's colour into the next. The guided filter removes more
     noise than that and leaves the edges where they were.
     """
+    # Wide radii - export-size frames, where the tuned radius is scaled
+    # up six times - run on a subsampled frame (He & Sun's fast guided
+    # filter): the local linear coefficients a and b vary slowly, so they
+    # are fitted at 1/s and interpolated back, and only the final
+    # a*guide + b sees every pixel. Measured on a 50MP frame at radius
+    # 32: 1.39s -> 0.37s at s=4, and the chroma plane moves by 0.4 of a
+    # level on average (the filter's own effect on it is 2.0). The
+    # preview and the fit-size Full Render keep radii under the threshold
+    # and are untouched.
+    step = int(min(GUIDED_SUBSAMPLE_MAX, max(1, radius // GUIDED_SUBSAMPLE_RADIUS)))
+    if step > 1:
+        height, width = plane.shape[:2]
+        small = (max(1, width // step), max(1, height // step))
+        guide_s = cv2.resize(guide, small, interpolation=cv2.INTER_AREA)
+        plane_s = cv2.resize(plane, small, interpolation=cv2.INTER_AREA)
+        radius = max(1, int(round(radius / step)))
+    else:
+        guide_s, plane_s = guide, plane
     window = (radius * 2 + 1, radius * 2 + 1)
-    mean_guide = cv2.blur(guide, window)
-    mean_plane = cv2.blur(plane, window)
-    var_guide = cv2.blur(guide * guide, window) - mean_guide * mean_guide
-    cov = cv2.blur(guide * plane, window) - mean_guide * mean_plane
+    mean_guide = cv2.blur(guide_s, window)
+    mean_plane = cv2.blur(plane_s, window)
+    var_guide = cv2.blur(guide_s * guide_s, window) - mean_guide * mean_guide
+    cov = cv2.blur(guide_s * plane_s, window) - mean_guide * mean_plane
     scale_a = cov / (var_guide + eps)
     offset_b = mean_plane - scale_a * mean_guide
-    return cv2.blur(scale_a, window) * guide + cv2.blur(offset_b, window)
+    scale_a = cv2.blur(scale_a, window)
+    offset_b = cv2.blur(offset_b, window)
+    if step > 1:
+        scale_a = cv2.resize(scale_a, (width, height), interpolation=cv2.INTER_LINEAR)
+        offset_b = cv2.resize(offset_b, (width, height), interpolation=cv2.INTER_LINEAR)
+    return scale_a * guide + offset_b
 
 
 def _reduce_color_noise(ycc: np.ndarray, amount: int, radius: int,
@@ -2278,9 +2373,14 @@ def export_image(
     base_kelvin = int(settings.basic.temperature) \
         if settings.basic.temperature > 0 else 0
     try:
+        # LibRaw's AHD for the file that is kept. The screen develops
+        # with the fast path (OpenCV's demosaic); at the pixel the two
+        # differ by a few levels on noisy frames, invisible on screen,
+        # but the export is not racing the clock.
         image = load_demosaiced(
             source, target_kelvin=base_kelvin or None,
-            highlight_recovery=settings.basic.highlight_recovery)
+            highlight_recovery=settings.basic.highlight_recovery,
+            demosaic="quality")
     except Exception as exc:  # noqa: BLE001 - JPEG fallback if demosaic fails
         # This must not pass silently. A result does come out, but it
         # comes from a JPEG with the camera picture style baked in, so

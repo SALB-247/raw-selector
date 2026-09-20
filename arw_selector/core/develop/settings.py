@@ -733,7 +733,15 @@ class OpticsSettings:
     auto_enabled: bool = False
     auto_distortion: bool = True
     auto_vignetting: bool = True
-    auto_chromatic: bool = True
+    auto_chromatic: bool = False
+    """Lateral chromatic aberration from the profile - off unless asked.
+
+    Distortion and vignetting are flaws; the colour fringing a lens leaves
+    is part of how that lens draws, for some people, so removing it is a
+    taste decision rather than a repair. The screen remembers the last
+    choice per machine (state.optics_defaults) and offers it on the next
+    photo, so someone who always wants it on ticks it once.
+    """
 
     lens_override: str = ""
     """A lens name the user picked by hand.

@@ -77,9 +77,26 @@ class RecordListModel(QAbstractListModel):
         self._pool.setMaxThreadCount(max(2, QThreadPool.globalInstance().maxThreadCount() // 2))
         self._signals = ThumbnailSignals()
         self._signals.loaded.connect(self._on_thumbnail)
+        #: While analysis runs the rows are photos that have been measured
+        #: but not graded - the grade is relative to the whole batch. The
+        #: delegate draws them without a grade or a score.
+        self.pending = False
 
-    def set_records(self, records: list[ImageRecord], cache_dir: Path | None = None) -> None:
+    def append_records(self, records: list[ImageRecord]) -> None:
+        """Adds rows at the end without resetting the model, so the
+        thumbnails already on screen stay put while analysis fills the
+        grid."""
+        if not records:
+            return
+        first = len(self._records)
+        self.beginInsertRows(QModelIndex(), first, first + len(records) - 1)
+        self._records = self._records + list(records)
+        self.endInsertRows()
+
+    def set_records(self, records: list[ImageRecord], cache_dir: Path | None = None,
+                    pending: bool = False) -> None:
         self.beginResetModel()
+        self.pending = pending
         self._records = records
         if cache_dir is not None and cache_dir != self.cache_dir:
             # Once you have switched to another folder there is no reason to
@@ -222,7 +239,12 @@ class ThumbnailDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.Antialiasing)
 
         rect = option.rect.adjusted(4, 4, -4, -4)
-        grade_color = GRADE_COLORS.get(record.final_grade, QColor(120, 120, 120))
+        # index.model() is missing on the bare index objects the rendering
+        # tests paint with; a delegate must not care.
+        model = index.model() if hasattr(index, "model") else None
+        pending = bool(getattr(model, "pending", False))
+        grade_color = (QColor(96, 96, 104) if pending
+                       else GRADE_COLORS.get(record.final_grade, QColor(120, 120, 120)))
         selected = bool(option.state & QStyle.State_Selected)
 
         # Selection is a different signal from the grade. It used to be a
@@ -266,15 +288,19 @@ class ThumbnailDelegate(QStyledItemDelegate):
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QColor(20, 20, 24))
-        label = GRADE_LABELS.get(record.final_grade, "")
-        if record.manual_grade is not None:
-            label += " ✋"   # a grade a person changed by hand
+        if pending:
+            label = tr("Analysing…") if record.error is None else tr("Failed")
+        else:
+            label = GRADE_LABELS.get(record.final_grade, "")
+            if record.manual_grade is not None:
+                label += " ✋"   # a grade a person changed by hand
         painter.drawText(band.adjusted(6, 0, -6, 0), Qt.AlignVCenter | Qt.AlignLeft,
                          label)
 
         # The score is what the ordering is based on, so it has to show large
-        painter.drawText(band.adjusted(6, 0, -6, 0),
-                         Qt.AlignVCenter | Qt.AlignRight, f"{record.score:.0f}")
+        if not pending:
+            painter.drawText(band.adjusted(6, 0, -6, 0),
+                             Qt.AlignVCenter | Qt.AlignRight, f"{record.score:.0f}")
 
         painter.setPen(QPen(grade_color, 1))
         painter.setBrush(Qt.NoBrush)
@@ -299,6 +325,9 @@ class ThumbnailGrid(QListView):
         self.setModel(self.model_)
         self.delegate = ThumbnailDelegate(parent=self)
         self.setItemDelegate(self.delegate)
+        #: One line drawn in the middle while there is nothing to show -
+        #: what to do next, or why the grid is empty.
+        self._placeholder = ""
 
         self.setViewMode(QListView.IconMode)
         self.setResizeMode(QListView.Adjust)
@@ -330,8 +359,31 @@ class ThumbnailGrid(QListView):
         if record is not None:
             self.record_activated.emit(record)
 
-    def set_records(self, records, cache_dir: Path | None = None) -> None:
-        self.model_.set_records(records, cache_dir)
+    def set_records(self, records, cache_dir: Path | None = None,
+                    pending: bool = False) -> None:
+        self.model_.set_records(records, cache_dir, pending)
+
+    def set_placeholder(self, text: str) -> None:
+        self._placeholder = text
+        self.viewport().update()
+
+    def placeholder(self) -> str:
+        return self._placeholder
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self._placeholder and self.model_.rowCount() == 0:
+            painter = QPainter(self.viewport())
+            painter.setPen(QColor(150, 150, 158))
+            font = QFont(painter.font())
+            font.setPointSize(11)
+            painter.setFont(font)
+            painter.drawText(self.viewport().rect().adjusted(24, 0, -24, 0),
+                             Qt.AlignCenter | Qt.TextWordWrap, self._placeholder)
+            painter.end()
+
+    def append_records(self, records) -> None:
+        self.model_.append_records(records)
 
     def selected_records(self) -> list[ImageRecord]:
         return [i.data(RECORD_ROLE) for i in self.selectedIndexes()]

@@ -102,8 +102,12 @@ def user_state_dir() -> Path:
     return _config_root() / APP_DIR_NAME
 
 
-def _is_writable(path: Path) -> bool:
+def is_writable_dir(path: Path) -> bool:
     """Decides by actually trying to create a file.
+
+    The directory is created when it is missing, so a True answer means it
+    is there and takes a file. Shared with the cache, which asks the same
+    question of a shoot folder on a locked card or a read-only drive.
 
     It may have been installed somewhere permission-blocked such as Program
     Files, so existence alone does not tell you.
@@ -116,6 +120,9 @@ def _is_writable(path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+_is_writable = is_writable_dir
 
 
 #: What has to be copied into the user folder when running from a
