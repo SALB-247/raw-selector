@@ -25,13 +25,72 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .raw_io import resize_long_edge
+from . import face_id
+from .raw_io import AnalysisPlanes, resize_long_edge
 from .types import FocusResult, FocusSource
 
 log = logging.getLogger(__name__)
 
-ALGORITHM_VERSION = 5
+ALGORITHM_VERSION = 11
 """Measurement algorithm version. It goes into the cache key.
+
+11: Every detected face (the largest MAX_ID_FACES) carries an SFace
+   identity embedding (face_ids), cut from the colour plane. The batch's
+   subject pass (subject.py) reads them. Rows from 10 lack the field, and
+   the pass would stay off.
+
+10: The ROI's contrast with the noise removed (roi_contrast) is kept on
+   the result: the score weights the eye package by it below the contrast
+   floor. Rows from 9 lack the field.
+
+9: The main face's FaceMesh presence score and landmark turn are
+   measured with the eye state (face_presence, face_turn): a face covered
+   by a hand, forearm or fan sign, or a false face on hair, has low
+   presence and a frontal turn, and the score withholds the eye signals
+   on it (scoring.face_hidden) - such frames used to top their bursts
+   on the sharpness of the hand. The eye ROI is at least 0.4 of the
+   face wide (EYE_ROI_MIN_FACE_FRACTION), so a profile no longer
+   measures a sliver of hair. Rows from 8 lack the two fields.
+
+8: The normalising variance has a floor (CONTRAST_FLOOR_STD = 22, 8-bit
+   std): a nearly flat patch holding a few hard edges - a hazy face
+   behind glass, a palm or forearm across the eyes, a bracket the eye
+   ROI fell on, a motion-blurred face - no longer scores above a crisp
+   eye. Patches with more contrast than the floor are unchanged bit for
+   bit. On the A1 shoot's burst labels (500 frames re-analysed) top-1
+   26 -> 28 of 42, labelled-reject frames kept 32 -> 26, labelled-best
+   frames rejected 90 -> 76; four labelled-best keeps at the threshold
+   drop to review. Also in 8: Sony camera JPEGs carry their AF point and
+   tracking state (maker_meta), and a tracking frame beside or below the
+   only confident face is that person's (_face_near, TRACK_BODY_*).
+
+7: The ROI, background and noise measurements are taken at the
+   calibration body's pixel scale (MEASURE_LONG_EDGE = 6192): a larger
+   preview is reduced to it first, so a 50MP body's sharpness reads on
+   the same scale the saturation constants were set on. Bodies at or
+   below 6192px are unchanged bit for bit; the A1's eye-ROI medians rise
+   from 0.37x/0.39x of the constants toward them (measured on 1,695
+   frames). The minimum ROI is applied in those pixels as well.
+
+6: A tracking AF frame that lies in no face box is matched to the
+   confident face it belongs to before the frame itself becomes the ROI
+   (_face_near: the torso, a shoulder or the hair - within 1.5 face
+   widths, 3 face heights below, half a face above). Sony 0x2027 records
+   the tracked *body* in tracking mode (RESEARCH_METADATA.md section 2),
+   so "frame in no face" was the normal case on people, not the
+   exception: in a 3,413-frame concert corpus 248 frames (7.3%) had their
+   face signals thrown away, were measured on clothing and rejected 94%
+   of the time. 156 of those now map to a face; the 16 bird frames the
+   rule was written for still take the frame (no confident face near it).
+   Also in 6: the analysis reads two cheap decodes instead of one full
+   colour decode (raw_io.AnalysisPlanes) - detection runs on the
+   reduction of a half-size DCT-scaled decode (same faces in 95% of 150
+   frames, main-face box IoU 0.996), the measurements on libjpeg's own
+   grey plane (rounding-level differences from the weighted BGR sum),
+   and the eye-opening landmarks on the grey face crop (the same label
+   accuracy as the colour crop; near-threshold calls flip either way on
+   about 6% of frames). Rows from 5 would agree with 6 on most frames,
+   but not bit for bit, so they roll over.
 
 5: The scene fingerprint (dhash) is taken from the 1024px reduction used
    for face detection rather than from the original preview. Focus scoring
@@ -110,6 +169,39 @@ so the answer is 0.
 
 Measured: the offending noise tile was variance 0.9, real subject tiles
 227~2000.
+"""
+
+MEASURE_LONG_EDGE = 6192
+"""The pixel scale the ROI, background and noise measurements are taken
+at: a frame longer than this on its long side is reduced to it first.
+
+The normalised Laplacian and Tenengrad depend on the pixel scale, not
+only on the optics: the same blur circle spread over more pixels gives a
+lower per-pixel gradient. Measured on 128 A6700 eye ROIs, reducing the
+frame to 0.72x raised the raw Laplacian x1.10 and Tenengrad x1.45 (+7.4
+sharpness points at the median), 0.5x gave x2.4 / +20 points, while the
+ranking barely moved (Spearman 0.992 / 0.965). The saturation constants
+(LAPLACIAN_K / TENENGRAD_K) were set on the A6700's 6192px previews, so
+a 50MP body's 8640px preview scored the same optical sharpness lower -
+measured on an A1 shoot of 1,695 frames, the eye-ROI medians came in at
+0.37x / 0.39x of the constants and the ROI sharpness median at 29 against
+the A6700 corpus's 48.
+
+So every frame is measured at the calibration body's scale. Bodies at or
+below 6192px (A6700, most 20~26MP) are untouched; larger ones are reduced
+by INTER_AREA on the grey plane (A1: ~20ms a frame, one thread). ROI and
+face boxes stay in full-frame coordinates for the display; only the
+patches handed to measure_patch are taken from the reduced plane, and
+the minimum ROI size is applied in reduced pixels so it means what it
+did on the A6700. The eye-opening landmarks stay at full resolution.
+
+Checked against burst labels on that A1 shoot (500 labelled frames
+re-analysed at 8640 / 6192 / 4438): the scale barely moves the label
+agreement (top-1 26 / 26 / 24 of 42, the main face identical on 498 of
+500) and only shifts the level (6192 sits +3.4 at the median over the
+native 8640, 4438 +7.8). 6192 is kept for the calibration argument, not
+for accuracy; that shoot's low scores are the metric's contrast
+normalisation (RESEARCH_ANALYSIS_PRESTUDY.md 10.5-10.6).
 """
 
 FRAME_LONG_EDGE = 1024
@@ -215,6 +307,22 @@ def detect_faces(image_bgr: np.ndarray) -> np.ndarray | None:
 # ------------------------------------------------------- sharpness measurement
 
 
+CONTRAST_FLOOR_STD = 22.0
+"""The least contrast (patch standard deviation after the noise is taken
+out, 8-bit) the normalisation credits a patch with. 0 = no floor.
+
+Dividing by the patch variance makes the metrics contrast-invariant, and
+that is right for a low-key face; but a nearly flat patch that holds a
+few hard edges - a hazy face behind glass, a palm or forearm across the
+eyes, a metal bracket the eye ROI fell on, a motion-blurred face - has a
+tiny variance and a Laplacian energy those edges alone supply, and the
+ratio comes out above a crisp eye's. Below the floor the variance is
+taken as the floor, so such a patch is scored as if it had that much
+contrast and the ratio stops inflating. Set from the burst labels of the
+A1 shoot (RESEARCH_ANALYSIS_PRESTUDY.md 10.7).
+"""
+
+
 def measure_patch(gray_patch: np.ndarray, noise_var: float = 0.0) -> tuple[float, float]:
     """(normalised Laplacian, normalised Tenengrad) of a greyscale patch.
 
@@ -250,6 +358,7 @@ def measure_patch(gray_patch: np.ndarray, noise_var: float = 0.0) -> tuple[float
     # correction alone - the gate stays on as a second line of defence.
     if variance < MIN_VARIANCE:
         return 0.0, 0.0
+    variance = max(variance, CONTRAST_FLOOR_STD ** 2)
 
     laplacian = max(
         float(cv2.Laplacian(patch, cv2.CV_32F).var()) - 20.0 * noise_var, 0.0
@@ -340,9 +449,22 @@ def _saturate(value: float, k: float) -> float:
 # --------------------------------------------------------------- ROI selection
 
 
+EYE_ROI_MIN_FACE_FRACTION = 0.4
+"""The least width of the eye ROI as a fraction of the face box width
+(0 = none). The ROI spans the two YuNet eye points; on a profile they
+nearly coincide and the ROI shrinks to a sliver of hair (measured 51~64px
+on a 400px face, Laplacian 0). With a minimum, the ROI stays centred on
+the eye midpoint and grows to this fraction of the face, 2:1. A frontal
+face's ROI is 0.7~0.9 of the face width, so it is untouched. On the A1
+shoot's burst labels (500 frames re-analysed at 0 / 0.4 / 0.5, with the
+hidden-face gate and the closing penalty in place): labelled-best frames
+rejected 39 / 23 / 21, top-1 29 / 29 / 28 of 42 - 0.4 taken."""
+
+
 def _eye_roi(face: np.ndarray, scale: float, shape: tuple[int, int]) -> tuple[int, int, int, int] | None:
     """ROI enclosing both landmark eyes, back-projected into the original
-    coordinate system."""
+    coordinate system (at least EYE_ROI_MIN_FACE_FRACTION of the face
+    wide)."""
     right_eye = np.array([face[4], face[5]], dtype=np.float32)
     left_eye = np.array([face[6], face[7]], dtype=np.float32)
     eye_distance = float(np.linalg.norm(left_eye - right_eye))
@@ -352,6 +474,9 @@ def _eye_roi(face: np.ndarray, scale: float, shape: tuple[int, int]) -> tuple[in
     center = (right_eye + left_eye) / 2.0 / scale
     half_w = (eye_distance * 0.9) / scale
     half_h = (eye_distance * 0.45) / scale
+    min_half_w = float(face[2]) * EYE_ROI_MIN_FACE_FRACTION / 2.0 / scale
+    if half_w < min_half_w:
+        half_w, half_h = min_half_w, min_half_w * 0.5
     return _clip_box(center[0] - half_w, center[1] - half_h, half_w * 2, half_h * 2, shape)
 
 
@@ -598,6 +723,88 @@ def _face_under(faces, scale: float, af_box: tuple[int, int, int, int]) -> int:
     return -1
 
 
+TRACK_FACE_SIDE = 1.5
+"""How far to each side of a face (in face widths) a tracking frame may
+sit and still belong to that face."""
+
+TRACK_FACE_BELOW = 3.0
+"""How far below a face (in face heights) - the torso, where Sony's
+tracking frame usually is."""
+
+TRACK_FACE_ABOVE = 0.5
+"""How far above a face (in face heights) - hair, a hand on the head."""
+
+TRACK_BODY_SIDE = 2.5
+"""When exactly one confident face is in the frame, a tracking frame this
+many face widths to the side of it still belongs to it - **only below the
+chin** (TRACK_BODY_BELOW). Measured on the A1 shoot (260830): the frame on
+a raised pitching arm sits 2.1 widths beside the face and 1.2~1.9 heights
+below its top, on the hip 1.9 widths beside and 5.5 heights below. The
+frames that must stay unattached (a bystander's face 2.0~2.4 widths away
+while the tracked subject stands behind glass) are *level* with that face
+(0.1~0.2 heights) - which is why the widening applies below the chin only.
+6 labelled-best frames recovered, 0 labelled-reject frames pulled in."""
+TRACK_BODY_BELOW = 6.0
+"""How far below the chin (in face heights) the single-face widening
+reaches: the hip of a standing adult is 4.5~5.5 heights under the top of
+the face; 6 leaves the legs out."""
+
+
+def _face_near(faces, scale: float, af_box: tuple[int, int, int, int]) -> int:
+    """Index of the confident face a tracking frame belongs to when it lies
+    in no face box, -1 if none is near.
+
+    The frame the camera records for a tracked person is not on the
+    face: Sony's 0x2027 sits on the torso in tracking mode, and it lands
+    on a shoulder or the hair as the subject moves. Measured on 248
+    concert frames whose frame was in no face box, the nearest confident
+    face was straight above it (|dx| median 0.7 face widths, 0.6 face
+    heights below the chin, 90% within 1.3 widths / 2.2 heights). A face
+    box widened by TRACK_FACE_SIDE on both sides and stretched
+    TRACK_FACE_BELOW down / TRACK_FACE_ABOVE up has to contain the frame's
+    centre; the nearest by centre distance in face units wins.
+
+    Low-confidence detections do not qualify, for the same reason as in
+    _face_under. The bird frames this rule must not touch have no
+    confident face at all (measured, 16/16).
+
+    When the frame is in none of those boxes and there is **exactly one**
+    confident face, a wider box below its chin (TRACK_BODY_SIDE /
+    TRACK_BODY_BELOW) is tried: the camera lost the face (a profile in a
+    pitching windup) and tracked the arm or the hip instead, and with one
+    person there is nobody else the frame could belong to. With two or
+    more confident faces the frame keeps deciding, as before - and so it
+    does when the frame sits in the ordinary box of a detection too unsure
+    to qualify: that is someone else's torso, not this person's arm.
+    """
+    ax, ay = af_box[0] + af_box[2] / 2.0, af_box[1] + af_box[3] / 2.0
+    best, best_dist = -1, float("inf")
+    confident: list[tuple[int, float, float, float, float]] = []
+    in_someones_box = False
+    for index, face in enumerate(faces):
+        x, y, w, h = (float(face[0]) / scale, float(face[1]) / scale,
+                      float(face[2]) / scale, float(face[3]) / scale)
+        if w <= 0 or h <= 0:
+            continue
+        inside = (x - TRACK_FACE_SIDE * w <= ax <= x + w + TRACK_FACE_SIDE * w
+                  and y - TRACK_FACE_ABOVE * h <= ay <= y + h + TRACK_FACE_BELOW * h)
+        in_someones_box = in_someones_box or inside
+        if float(face[14]) < FACE_MAIN_MIN_SCORE:
+            continue
+        confident.append((index, x, y, w, h))
+        if not inside:
+            continue
+        dist = ((ax - (x + w / 2.0)) / w) ** 2 + ((ay - (y + h / 2.0)) / h) ** 2
+        if dist < best_dist:
+            best_dist, best = dist, index
+    if best < 0 and len(confident) == 1 and not in_someones_box:
+        index, x, y, w, h = confident[0]
+        if (x - TRACK_BODY_SIDE * w <= ax <= x + w + TRACK_BODY_SIDE * w
+                and y + h <= ay <= y + h + TRACK_BODY_BELOW * h):
+            return index
+    return best
+
+
 def _nearest_face(af_box: tuple[int, int, int, int],
                   faces: tuple[tuple[int, int, int, int], ...]) -> int:
     """Index of the face nearest the AF box centre. For the confidence
@@ -677,14 +884,25 @@ def _best_tile(gray_small: np.ndarray, scale: float, shape: tuple[int, int],
 
 
 def _measure_sharpness(
-    gray_full: np.ndarray, box: tuple[int, int, int, int],
+    gray_measure: np.ndarray, box: tuple[int, int, int, int],
     laplacian_k: float, tenengrad_k: float, noise_var: float = 0.0,
 ) -> float:
-    """Final sharpness (0~100) of a box region, measured the same way as
-    the ROI."""
+    """Final sharpness (0~100) of a box region (in the measurement plane's
+    coordinates), measured the same way as the ROI."""
     x, y, w, h = box
-    lap_raw, ten_raw = measure_patch(gray_full[y:y + h, x:x + w], noise_var)
+    lap_raw, ten_raw = measure_patch(gray_measure[y:y + h, x:x + w], noise_var)
     return 0.4 * _saturate(lap_raw, laplacian_k) + 0.6 * _saturate(ten_raw, tenengrad_k)
+
+
+def _measure_box(box: tuple[int, int, int, int], measure_scale: float,
+                 shape: tuple[int, int]) -> tuple[int, int, int, int]:
+    """A full-frame box in the measurement plane's coordinates (see
+    MEASURE_LONG_EDGE). Identity at scale 1."""
+    if measure_scale >= 1.0:
+        return box
+    x, y, w, h = box
+    return _clip_box(x * measure_scale, y * measure_scale,
+                     w * measure_scale, h * measure_scale, shape)
 
 
 MIN_EYE_PX = 12.0
@@ -696,12 +914,35 @@ on that value, so it is left as 'not measured' outright.
 """
 
 
-def _measure_eye_opening(image_bgr: np.ndarray, box) -> float:
-    """Eye aspect ratio (EAR) of the main subject. -1 if unmeasurable.
+def _measure_eye_opening(gray_full: np.ndarray, box) -> float:
+    """Eye aspect ratio (EAR) of the main subject alone. -1 if
+    unmeasurable. See _measure_face_state."""
+    return _measure_face_state(gray_full, box)[0]
+
+
+def _measure_face_state(gray_full: np.ndarray, box) -> tuple[float, float, float]:
+    """(eye aspect ratio, face presence, landmark turn) of the main
+    subject, each -1 if unmeasurable.
+
+    The presence is FaceMesh's own score for "there is a face in this
+    crop" and the turn is how far the nose sits off the cheek midline
+    (face_mesh.turn). Together they tell a face **covered** by a hand, a
+    forearm or a fan sign, or a false face the detector found on hair,
+    from a real profile: the covered face has low presence and a frontal
+    turn, the profile low presence and a turn beyond the cheek. The score
+    withholds the eye signals on the covered face (scoring.face_hidden).
 
     **Uses whichever of the two eyes is more open.** On a face in profile
     the far eye is barely visible and always comes out as 'closed', and
     penalising on that drops every profile frame.
+
+    Measured on the full-resolution grey plane, the face crop replicated
+    to three channels. The analysis no longer holds a full colour image
+    (AnalysisPlanes). Against the user's labels the grey crop scores the
+    same as the colour crop (17/28 caught, 7/79 false penalties, both):
+    10 of 107 frames flip, five each way, all sitting within 0.03 of the
+    threshold, and the EAR differs by 0.014 at the median. Staying at
+    full resolution keeps MIN_EYE_PX meaning what it did.
 
     The cost is 1.3ms per face. Only the one main subject is measured, so
     4000 frames comes to a little over 5 seconds - no effect on analysis
@@ -711,12 +952,24 @@ def _measure_eye_opening(image_bgr: np.ndarray, box) -> float:
         from . import face_mesh
 
         if not face_mesh.available():
-            return -1.0
-        points = face_mesh.landmarks(
-            image_bgr, (float(box[0]), float(box[1]),
-                        float(box[2]), float(box[3])))
+            return -1.0, -1.0, -1.0
+        # Only the padded face region is converted - the landmarks are
+        # used as ratios, so their frame of reference does not matter.
+        height, width = gray_full.shape[:2]
+        x, y, w, h = (float(v) for v in box)
+        x0 = max(0, int(x - w * face_mesh.FACE_PAD))
+        y0 = max(0, int(y - h * face_mesh.FACE_PAD))
+        x1 = min(width, int(x + w * (1.0 + face_mesh.FACE_PAD)) + 1)
+        y1 = min(height, int(y + h * (1.0 + face_mesh.FACE_PAD)) + 1)
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return -1.0, -1.0, -1.0
+        crop = gray_full[y0:y1, x0:x1]
+        if crop.ndim == 2:
+            crop = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
+        points, presence = face_mesh.landmarks_with_score(crop, (x - x0, y - y0, w, h))
         if points is None:
-            return -1.0
+            return -1.0, presence, -1.0
+        face_turn = face_mesh.turn(points)
 
         best = -1.0
         for ring, ear_points in (
@@ -731,17 +984,45 @@ def _measure_eye_opening(image_bgr: np.ndarray, box) -> float:
                         + float(np.linalg.norm(p[2] - p[4])))
             horizontal = float(np.linalg.norm(p[0] - p[3]))
             best = max(best, vertical / (2.0 * horizontal + 1e-6))
-        return best
+        return best, presence, face_turn
     except Exception:  # noqa: BLE001 - a failed eye must not stop analysis
         log.debug("눈 개폐 측정 실패", exc_info=True)
-        return -1.0
+        return -1.0, -1.0, -1.0
 
 
 # ----------------------------------------------------------------- entry point
 
 
+MAX_ID_FACES = 12
+"""How many faces per frame get an identity embedding - the largest by
+area x confidence, which is the order the main face is picked in, so the
+main face always has one. A crowd of fifty faces would otherwise cost
+200ms a frame."""
+
+
+def _face_identities(planes: AnalysisPlanes, small: np.ndarray,
+                     faces: np.ndarray | None) -> tuple[tuple[float, ...], ...]:
+    """SFace embeddings of the detected faces (face_id), one entry per
+    face, () for a face that got none. The crops are cut from the colour
+    plane - the half-size decode, four times the detection copy's pixels
+    - with the detection rows scaled onto it. Rounded to four decimals
+    for the cache; subject.py re-normalises."""
+    if faces is None or len(faces) == 0 or not face_id.available():
+        return () if faces is None else tuple(() for _ in faces)
+    rank = np.argsort(-(faces[:, 2] * faces[:, 3] * np.clip(faces[:, 14], 0.0, None)))
+    chosen = set(int(i) for i in rank[:MAX_ID_FACES])
+    scale = planes.colour.shape[1] / float(small.shape[1])
+    rows = np.asarray([faces[i] for i in sorted(chosen)], dtype=np.float32)
+    embedded = dict(zip(sorted(chosen), face_id.embeddings(planes.colour, rows, scale)))
+    return tuple(
+        tuple(round(float(v), 4) for v in embedded[i]) if embedded.get(i) is not None else ()
+        for i in range(len(faces))
+    )
+
+
 def reduce_for_detection(image_bgr: np.ndarray,
-                         detect_long_edge: int = DETECT_LONG_EDGE) -> np.ndarray:
+                         detect_long_edge: int = DETECT_LONG_EDGE,
+                         full_shape: tuple[int, int] | None = None) -> np.ndarray:
     """Reduced copy for face detection. The most expensive resize in
     analysing one frame (measured 28.5ms).
 
@@ -749,21 +1030,24 @@ def reduce_for_detection(image_bgr: np.ndarray,
     thumbnail reuse the same reduction, the cost of shrinking down from the
     6192x4128 original again disappears - measured on a Mac, dhash
     10.9->2.7ms, thumbnail 47.0->2.3ms.
+
+    Given full_shape (height, width of the full frame), the target size is
+    worked out from *that* rather than from the image handed in - so a
+    half-size colour plane (AnalysisPlanes) reduces to exactly the size
+    the full frame would have, and the detections map back with the same
+    scale factor.
     """
-    full_h, full_w = image_bgr.shape[:2]
+    full_h, full_w = full_shape if full_shape is not None else image_bgr.shape[:2]
     long_edge = max(full_h, full_w)
     scale = min(1.0, detect_long_edge / long_edge) if long_edge else 1.0
-    if scale >= 1.0:
+    target = (max(1, round(full_w * scale)), max(1, round(full_h * scale)))
+    if (image_bgr.shape[1], image_bgr.shape[0]) == target:
         return image_bgr
-    return cv2.resize(
-        image_bgr,
-        (max(1, round(full_w * scale)), max(1, round(full_h * scale))),
-        interpolation=cv2.INTER_AREA,
-    )
+    return cv2.resize(image_bgr, target, interpolation=cv2.INTER_AREA)
 
 
 def analyze_focus(
-    image_bgr: np.ndarray,
+    image_bgr: np.ndarray | None = None,
     detect_long_edge: int = DETECT_LONG_EDGE,
     laplacian_k: float = LAPLACIAN_K,
     tenengrad_k: float = TENENGRAD_K,
@@ -774,8 +1058,16 @@ def analyze_focus(
     noise_compensation: bool = True,
     reduced: np.ndarray | None = None,
     af_tracking: bool = False,
+    planes: AnalysisPlanes | None = None,
 ) -> FocusResult:
     """Measure the focus state of one preview image.
+
+    The input is either a full colour image (image_bgr) or the planes the
+    batch decodes (raw_io.AnalysisPlanes: a full-resolution grey plane and
+    a colour plane at up to half size). A colour image is split into
+    planes on the spot, so the two roads run the same code; what they
+    give differs only in where the grey came from (libjpeg's Y plane
+    against cvtColor's weighted sum, a rounding-level difference).
 
     Detection runs on the reduced copy, the ROI sharpness measurement at
     full resolution. Sharpness only means anything measured on the original
@@ -806,16 +1098,31 @@ def analyze_focus(
     turf, and the score was measured on the turf). Without this the app
     did not follow the tracked subject, which is what tracking is for.
     """
-    full_h, full_w = image_bgr.shape[:2]
+    if planes is None:
+        if image_bgr is None:
+            raise ValueError("analyze_focus needs an image or planes")
+        planes = AnalysisPlanes.from_bgr(image_bgr)
+    gray_full = planes.gray
+    full_h, full_w = gray_full.shape[:2]
     shape = (full_h, full_w)
 
     long_edge = max(full_h, full_w)
     scale = min(1.0, detect_long_edge / long_edge) if long_edge else 1.0
     small = reduced if reduced is not None else reduce_for_detection(
-        image_bgr, detect_long_edge)
+        planes.colour, detect_long_edge, full_shape=shape)
 
     gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    gray_full = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+
+    # The measurement plane (MEASURE_LONG_EDGE): the calibration body's
+    # pixel scale. Every box below is chosen in full-frame coordinates and
+    # mapped onto this plane only where a patch is actually measured; the
+    # minimum ROI is applied in the plane's pixels, so it is expressed in
+    # full-frame pixels here.
+    measure_scale = min(1.0, MEASURE_LONG_EDGE / long_edge) if long_edge else 1.0
+    gray_measure = (gray_full if measure_scale >= 1.0
+                    else resize_long_edge(gray_full, MEASURE_LONG_EDGE))
+    mshape = gray_measure.shape[:2]
+    min_roi = int(np.ceil(MIN_ROI_PX / measure_scale))
 
     # Exposure state - measuring on the reduced copy is enough
     mean_luma = float(gray_small.mean())
@@ -824,6 +1131,7 @@ def analyze_focus(
     clipped_shadows = float(np.count_nonzero(gray_small <= 5)) / total
 
     faces = detect_faces(small)
+    face_ids = _face_identities(planes, small, faces)
     roi: tuple[int, int, int, int] | None = None
     source = FocusSource.FRAME
     face_count = 0
@@ -838,6 +1146,12 @@ def analyze_focus(
     tracked_face = -1
     if af_tracking and af_box is not None and faces is not None:
         tracked_face = _face_under(faces, scale, af_box)
+        if tracked_face < 0:
+            # Not in any face: on the torso, a shoulder or the hair of one
+            # of them (the normal case for Sony's tracking frame on a
+            # person) - or on something that is not a detected face at
+            # all, which is what the frame-as-ROI path below is for.
+            tracked_face = _face_near(faces, scale, af_box)
     if faces is not None:
         face_count = len(faces)
         if force_main_face is not None and 0 <= force_main_face < len(faces):
@@ -846,9 +1160,9 @@ def analyze_focus(
             index = tracked_face
         else:
             if center_priority:
-                index = _pick_central_face(faces, gray_full, scale, shape)
+                index = _pick_central_face(faces, gray_measure, scale / measure_scale, mshape)
             else:
-                index = _pick_main_face(faces, gray_full, scale, shape,
+                index = _pick_main_face(faces, gray_measure, scale / measure_scale, mshape,
                                         laplacian_k, tenengrad_k)
         face = faces[index]
         main_face = index
@@ -862,13 +1176,13 @@ def analyze_focus(
         face_box_small = (float(face[0]), float(face[1]), float(face[2]), float(face[3]))
 
         candidate = _eye_roi(face, scale, shape)
-        if candidate and min(candidate[2], candidate[3]) >= MIN_ROI_PX:
+        if candidate and min(candidate[2], candidate[3]) >= min_roi:
             roi, source = candidate, FocusSource.EYE
         else:
             candidate = _clip_box(
                 face[0] / scale, face[1] / scale, face[2] / scale, face[3] / scale, shape
             )
-            if min(candidate[2], candidate[3]) >= MIN_ROI_PX:
+            if min(candidate[2], candidate[3]) >= min_roi:
                 roi, source = candidate, FocusSource.FACE
 
     if (af_tracking and af_box is not None and force_main_face is None
@@ -881,8 +1195,8 @@ def analyze_focus(
         # leaf, "camera focused on someone else" while the ROI *is* the
         # camera's frame.
         candidate = _grow_box(
-            _clip_box(af_box[0], af_box[1], af_box[2], af_box[3], shape), MIN_ROI_PX, shape)
-        if candidate and min(candidate[2], candidate[3]) >= MIN_ROI_PX:
+            _clip_box(af_box[0], af_box[1], af_box[2], af_box[3], shape), min_roi, shape)
+        if candidate and min(candidate[2], candidate[3]) >= min_roi:
             roi, source = candidate, FocusSource.AF
             if tracked_face < 0:
                 main_face = -1
@@ -899,13 +1213,13 @@ def analyze_focus(
         # camera's actual focus position instead of guessing at "the
         # sharpest tile".
         candidate = _grow_box(
-            _clip_box(af_box[0], af_box[1], af_box[2], af_box[3], shape), MIN_ROI_PX, shape)
-        if candidate and min(candidate[2], candidate[3]) >= MIN_ROI_PX:
+            _clip_box(af_box[0], af_box[1], af_box[2], af_box[3], shape), min_roi, shape)
+        if candidate and min(candidate[2], candidate[3]) >= min_roi:
             roi, source = candidate, FocusSource.AF
 
     if roi is None:
         candidate = _best_tile(gray_small, scale, shape)
-        if candidate and min(candidate[2], candidate[3]) >= MIN_ROI_PX:
+        if candidate and min(candidate[2], candidate[3]) >= min_roi:
             roi, source = candidate, FocusSource.TILE
 
     if roi is None:
@@ -922,18 +1236,32 @@ def analyze_focus(
     af_face = -1
     if af_box is not None and face_boxes:
         af_face = _nearest_face(af_box, face_boxes)
+    if tracked_face >= 0:
+        # The frame was matched to this face as the tracked subject; the
+        # nearest-centre rule may pick a neighbour whose centre is closer
+        # to a torso frame, and that would raise a "main subject
+        # uncertain" note on the very frames where the camera said whom
+        # it was on.
+        af_face = tracked_face
 
     # Frame σ² for the noise subtraction. The ROI and the background are
-    # measured at full resolution, so the σ of the full resolution is used.
-    # On the reduced copy (frame_gray) the reduction averages the noise
+    # measured on the measurement plane, so the σ of that plane is used.
+    # On the 1024px copy (frame_gray) the reduction averages the noise
     # away and σ comes out completely different, so that one is measured
     # separately.
     # With noise_compensation=False this is the same measurement as v3
     # (no subtraction).
-    noise_var = frame_noise_sigma(gray_full) ** 2 if noise_compensation else 0.0
+    noise_var = frame_noise_sigma(gray_measure) ** 2 if noise_compensation else 0.0
 
-    x, y, w, h = roi
-    laplacian_raw, tenengrad_raw = measure_patch(gray_full[y:y + h, x:x + w], noise_var)
+    x, y, w, h = _measure_box(roi, measure_scale, mshape)
+    roi_patch = gray_measure[y:y + h, x:x + w]
+    laplacian_raw, tenengrad_raw = measure_patch(roi_patch, noise_var)
+    # The ROI's contrast with the noise taken out - the quantity the
+    # CONTRAST_FLOOR_STD floor acts on. Kept on the result so the score
+    # can give the eye signals proportionally less credit below the floor
+    # (scoring.eye_signal_weight): a hazy face behind glass keeps its
+    # discounted sharpness but not the full eye package.
+    roi_contrast = float(np.sqrt(max(float(roi_patch.astype(np.float32).var()) - noise_var, 0.0))) if roi_patch.size else 0.0
 
     laplacian = _saturate(laplacian_raw, laplacian_k)
     tenengrad = _saturate(tenengrad_raw, tenengrad_k)
@@ -945,9 +1273,10 @@ def analyze_focus(
     # (focus fell behind the subject), face-priority mode penalises it.
     if source in (FocusSource.EYE, FocusSource.FACE) and face_box_small is not None:
         bg_box = _best_tile(gray_small, scale, shape, exclude=face_box_small)
-        if bg_box and min(bg_box[2], bg_box[3]) >= MIN_ROI_PX:
+        if bg_box and min(bg_box[2], bg_box[3]) >= min_roi:
             background_sharpness = _measure_sharpness(
-                gray_full, bg_box, laplacian_k, tenengrad_k, noise_var
+                gray_measure, _measure_box(bg_box, measure_scale, mshape),
+                laplacian_k, tenengrad_k, noise_var
             )
 
     # A baseline independent of the ROI. It must be measured at the
@@ -965,12 +1294,16 @@ def analyze_focus(
         frame_ten_raw, FRAME_TENENGRAD_K
     )
 
-    eyes_open = -1.0
+    eyes_open = face_presence = face_turn = -1.0
     if 0 <= main_face < len(face_boxes):
-        eyes_open = _measure_eye_opening(image_bgr, face_boxes[main_face])
+        eyes_open, face_presence, face_turn = _measure_face_state(
+            gray_full, face_boxes[main_face])
 
     return FocusResult(
         eyes_open=eyes_open,
+        face_presence=face_presence,
+        face_turn=face_turn,
+        roi_contrast=roi_contrast,
         sharpness=sharpness,
         laplacian=laplacian,
         tenengrad=tenengrad,
@@ -983,6 +1316,7 @@ def analyze_focus(
         background_sharpness=background_sharpness,
         faces=face_boxes,
         face_scores=face_scores,
+        face_ids=face_ids,
         main_face=main_face,
         af_face=af_face,
         clipped_highlights=clipped_highlights,

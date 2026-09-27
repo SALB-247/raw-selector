@@ -356,6 +356,46 @@ class SettingsPanel(QWidget):
         self.penalty_eyes_closed.valueChanged.connect(self._emit)
         form.addRow(tr("  Eyes closed"), self.penalty_eyes_closed)
 
+        self.penalty_eyes_closing = QDoubleSpinBox()
+        self.penalty_eyes_closing.setRange(0.0, 40.0)
+        self.penalty_eyes_closing.setSuffix(tr(" pts"))
+        self.penalty_eyes_closing.setToolTip(tr(
+            "Penalty when the eyes are open by the threshold but well below\n"
+            "what the same scene's other frames show (under 70% of the scene's\n"
+            "usual EAR and under 0.45): mid-blink and half-shut eyes in a burst.\n\n"
+            "The absolute threshold cannot see these, since 0.36 is open for\n"
+            "one face and mid-blink for another; the burst itself shows what\n"
+            "this face's open eyes look like. It replaces the eyes-open bonus\n"
+            "on that frame. 0 turns it off."
+        ))
+        self.penalty_eyes_closing.valueChanged.connect(self._emit)
+        form.addRow(tr("  Eyes closing (vs. the scene)"), self.penalty_eyes_closing)
+
+        self.eyes_closing_ratio = QDoubleSpinBox()
+        self.eyes_closing_ratio.setRange(0.3, 1.0)
+        self.eyes_closing_ratio.setSingleStep(0.05)
+        self.eyes_closing_ratio.setDecimals(2)
+        self.eyes_closing_ratio.setToolTip(tr(
+            "Eyes count as closing below this fraction of the scene's usual\n"
+            "EAR (the median of the scene's measured faces, at least five).\n\n"
+            "Measured on a 30fps burst shoot: 0.6 flagged 2 frames, 0.7 the\n"
+            "shut and half-shut eyes with one laugh among them, 0.8 pulled\n"
+            "in eight good frames (laughing, squinting into the light)."
+        ))
+        self.eyes_closing_ratio.valueChanged.connect(self._emit)
+        form.addRow(tr("  Eyes-closing ratio"), self.eyes_closing_ratio)
+
+        self.eyes_closing_below = QDoubleSpinBox()
+        self.eyes_closing_below.setRange(0.25, 0.6)
+        self.eyes_closing_below.setSingleStep(0.01)
+        self.eyes_closing_below.setDecimals(2)
+        self.eyes_closing_below.setToolTip(tr(
+            "The closing call is never made above this EAR: wide-open eyes\n"
+            "in a scene of wider-open ones are not closing."
+        ))
+        self.eyes_closing_below.valueChanged.connect(self._emit)
+        form.addRow(tr("  Eyes-closing cap (EAR)"), self.eyes_closing_below)
+
         self.eyes_closed_below = QDoubleSpinBox()
         self.eyes_closed_below.setRange(0.05, 0.45)
         self.eyes_closed_below.setSingleStep(0.01)
@@ -609,6 +649,9 @@ class SettingsPanel(QWidget):
         self.penalty_no_face.setValue(score.penalty_no_face)
         self.bonus_eyes_open.setValue(score.bonus_eyes_open)
         self.penalty_eyes_closed.setValue(score.penalty_eyes_closed)
+        self.penalty_eyes_closing.setValue(score.penalty_eyes_closing)
+        self.eyes_closing_ratio.setValue(score.eyes_closing_ratio)
+        self.eyes_closing_below.setValue(score.eyes_closing_below)
         self.eyes_closed_below.setValue(score.eyes_closed_below)
 
         for key, spin in self.trust_spins.items():
@@ -655,6 +698,9 @@ class SettingsPanel(QWidget):
         score.penalty_no_face = self.penalty_no_face.value()
         score.bonus_eyes_open = self.bonus_eyes_open.value()
         score.penalty_eyes_closed = self.penalty_eyes_closed.value()
+        score.penalty_eyes_closing = self.penalty_eyes_closing.value()
+        score.eyes_closing_ratio = self.eyes_closing_ratio.value()
+        score.eyes_closing_below = self.eyes_closing_below.value()
         score.eyes_closed_below = self.eyes_closed_below.value()
 
         for key, spin in self.trust_spins.items():
@@ -732,6 +778,9 @@ class SettingsPanel(QWidget):
             self.penalty_no_face,
             self.bonus_eyes_open,
             self.penalty_eyes_closed,
+            self.penalty_eyes_closing,
+            self.eyes_closing_ratio,
+            self.eyes_closing_below,
             self.eyes_closed_below,
             self.face_bonus_full_area,
             *self.bonus_spins.values(),

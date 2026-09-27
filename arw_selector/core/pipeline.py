@@ -23,7 +23,7 @@ from . import focus as focus_module
 from .cache import AnalysisCache, default_cache_path
 from .config import AnalyzeConfig, Config
 from .grouping import dhash
-from .raw_io import PreviewError, iter_raw_files, load_preview, read_metadata
+from .raw_io import PreviewError, iter_raw_files, load_analysis_planes, read_metadata
 from .thumbs import thumbnail_path, write_thumbnail
 from .types import ImageRecord
 
@@ -78,10 +78,14 @@ def analyze_file(
         log.debug("메타데이터 실패 %s: %s", path.name, exc)
 
     try:
-        preview = load_preview(
+        # Not a full colour image: a full-resolution grey plane for the
+        # measurements and a half-size colour plane for detection - two
+        # cheaper decodes instead of one big one plus a reduction and a
+        # grey conversion (raw_io.AnalysisPlanes; the numbers are there).
+        planes = load_analysis_planes(
             path, demosaic_small=config.demosaic_small_preview)
 
-        # The camera AF position. The preview already has the EXIF
+        # The camera AF position. The planes already have the EXIF
         # orientation applied, so maker_meta applies the orientation too
         # and hands it back in preview coordinates. It is read **always** -
         # because af_face (the AF <-> main subject mismatch confidence
@@ -95,7 +99,7 @@ def analyze_file(
             from .maker_meta import af_preview_box
 
             af_box = af_preview_box(
-                path, metadata.orientation, preview.shape[1], preview.shape[0]
+                path, metadata.orientation, planes.width, planes.height
             )
             # A tracking frame is the subject itself (see analyze_focus).
             # Sony "Tracking" / "Face tracking", Nikon "3D-tracking",
@@ -107,10 +111,10 @@ def analyze_file(
         # having the fingerprint and the thumbnail reuse what is made for
         # face detection anyway removes 53ms per frame (measured on a Mac).
         reduced = focus_module.reduce_for_detection(
-            preview, config.detect_long_edge)
+            planes.colour, config.detect_long_edge, full_shape=(planes.height, planes.width))
 
         result = focus_module.analyze_focus(
-            preview,
+            planes=planes,
             detect_long_edge=config.detect_long_edge,
             laplacian_k=config.laplacian_k,
             tenengrad_k=config.tenengrad_k,
@@ -218,10 +222,18 @@ WORKER_MEMORY_MB = 800
 #: Past this point it actually gets slower.
 #:
 #: Measured (300 frames, 32 cores): 6 workers 3.40x / 8 workers 3.60x /
-#: **12 workers 3.77x** / 16 workers 3.61x / 24 workers 3.44x. Even using
-#: all 32 cores it stops at 3.8x because the disk reading 40MB RAWs is the
-#: bottleneck. Add workers past that point and they only fight each other
-#: for the disk, which is a loss.
+#: **12 workers 3.77x** / 16 workers 3.61x / 24 workers 3.44x.
+#:
+#: The reason is not the disk (a RAW analysis reads 8~22% of the file,
+#: RESEARCH_ANALYSIS_SPEED.md) and not OpenCV's threads fighting each
+#: other (capping them to one per worker changed nothing, measured 12~31
+#: workers). It is the cores themselves: on a hybrid CPU (i9-14900KF,
+#: 8 P + 16 E) the SIMD-heavy stages - resize, cvtColor, Laplacian - run
+#: in 31 processes at only 4.8x the throughput of one P-core, while the
+#: integer-bound JPEG decode reaches 12.8x. The whole frame comes out at
+#: 5.4x, which is where the 12-worker plateau sits
+#: (RESEARCH_ANALYSIS_PRESTUDY.md). Past 12, on an SMB share it costs
+#: -19.7%, on a USB stick -6.1%, on NVMe -3.6%.
 #:
 #: (With a small sample the worker start-up cost masks the curve and
 #: distorts it. Measured with 48 frames it looked as if it saturated at 6.)

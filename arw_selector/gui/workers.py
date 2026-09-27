@@ -85,7 +85,7 @@ def stop_worker(worker, timeout_ms: int = 15000) -> bool:
     try:
         if hasattr(worker, "cancel"):
             worker.cancel()
-        for name in ("done", "failed", "finished_ok", "progressed", "restoring", "finished"):
+        for name in ("done", "failed", "finished_ok", "progressed", "restoring", "aligning", "finished"):
             signal = getattr(worker, name, None)
             if signal is not None:
                 silent_disconnect(signal)
@@ -101,6 +101,7 @@ class AnalysisWorker(QThread):
 
     progressed = Signal(object)   # Progress
     restoring = Signal(int, int)  # saved main-subject picks put back: done, total
+    aligning = Signal(int, int)   # frames re-scored on the batch's subject: done, total
     finished_ok = Signal(object)  # SelectionSession
     failed = Signal(str)
 
@@ -130,23 +131,27 @@ class AnalysisWorker(QThread):
                 progress_cb=self.progressed.emit,
                 should_cancel=self.is_cancelled,
                 paths=self.paths,
+                before_subjects=lambda records: self._restore_main_faces(session),
+                subject_cb=self.aligning.emit,
             )
-            self.restored_faces = self._restore_main_faces(session)
             self.finished_ok.emit(session)
         except Exception as exc:  # noqa: BLE001 - a thread leak kills the app
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
     def _restore_main_faces(self, session: SelectionSession) -> int:
-        """Puts the saved main-subject picks back before the session is
-        handed over.
+        """Puts the saved main-subject picks back, between the grouping and
+        the batch's subject pass (SelectionSession.run's before_subjects).
 
         Each pick is a preview read and a detector pass, so fifty of them
         on the GUI thread froze the window for up to a minute at the very
         moment "analysis complete" appeared, with no progress shown. Here
         the progress bar is still up (restoring) and the stop button still
-        works. Grades and develop edits are instant and stay with the
-        window (main_window.on_analysis_done). The batch is re-graded when
-        a pick changed a score. A failure here must not fail the analysis.
+        works. Running before the subject pass, a frame the user pinned is
+        one the pass leaves alone; run after it, the pass moved the frame
+        first and the pick undid it, a re-score on every run. The session
+        grades the batch after the pass. Grades and develop edits are
+        instant and stay with the window (main_window.on_analysis_done).
+        A failure here must not fail the analysis.
         """
         from ..core import edits as edits_store
 
@@ -154,12 +159,11 @@ class AnalysisWorker(QThread):
             faces = edits_store.restore_main_faces(
                 self.folder, session.records, self.config.analyze,
                 progress_cb=self.restoring.emit, should_cancel=self.is_cancelled)
-            if faces:
-                session.regrade()
-            return faces
         except Exception:  # noqa: BLE001 - the measurements stand on their own
             log.warning("저장된 주 피사체 선택을 복원하지 못했다", exc_info=True)
-            return 0
+            faces = 0
+        self.restored_faces = faces
+        return faces
 
 
 class ExportWorker(QThread):

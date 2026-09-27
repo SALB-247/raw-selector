@@ -11,6 +11,9 @@ matching):
 - The Sony MakerNote (on recent bodies) starts the IFD straight away with
   no header, and the main focus position is the plain-text tag 0x2027 =
   (image W, image H, x, y). The 0x94xx encrypted blocks are left alone.
+  In the camera JPEG the same IFD sits behind a "SONY DSC" header and its
+  value offsets are relative to the TIFF header inside APP1 (A1, verified
+  on the 260830 shoot).
 - Nikon AFInfo2 (MakerNote 0x00B7) is plain text, and the LE u16 offset of
   the AF area (X,Y,W,H) is fixed per version. It reads the same way on the
   Z9's HE/HE*.
@@ -319,9 +322,67 @@ def rw2_extras(path: Path) -> dict:
 # ---------------------------------------------------------------- AF position
 
 
-def sony_focus_location(path: Path) -> tuple[int, int, int, int] | None:
-    """Sony plain-text tag 0x2027 = (image W, image H, x, y). Relative to
-    the sensor display orientation."""
+def _sony_maker_ifd(buf, maker_off: int, endian: str, base: int = 0) -> dict[int, tuple]:
+    """The Sony MakerNote as an IFD. Recent bodies start the IFD straight
+    away with no header; the "SONY DSC \\0\\0\\0" form is 12 bytes longer and
+    is told apart by the first u16 not being a plausible entry count.
+
+    Value offsets are relative to base - the TIFF header, which is the
+    file start in ARW and the APP1 position in a camera JPEG. Measured on
+    the A1's JPEGs (260830 shoot): the header form, and the offsets only
+    decode against the TIFF header (file-relative reads 0xFFFF garbage).
+    """
+    if maker_off + 2 > len(buf):
+        return {}
+    (count,) = struct.unpack_from(endian + "H", buf, maker_off)
+    start = maker_off if 0 < count < 512 else maker_off + 12
+    return _read_ifd(buf, start - base, endian, base)
+
+
+def _sony_location_from_ifd(maker: dict[int, tuple], endian: str
+                            ) -> tuple[int, int, int, int, int | None, int | None] | None:
+    """0x2027 (image W, image H, x, y) and the 0x2037 frame size ->
+    (img_w, img_h, x, y, frame_w, frame_h). frame_* are None when the body
+    did not record a frame size."""
+    if 0x2027 not in maker:
+        return None
+    values = _shorts(maker[0x2027], endian)
+    if len(values) < 4:
+        return None
+    img_w, img_h, x, y = values[:4]
+    if not (img_w and img_h and x < img_w and y < img_h):
+        return None
+    # 0x2037 FocusFrameSize - the AF frame size the camera actually
+    # displayed. If present, this measured value is used instead of the
+    # synthesised box (8% of the long edge) (D2). Measured on the A6700:
+    # (135, 138) = exiftool 'FocusFrameSize 135x138' exactly. The A1
+    # writes it as 6 UNDEFINED bytes (432, 432, 0x0101) - the same two
+    # LE u16 at the front.
+    frame_w = frame_h = None
+    size_entry = maker.get(0x2037)
+    if size_entry is not None:
+        size = _shorts(size_entry, endian)
+        if (len(size) >= 2 and 0 < size[0] < img_w and 0 < size[1] < img_h):
+            frame_w, frame_h = int(size[0]), int(size[1])
+    return int(img_w), int(img_h), int(x), int(y), frame_w, frame_h
+
+
+def _sony_area(location) -> tuple[int, int, float, float, int, int]:
+    """A Sony location -> the (x, y, w, h, reference W, reference H) area
+    the other makers' readers return. The point is the centre; the size is
+    the recorded frame, or a SONY_POINT_BOX_RATIO box on bodies that do
+    not record one."""
+    img_w, img_h, ax, ay, frame_w, frame_h = location
+    if frame_w and frame_h:
+        return ax, ay, float(frame_w), float(frame_h), img_w, img_h
+    side = max(img_w, img_h) * SONY_POINT_BOX_RATIO
+    return ax, ay, side, side, img_w, img_h
+
+
+def sony_focus_location(path: Path) -> tuple[int, int, int, int, int | None, int | None] | None:
+    """Sony plain-text tag 0x2027 = (image W, image H, x, y) plus the
+    0x2037 frame size, from an ARW. Relative to the sensor display
+    orientation."""
 
     def reader(buf):
         header = _tiff_header(buf)
@@ -329,33 +390,9 @@ def sony_focus_location(path: Path) -> tuple[int, int, int, int] | None:
             return None
         endian, first = header
         maker_off = _maker_note_offset(buf, endian, first)
-        if maker_off is None or maker_off + 2 > len(buf):
+        if maker_off is None:
             return None
-        # Recent Sony starts the IFD straight away with no MakerNote
-        # header. If the first u16 is not a plausible entry count, it is
-        # the "SONY DSC " header form (+12).
-        (count,) = struct.unpack_from(endian + "H", buf, maker_off)
-        start = maker_off if 0 < count < 512 else maker_off + 12
-        maker = _read_ifd(buf, start, endian)
-        if 0x2027 not in maker:
-            return None
-        values = _shorts(maker[0x2027], endian)
-        if len(values) < 4:
-            return None
-        img_w, img_h, x, y = values[:4]
-        if not (img_w and img_h and x < img_w and y < img_h):
-            return None
-        # 0x2037 FocusFrameSize - the AF frame size the camera actually
-        # displayed. If present, this measured value is used instead of
-        # the synthesised box (8% of the long edge) (D2). Measured on the
-        # A6700: (135, 138) = exiftool 'FocusFrameSize 135x138' exactly.
-        frame_w = frame_h = None
-        size_entry = maker.get(0x2037)
-        if size_entry is not None:
-            size = _shorts(size_entry, endian)
-            if (len(size) >= 2 and 0 < size[0] < img_w and 0 < size[1] < img_h):
-                frame_w, frame_h = int(size[0]), int(size[1])
-        return int(img_w), int(img_h), int(x), int(y), frame_w, frame_h
+        return _sony_location_from_ifd(_sony_maker_ifd(buf, maker_off, endian), endian)
 
     return _with_header(path, reader)
 
@@ -560,11 +597,15 @@ def jpeg_af_area(path: Path) -> tuple[int, int, int, int, int, int] | None:
     dimensions come from the EXIF PixelXDimension rather than a SubIFD (a
     JPEG has no SubIFD).
 
-    Sony (0x2027) was not included - there is no real file to verify
-    against, and on ARW the MakerNote value offsets are relative to the
-    file whereas on JPEG they are relative to the TIFF header, so carrying
-    it across as it is would be quietly wrong. Held back for the same
-    reason as CR2.
+    Sony is the same 0x2027 point and 0x2037 frame size as ARW. What held
+    it back was the offset convention - on ARW the TIFF header is the file
+    start, on JPEG it is inside APP1 - and _sony_maker_ifd takes the base,
+    so the values decode against the TIFF header as they must. Verified on
+    the A1's camera JPEGs (260830 shoot, every 17th of 1,695 files): the
+    point, the frame size and the 0x201C area mode match what exifread
+    decodes from the same tags on all 100; 0x2021 (tracking) is a tag
+    exifread does not carry, and its values 1 and 2 are exiftool's
+    "Face tracking" and "Tracking".
     """
 
     def reader(buf):
@@ -591,6 +632,11 @@ def jpeg_af_area(path: Path) -> tuple[int, int, int, int, int, int] | None:
             if 0x0026 not in maker:
                 return None
             return _canon_afinfo2(maker[0x0026][2], endian)
+
+        if make.startswith(b"SONY"):
+            maker = _sony_maker_ifd(buf, maker_off, endian, base)
+            location = _sony_location_from_ifd(maker, endian)
+            return None if location is None else _sony_area(location)
 
         if make.startswith(b"NIKON"):
             if buf[maker_off:maker_off + 5] != b"Nikon":
@@ -718,7 +764,7 @@ SONY_AF_AREA_MODES = {
 #: Sony MakerNote 0x2021 AFTracking (1 byte, plain text). exiftool's names;
 #: 2 is what an A1 writes for real-time tracking (20 frames, all with
 #: 0x201C = 0 - the area mode value that goes with it is not yet verified
-#: and stays unnamed). A tracking shot used to show no AF line at all,
+#: and stays unnamed), and its camera JPEGs carry 1 and 2 (260830 shoot). A tracking shot used to show no AF line at all,
 #: because the area mode was the only thing read and its value was
 #: unknown.
 SONY_AF_TRACKING = {
@@ -730,6 +776,24 @@ SONY_AF_TRACKING = {
 def _mode_name(table: dict[int, str], value: int) -> str:
     """The verified name, or the bare number as "Mode N"."""
     return table.get(value) or f"Mode {value}"
+
+
+def _sony_mode_from_ifd(maker: dict[int, tuple]) -> str | None:
+    """0x201C area mode and 0x2021 tracking -> "Zone + Face tracking",
+    "Mode 0 + Tracking", "Zone", ... None when neither is there."""
+    mode = None
+    entry = maker.get(0x201C)
+    if entry is not None and entry[2]:
+        mode = _mode_name(SONY_AF_AREA_MODES, entry[2][0])
+    tracking = None
+    entry = maker.get(0x2021)
+    if entry is not None and entry[2] and entry[2][0]:
+        # 0 is "not tracking" - no word for it. Another value we have no
+        # name for is still tracking of some kind.
+        tracking = SONY_AF_TRACKING.get(entry[2][0]) or f"Tracking {entry[2][0]}"
+    if mode and tracking:
+        return f"{mode} + {tracking}"
+    return mode or tracking
 
 
 def _nikon_mode_from_blob(blob: bytes) -> str | None:
@@ -760,24 +824,9 @@ def af_area_mode(path: Path) -> str | None:
                 return None
             endian, first = header
             maker_off = _maker_note_offset(buf, endian, first)
-            if maker_off is None or maker_off + 2 > len(buf):
+            if maker_off is None:
                 return None
-            (count,) = struct.unpack_from(endian + "H", buf, maker_off)
-            start = maker_off if 0 < count < 512 else maker_off + 12
-            maker = _read_ifd(buf, start, endian)
-            mode = None
-            entry = maker.get(0x201C)
-            if entry is not None and entry[2]:
-                mode = _mode_name(SONY_AF_AREA_MODES, entry[2][0])
-            tracking = None
-            entry = maker.get(0x2021)
-            if entry is not None and entry[2] and entry[2][0]:
-                # 0 is "not tracking" - no word for it. Another value we
-                # have no name for is still tracking of some kind.
-                tracking = SONY_AF_TRACKING.get(entry[2][0]) or f"Tracking {entry[2][0]}"
-            if mode and tracking:
-                return f"{mode} + {tracking}"
-            return mode or tracking
+            return _sony_mode_from_ifd(_sony_maker_ifd(buf, maker_off, endian))
 
         return _with_header(path, sony_reader)
 
@@ -833,6 +882,8 @@ def af_area_mode(path: Path) -> str | None:
                     return None
                 return _mode_name(CANON_AF_AREA_MODES,
                                   struct.unpack_from(endian + "H", entry[2], 2)[0])
+            if make.startswith(b"SONY"):
+                return _sony_mode_from_ifd(_sony_maker_ifd(buf, maker_off, endian, base))
             if make.startswith(b"NIKON"):
                 if buf[maker_off:maker_off + 5] != b"Nikon":
                     return None
@@ -872,15 +923,7 @@ def af_preview_box(path: Path, orientation: int,
     suffix = path.suffix.lower()
     if suffix == ".arw":
         location = sony_focus_location(path)
-        if location is None:
-            return None
-        img_w, img_h, ax, ay, frame_w, frame_h = location
-        if frame_w and frame_h:
-            box_w, box_h = float(frame_w), float(frame_h)   # measured (0x2037)
-        else:
-            side = max(img_w, img_h) * SONY_POINT_BOX_RATIO  # older bodies
-            box_w = box_h = side
-        area = (ax, ay, box_w, box_h, img_w, img_h)
+        area = None if location is None else _sony_area(location)
     elif suffix == ".nef":
         area = nikon_af_area(path)
     elif suffix == ".cr3":

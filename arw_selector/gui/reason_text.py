@@ -47,6 +47,15 @@ def _template(key: str) -> str | None:
         scoring.REASON_EYES_CLOSED: tr(
             "eyes look closed (EAR {ear:.2f} < {threshold:.2f})"),
         scoring.REASON_EYES_OPEN: tr("eyes open (EAR {ear:.2f})"),
+        scoring.REASON_EYES_CLOSING: tr(
+            "eyes closing (EAR {ear:.2f}, this scene's usual {reference:.2f})"),
+        scoring.REASON_FACE_HIDDEN: tr(
+            "face covered or not a face (presence {presence:.2f}), eye signals withheld"),
+        scoring.REASON_SCENE_BEST: tr(
+            "kept as the best of its scene (below keep {keep_above:.0f})"),
+        scoring.REASON_SUBJECT_OTHER: tr(
+            "not the batch's subject (a bystander, mascot or poster face), face signals withheld"),
+        scoring.REASON_SUBJECT_SWITCHED: tr("main subject moved to the batch's subject"),
         scoring.REASON_FRAME_BLACK: tr("frame is almost black"),
         scoring.REASON_FRAME_WHITE: tr("frame is almost white"),
         scoring.REASON_BATCH_BOTTOM: tr("bottom of the batch (below {threshold:.0f})"),

@@ -40,6 +40,11 @@ TEMPLATES = {
     scoring.REASON_EYES_CLOSED:
         "eyes look closed (EAR {ear:.2f} < {threshold:.2f})",
     scoring.REASON_EYES_OPEN: "eyes open (EAR {ear:.2f})",
+    scoring.REASON_EYES_CLOSING: "eyes closing (EAR {ear:.2f}, this scene's usual {reference:.2f})",
+    scoring.REASON_FACE_HIDDEN: "face covered or not a face (presence {presence:.2f}), eye signals withheld",
+    scoring.REASON_SCENE_BEST: "kept as the best of its scene (below keep {keep_above:.0f})",
+    scoring.REASON_SUBJECT_OTHER: "not the batch's subject (a bystander, mascot or poster face), face signals withheld",
+    scoring.REASON_SUBJECT_SWITCHED: "main subject moved to the batch's subject",
     scoring.REASON_FRAME_BLACK: "frame is almost black",
     scoring.REASON_FRAME_WHITE: "frame is almost white",
     scoring.REASON_BATCH_BOTTOM: "bottom of the batch (below {threshold:.0f})",

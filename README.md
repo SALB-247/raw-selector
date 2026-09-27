@@ -27,6 +27,13 @@ hours. Instead it pulls the **full-size embedded JPEG preview** that the camera
 already wrote (6192×4128 on an A6700, 8256×5504 on a Z9). That resolution is
 plenty for a focus decision, and it finishes in ~30ms per frame.
 
+Since 0.15.13 not even that preview is decoded in full colour. libjpeg hands
+over a **grey plane at full resolution** (the sharpness measurements and the
+eye landmarks) and a **half-size colour plane** from a DCT-scaled decode (face
+detection, the scene fingerprint, the thumbnail), which is everything the
+analysis reads. Measured at 12 workers: +31% on 50MP A1 frames, +23% on the
+A6700; a 1,695-frame A1 batch analyses at 77 ms a frame wall-clock.
+
 Measured (32 cores, 31 workers):
 
 | Frames | Time | |
@@ -42,15 +49,19 @@ pip install -e ".[gui,dev]"
 ```
 
 Needs `rawpy`, `opencv-python`, `PySide6`, `exifread`, `PyYAML`, `piexif`,
-`pillow`, and `pillow-heif` (the only decoder for `.HIF`/`.HEIC`). Two ONNX
-models ship in the repo (`arw_selector/core/models/`):
+`pillow`, `pillow-heif` (the only decoder for `.HIF`/`.HEIC`) and `lensfunpy`
+(lens profiles — a base dependency since 0.15.13, so a source install gets the
+optical corrections too). Four ONNX models ship in the repo
+(`arw_selector/core/models/`):
 
 | Model | Size | Used for |
 |---|---|---|
 | `face_detection_yunet_2023mar.onnx` | 227KB | Face boxes + 5 points (analysis) |
-| `face_mesh_192x192.onnx` | 2.3MB | 468-point mesh — face/eye masks, eye-closed |
+| `face_mesh_192x192.onnx` | 2.3MB | 468-point mesh — face/eye masks, eye state, face presence, turn |
+| `face_recognition_sface_2021dec.onnx` | 38.7MB | Face identity embeddings — the batch's subject (bystanders, mascots) |
+| `u2netp.onnx` | 4.6MB | Subject segmentation (masks) |
 
-Both **fail soft**: if a model is missing the app still runs, it just loses face
+All **fail soft**: if a model is missing the app still runs, it just loses face
 detection or the mask/eye-closed features. That failure is silent, so if the
 face features seem to be missing, check the startup log.
 
@@ -94,7 +105,8 @@ raw-select --dump-config > config.yaml   # config template
 ```
 
 Other flags: `--config`, `--no-cache`, `--workers`, `--keep-per-group`,
-`--target-keep PCT`, `--keep-above SCORE`, `--recursive` / `--no-recursive`,
+`--target-keep PCT`, `--keep-above SCORE`, `--no-face-priority` (grade a batch
+with few or no faces on score alone), `--recursive` / `--no-recursive`,
 `-q/--quiet`, `-v/--verbose`.
 
 The CLI has no develop/mask/watermark — those are GUI-only. The CLI does the
@@ -108,7 +120,9 @@ selection and file sorting.
 2. Detect faces with YuNet on a downscaled copy (long edge 1024px).
 3. If a face is found, back-project an **ROI around both eyes** to full
    resolution and crop it. Otherwise the sharpest grid tile is taken as the
-   subject.
+   subject. The eye ROI is at least 40% of the face wide, so a profile — whose
+   two eye points nearly coincide — measures the eye region and not a sliver
+   of hair.
 4. Measure Laplacian variance and Tenengrad on the ROI, **each divided by the
    patch variance**.
 
@@ -120,7 +134,17 @@ It has an opposite trap too: an empty dark background (variance 0.9) has a raw
 gradient at noise level, but dividing by variance can push it **above** the real
 subject. So a **signal gate** zeroes anything below std-dev 5 (sensor noise, no
 basis for a focus call), and **tile selection uses the raw gradient** —
-normalisation is for comparing *between* images, not tiles *within* one.
+normalisation is for comparing *between* images, not tiles *within* one. A
+**contrast floor** (std-dev 22) catches the subtler form of the same trap: a
+nearly flat patch holding a few hard edges — a hazy face behind glass, a palm
+over the eyes, a motion-blurred face — has little variance and a Laplacian
+energy those edges alone supply, and used to out-score a crisp eye. Below the
+floor the variance is taken as the floor, and the eye bonuses are credited in
+the same proportion.
+
+Measurements are taken at the calibration body's pixel scale: a preview longer
+than 6192px (a 50MP body) is reduced to it first, so a bigger sensor does not
+read the same optical sharpness lower.
 
 With several faces in the frame, each face is measured for sharpness first, and
 the main subject is picked by area × detection confidence among the ones that
@@ -156,11 +180,27 @@ penalties (79.4% accuracy) against 57.5% / 8.0% (76.2%) for a stricter 0.22. The
 call stays deliberately asymmetric — missing a closed-eye frame only costs a
 look in review, while penalising an open-eye frame quietly buries a good shot.
 
+Two refinements from a 30fps burst shoot (55 labelled scenes):
+
+- **A covered face withholds its eye signals.** A palm, a forearm or a fan sign
+  over the eyes still detects as a face, the landmarks fit the hand, and the eye
+  ROI measures a sharp palm — such frames used to top their bursts. The mesh
+  model's own **presence score** (clean faces ≈ 1.0, covered faces median 0.24)
+  and the landmark **turn** (a real profile puts the nose beyond the cheek,
+  1.4~2.3; a covered frontal face reads 0.1~1.2) tell the two apart; presence
+  below 0.3 with a frontal turn withholds the eye, eyes-open and focus-on-face
+  bonuses. The face bonus stays.
+- **Eyes closing, relative to the scene.** An EAR of 0.36 is open for one face
+  and mid-blink for another; the burst itself shows what this face's open eyes
+  look like. Below 70% of the scene's usual EAR (its median over five or more
+  measured faces) and below 0.45, the frame gets `penalty_eyes_closing`
+  (default 10) instead of the eyes-open bonus.
+
 ### Camera AF
 
 Cameras record where they focused, and the app reads that back from Sony ARW,
-Canon CR3, Nikon NEF, and **camera-produced Canon and Nikon JPEGs** (75% of a
-real archive sample still carried it; the rest had been stripped by editing
+Canon CR3, Nikon NEF, and **camera-produced Sony, Canon and Nikon JPEGs** (75% of
+a real archive sample still carried it; the rest had been stripped by editing
 software). Three things use it, none of which change the score on their own:
 
 - **Use camera AF point when no face is found** (Start analysis dialog, off by
@@ -171,6 +211,31 @@ software). Three things use it, none of which change the score on their own:
   labelled frames). On frames with one face or none it never fires at all.
 - `P` in the loupe draws the recorded AF box next to the focus / face / eye
   overlays.
+
+**Tracking AF is the exception — the frame is the subject.** With Sony real-time
+tracking, Nikon 3D-tracking or Canon Face + Tracking, the face the frame sits in
+becomes the main face; a frame beside or below a face (Sony records the tracked
+*body*) belongs to that face, and with a single confident face in the frame the
+box widens below the chin to a raised arm or the hip. A frame in no face at all
+becomes the ROI itself and the detections are not the subject.
+
+### Subject
+
+Every frame picks its main face on its own, and in a burst that lets a mascot
+head, an MC, a bystander with a camera or a poster face win a few frames —
+which, graded against the burst's best, rejects the frames around them. A shoot
+has a subject: the identity that is the main face far more often than any other.
+Each detected face carries a **face identity embedding** (SFace); after the
+analysis the batch is clustered (cosine 0.363), the dominant identity is the
+subject, identities with at least 10% of its frames are co-subjects, and an
+identity whose faces stand where the subject's face stood in neighbouring frames
+(three times, box IoU 0.3) is the same person in another pose — SFace splits one
+person into frontal and profile identities, and a 30fps face track runs straight
+through the split. A frame whose main face is not the subject is **re-scored on
+the subject's face** when that face is in the frame, and marked **not the
+batch's subject** (face signals withheld) when it is not. Nothing happens
+unless one identity clearly leads (10 frames and 30% of the embedded main
+faces), and a main face picked by hand in the loupe is never touched.
 
 ### Grade
 
@@ -188,7 +253,9 @@ The keep threshold is an absolute score by default (`keep_above`, 65). Setting
 score distribution, so the keep share stays stable when lighting or lens shifts
 the scores — worth switching to if you carry thresholds between shoots. The most
 expensive error is a **false reject**, so judging leans toward reject, and **the
-group's best frame is never rejected** under any threshold combination.
+group's best frame is never rejected** under any threshold combination. A keep
+the score did not earn — the best frame of a scene that fell short of the
+threshold — says so in its reasons ("kept as the best of its scene").
 
 ## Develop
 
@@ -304,7 +371,7 @@ arw_selector/
     pipeline.py    Parallel batch execution
     export.py      Folder sorting + undo
     develop/       Render pipeline, masks, optics, watermark
-    models/        ONNX models (face detection · face mesh)
+    models/        ONNX models (face detection · face mesh · face identity · segmentation)
   gui/             PySide6 (loupe, develop panel, criteria panel, grid)
   cli.py
 ```

@@ -587,6 +587,132 @@ def load_preview(path: Path, max_long_edge: int | None = None,
     return image
 
 
+# ---------------------------------------------------------------- analysis planes
+
+
+@dataclass(frozen=True)
+class AnalysisPlanes:
+    """What the analysis reads from a photo, decoded no larger than it is
+    used.
+
+    The sharpness measurements (ROI, background, noise, frame) run on a
+    full-resolution grey plane; face detection, the scene fingerprint and
+    the thumbnail run on a reduction to 1024px; the eye-opening landmarks
+    run on a face crop. None of that needs a full-resolution colour
+    image, and making one was the single largest cost after the decode
+    itself on a 50MP body: the colour decode was 114ms, the reduction to
+    1024px 59ms and the grey conversion 17ms per frame (A1, one thread).
+    libjpeg gives the grey plane on its own for 67ms and a half-size
+    colour image for 68ms (DCT-domain scaling), so `gray` and `colour`
+    come from two cheaper decodes and nothing is reduced from 8640px.
+
+    `colour` is at `colour_scale` of the full frame (0.5 from a half-size
+    decode, 1.0 when the source had to be decoded whole). Face detection
+    on the reduction of the half-size image found the same faces in 95% of
+    150 concert frames with a median box IoU of 0.996 (RESEARCH_ANALYSIS_
+    PRESTUDY.md); the eye-opening call measured on the grey crop scored
+    the same against the user's labels as the colour crop (17/28 caught,
+    7/79 false penalties, both) - 10 of the 107 frames flip, five each
+    way, all within 0.03 of the 0.25 threshold.
+    """
+
+    gray: np.ndarray
+    colour: np.ndarray
+    colour_scale: float
+
+    @property
+    def width(self) -> int:
+        return int(self.gray.shape[1])
+
+    @property
+    def height(self) -> int:
+        return int(self.gray.shape[0])
+
+    @classmethod
+    def from_bgr(cls, image_bgr: np.ndarray) -> "AnalysisPlanes":
+        """Planes from a full colour image (a decoded HEIF, a demosaic, or
+        an image handed in by the GUI)."""
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY) if image_bgr.ndim == 3 else image_bgr
+        colour = image_bgr if image_bgr.ndim == 3 else cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2BGR)
+        return cls(gray, colour, 1.0)
+
+
+HALF_DECODE_MIN_LONG_EDGE = 2048
+"""A JPEG shorter than this on its long side is decoded whole for the
+colour plane. Face detection wants 1024px; a half-size decode of a
+1600px preview would have to be scaled *up* to that, which is a blurrier
+input than the reduction from the full decode it replaces."""
+
+
+def _planes_from_jpeg(data: np.ndarray, orientation: int, name: str) -> AnalysisPlanes:
+    """The two decodes of one JPEG. IMREAD_IGNORE_ORIENTATION on both -
+    imdecode would otherwise apply the EXIF orientation itself and
+    apply_orientation below would turn the frame a second time (see
+    load_preview)."""
+    gray = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE | cv2.IMREAD_IGNORE_ORIENTATION)
+    if gray is None:
+        raise PreviewError(f"내장 JPEG 프리뷰 디코딩 실패: {name}")
+    if max(gray.shape[:2]) >= HALF_DECODE_MIN_LONG_EDGE:
+        colour = cv2.imdecode(data, cv2.IMREAD_REDUCED_COLOR_2 | cv2.IMREAD_IGNORE_ORIENTATION)
+    else:
+        colour = cv2.imdecode(data, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+    if colour is None:
+        raise PreviewError(f"내장 JPEG 프리뷰 디코딩 실패: {name}")
+    gray = apply_orientation(gray, orientation)
+    colour = apply_orientation(colour, orientation)
+    # The DCT-scaled size is ceil(n / 2), so the scale is measured, not
+    # assumed: 8641 -> 4321 is 0.50006, not 0.5.
+    scale = colour.shape[1] / float(gray.shape[1])
+    return AnalysisPlanes(gray, colour, scale)
+
+
+def load_analysis_planes(path: Path, demosaic_small: bool = False) -> AnalysisPlanes:
+    """The analysis planes of a photo - see AnalysisPlanes.
+
+    The same sources and the same fallbacks as load_preview: the
+    embedded JPEG preview of a RAW, a JPEG file's own data, and for
+    everything else (HEIF, a bitmap thumbnail, a half demosaic, a preview
+    too small for the sensor with demosaic_small on) the colour image
+    load_preview would return, split into planes. The EXIF orientation is
+    applied to both planes.
+    """
+    if is_editable_image(path):
+        if path.suffix.lower() in HEIF_EXTENSIONS:
+            return AnalysisPlanes.from_bgr(load_image_file(path))
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise PreviewError(f"이미지를 열지 못했습니다: {path.name}") from exc
+        return _planes_from_jpeg(np.frombuffer(data, dtype=np.uint8), _jpeg_orientation(data), path.name)
+
+    try:
+        with rawpy.imread(str(path)) as raw:
+            try:
+                thumb = raw.extract_thumb()
+            except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
+                thumb = None
+            if thumb is None or thumb.format != rawpy.ThumbFormat.JPEG:
+                planes = None
+            else:
+                planes = _planes_from_jpeg(
+                    np.frombuffer(thumb.data, dtype=np.uint8), _jpeg_orientation(thumb.data), path.name)
+            too_small = False
+            if planes is not None and demosaic_small:
+                sensor_long = max(raw.sizes.width, raw.sizes.height)
+                too_small = (sensor_long > 0
+                             and max(planes.gray.shape[:2]) < sensor_long * SMALL_PREVIEW_RATIO)
+    except PreviewError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail the file, not the batch
+        raise PreviewError(f"{path.name}: {exc}") from exc
+
+    if planes is None or too_small:
+        # The rare roads (no JPEG preview, or one too small to score on)
+        # keep going through load_preview, which owns their fallbacks.
+        return AnalysisPlanes.from_bgr(load_preview(path, demosaic_small=demosaic_small))
+    return planes
+
+
 @dataclass(frozen=True)
 class WhiteBalance:
     """White balance information from a RAW.

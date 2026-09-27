@@ -111,6 +111,23 @@ version 1. That cache is generated, not redistributed.
   - Verified 2026-07-25. Apache-2.0 and MIT both permit redistribution;
     keep this attribution with any release that ships the file.
 
+### Face identity model — `arw_selector/core/models/face_recognition_sface_2021dec.onnx`
+
+- 38.7 MB, SFace (Zhong et al., "SFace: Sigmoid-Constrained Hypersphere
+  Loss for Robust Face Recognition", 2021), 128-d face embedding from a
+  112×112 crop aligned on the detector's five landmarks. Used by the
+  batch's subject pass (`arw_selector/core/subject.py`) to tell the
+  photographer's subject from bystanders, mascots and poster faces.
+- **Apache-2.0** (contributed by Yaoyao Zhong; ONNX conversion by
+  Chengrui Wang). The OpenCV Zoo file, verified 2026-09-27 against
+  <https://github.com/opencv/opencv_zoo/blob/main/models/face_recognition_sface/LICENSE>
+  (sha1 `316ca25772af10f61e356f81f0ec68caf6909a51`).
+- The full-precision file is shipped on purpose: the zoo's int8 file is a
+  quarter of the size but eight times slower on OpenCV's CPU path here
+  (33 ms a face against 4), and OpenCV 5 does not load a half-precision
+  conversion (BatchNormalization). Apache-2.0 permits redistribution;
+  keep this attribution with any release that ships the file.
+
 ### Subject segmentation model — `arw_selector/core/models/u2netp.onnx`
 
 - 4.4 MB, U²-Net (the small `u2netp` variant), salient object detection

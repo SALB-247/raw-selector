@@ -248,7 +248,7 @@ def cache_root(cache_dir: Path) -> Path:
         pass
     return cache_dir.parent
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 14
 """Bumped whenever the schema or the payload layout changes. The existing
 cache is then thrown away.
 
@@ -306,6 +306,17 @@ tracking shots change with it.
 v11: an AF area mode value with no verified name is kept as "Mode N"
 instead of None - a Sony A1 writes 0/1/3 for its everyday modes, and up
 to v10 every one of those frames had an empty AF line. Same reason as v9.
+
+v12: the main face's FaceMesh presence and landmark turn (face_presence,
+face_turn) join the focus payload - the hidden-face gate reads them, and
+a v11 row would come back as "not measured" and never withhold anything.
+
+v13: the ROI contrast (roi_contrast) joins the focus payload for the eye
+signal weighting; a v12 row would carry -1 and get full credit.
+
+v14: the identity embeddings of the detected faces (face_ids) join the
+focus payload; the subject pass reads them, and a v13 row would keep it
+off for that frame.
 """
 
 _SCHEMA = """
@@ -538,6 +549,9 @@ def _deserialize(path: Path, payload: str) -> ImageRecord | None:
             if values.get("face_scores"):
                 values["face_scores"] = tuple(
                     float(score) for score in values["face_scores"])
+            if values.get("face_ids"):
+                values["face_ids"] = tuple(
+                    tuple(float(v) for v in entry) for entry in values["face_ids"])
             focus_result = FocusResult(**values)
     except (TypeError, ValueError, KeyError, AttributeError):
         return None

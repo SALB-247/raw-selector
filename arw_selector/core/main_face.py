@@ -12,7 +12,7 @@ import logging
 
 from .config import AnalyzeConfig
 from .focus import analyze_focus
-from .raw_io import load_preview
+from .raw_io import load_analysis_planes
 from .types import FocusResult, ImageRecord
 
 log = logging.getLogger(__name__)
@@ -31,7 +31,10 @@ def reanalyze_with_main_face(record: ImageRecord, config: AnalyzeConfig,
     None when the file cannot be read.
     """
     try:
-        preview = load_preview(record.path)
+        # The same planes the batch analysed, so the re-scoring lands on
+        # the same pixels (a colour image from load_preview would give a
+        # grey plane that differs at rounding level).
+        planes = load_analysis_planes(record.path)
         af_box = None
         af_tracking = False
         if record.metadata is not None:
@@ -39,11 +42,11 @@ def reanalyze_with_main_face(record: ImageRecord, config: AnalyzeConfig,
 
             af_box = af_preview_box(
                 record.path, record.metadata.orientation,
-                preview.shape[1], preview.shape[0],
+                planes.width, planes.height,
             )
             af_tracking = "tracking" in (record.metadata.af_area_mode or "").lower()
         return analyze_focus(
-            preview,
+            planes=planes,
             detect_long_edge=config.detect_long_edge,
             laplacian_k=config.laplacian_k,
             tenengrad_k=config.tenengrad_k,

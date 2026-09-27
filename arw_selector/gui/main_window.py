@@ -47,7 +47,9 @@ from ..core.export_queue import ExportQueue
 from ..core.session import SelectionSession
 from ..core.types import Grade, ImageRecord
 from ..core.scoring import (
+    FACE_RATIO_HINT_BELOW,
     achievable_keep_floor,
+    face_ratio,
     groups_without_keep,
     records_in_groups_without_keep,
 )
@@ -635,6 +637,7 @@ class MainWindow(QMainWindow):
         )
         self.analysis_worker.progressed.connect(self.on_progress)
         self.analysis_worker.restoring.connect(self.on_restore_progress)
+        self.analysis_worker.aligning.connect(self.on_align_progress)
         self.analysis_worker.finished_ok.connect(self.on_analysis_done)
         self.analysis_worker.failed.connect(self.on_worker_failed)
         self.analysis_worker.start()
@@ -736,18 +739,24 @@ class MainWindow(QMainWindow):
             self.grid.append_records(self._live_buffer)
         self._live_buffer = []
 
-    def on_restore_progress(self, done: int, total: int) -> None:
-        """The worker putting saved main-subject picks back after the
-        measurements are in - a preview read and a detector pass each, so
-        it gets the progress bar rather than a frozen window."""
+    def _stage_progress(self, text: str, done: int, total: int) -> None:
+        """A stage after the measurements that works frame by frame - a
+        preview decode and a detector pass each - keeps the progress bar
+        rather than leaving a frozen window at "N/N"."""
         self.status_progress.setMaximum(max(total, 1))
         self.status_progress.setValue(done)
         self._set_eta(None)
-        self.set_status(
-            tr("Restoring saved main-subject picks {done}/{total}…").format(
-                done=done, total=total),
-            busy=True,
-        )
+        self.set_status(text.format(done=done, total=total), busy=True)
+
+    def on_restore_progress(self, done: int, total: int) -> None:
+        """The worker putting saved main-subject picks back."""
+        self._stage_progress(
+            tr("Restoring saved main-subject picks {done}/{total}…"), done, total)
+
+    def on_align_progress(self, done: int, total: int) -> None:
+        """The worker moving frames onto the batch's subject (subject.py)."""
+        self._stage_progress(
+            tr("Bringing frames in line with the batch's subject {done}/{total}…"), done, total)
 
     def on_analysis_done(self, session: SelectionSession) -> None:
         # Cancelling also lands here, with the results only partly filled in.
@@ -883,6 +892,16 @@ class MainWindow(QMainWindow):
             text += tr(" · {count} failed to analyse").format(count=failed)
         if cancelled:
             text = tr("Cancelled — results so far: ") + text
+        # A batch with hardly any faces (birds, landscapes, backs turned)
+        # cannot reach the keep score in face-priority mode: with no face
+        # the most a photo can score is 50 - 10, under keep_above 65. Every
+        # keep then comes from the scene guarantee alone and the user
+        # cannot tell why nothing is kept on merit. Measured on 31 A1 bird
+        # frames: top score 35, keeps 13/13 by guarantee.
+        ratio = face_ratio(self.session.records)
+        if ratio is not None and score_config.face_priority and ratio < FACE_RATIO_HINT_BELOW:
+            text += tr(" · faces in {percent}% of photos — turn Face-priority mode off "
+                       "(Grading criteria) to keep on score").format(percent=round(ratio * 100))
         text += self._hint_once(
             "grid", tr(" — 1·2·3 grade, Space enlarges, [ ] next scene, F1 lists the keys"))
         self.set_status(text)

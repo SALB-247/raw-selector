@@ -66,6 +66,9 @@ def _label_for(key: str) -> str:
         scoring.LINE_EYES_CLOSED: tr("Eyes closed"),
         scoring.LINE_EYES_OPEN: tr("Eyes open"),
         scoring.LINE_EYES_UNKNOWN: tr("Eyes not measured"),
+        scoring.LINE_EYES_CLOSING: tr("Eyes closing"),
+        scoring.LINE_FACE_HIDDEN: tr("Face covered, eye signals withheld"),
+        scoring.LINE_SUBJECT_OTHER: tr("Not the batch's subject, face signals withheld"),
         scoring.LINE_HIGHLIGHT_CLIP: tr("Blown highlights"),
         scoring.LINE_SHADOW_CLIP: tr("Crushed shadows"),
         scoring.LINE_EXTREME_LUMA: tr("Lens cap / stray shutter"),
@@ -100,13 +103,24 @@ def _detail_for(line: ScoreLine) -> str:
                 k: v for k, v in p.items() if k != "source"})
     if line.key == scoring.LINE_FACE_DEFOCUS:
         return tr("background {background:.0f} > face {face:.0f}").format(**p)
+    if line.key == scoring.LINE_EYE_DETECTED and p.get("contrast_weight", 1.0) < 1.0:
+        return tr("face {area:.2f}% of {threshold:.1f}% → ×{weight:.2f}, "
+                  "×{contrast_weight:.2f} for a low-contrast eye area").format(**p)
     if line.key in (scoring.LINE_FACE_DETECTED, scoring.LINE_EYE_DETECTED):
         return tr("face {area:.2f}% of {threshold:.1f}% "
                   "→ ×{weight:.2f}").format(**p)
     if line.key == scoring.LINE_EYES_CLOSED:
         return tr("EAR {ear:.2f} < threshold {threshold:.2f}").format(**p)
     if line.key == scoring.LINE_EYES_OPEN:
+        if p.get("contrast_weight", 1.0) < 1.0:
+            return tr("EAR {ear:.2f} ≥ threshold {threshold:.2f}, ×{contrast_weight:.2f} for a low-contrast eye area").format(**p)
         return tr("EAR {ear:.2f} ≥ threshold {threshold:.2f}").format(**p)
+    if line.key == scoring.LINE_FOCUS_ON_FACE and p.get("contrast_weight", 1.0) < 1.0:
+        return tr("×{contrast_weight:.2f} for a low-contrast eye area").format(**p)
+    if line.key == scoring.LINE_EYES_CLOSING:
+        return tr("EAR {ear:.2f} < {ratio:.0%} of the scene's {reference:.2f}").format(**p)
+    if line.key == scoring.LINE_FACE_HIDDEN:
+        return tr("face presence {presence:.2f}, turn {turn:.2f}").format(**p)
     if line.key in (scoring.LINE_HIGHLIGHT_CLIP, scoring.LINE_SHADOW_CLIP):
         return tr("{clipped:.1f}% (allowed {allowed:.1f}%)").format(**p)
     if line.key == scoring.LINE_EXTREME_LUMA:

@@ -93,7 +93,10 @@ in the status bar. Both of those appear once per machine.
 
 The bar along the bottom shows the current status message, a progress bar, and
 a time-left estimate ("about … left") for whatever task is running. The
-**Stop** button (or `Esc`) cancels the running task.
+**Stop** button (or `Esc`) cancels the running task. After an analysis the
+summary line also says when faces were found in fewer than 20% of the photos:
+face-priority mode then holds every photo under the keep score (see the
+Criteria panel).
 
 ### Preferences
 
@@ -198,6 +201,8 @@ a run or turning off subfolders never discards what was decided about the
 rest. Saved main-subject picks are put back by the analysis worker once the
 measurements are in — the status bar reads "Restoring saved main-subject
 picks 12/50" and **Stop** skips the rest, which stay on file for next time.
+The batch's subject pass that follows reports the same way, as "Bringing
+frames in line with the batch's subject 12/49".
 
 The cache is keyed on the analysis options as well as the file, because a
 result measured with different options is not the same result. Those options
@@ -280,9 +285,11 @@ Selecting a photo shows the score card along the bottom.
 
 The left side is a point-by-point breakdown — rows such as Sharpness, Focus on
 the face, Focus missed the face, No face, Face detected, Face size, Eyes
-detected, Eyes open, Eyes closed, Eyes not measured, Blown highlights, Crushed
-shadows, Lens cap / stray shutter, Clamped to range, and the **Total** — each
-with an evidence note explaining the entry. The right side is a fact sheet for
+detected, Eyes open, Eyes closing, Eyes closed, Eyes not measured, Face covered
+(eye signals withheld), Not the batch's subject (face signals withheld), Blown
+highlights, Crushed shadows, Lens cap / stray shutter, Clamped to range, and the
+**Total** — each with an evidence note explaining the entry (a low-contrast eye
+area shows the factor its eye bonuses were scaled by). The right side is a fact sheet for
 the shot: Captured, Camera, Lens, Focal length (with the 35mm equivalent on
 crop bodies), Exposure (aperture, shutter, ISO), AF area, and Location.
 
@@ -290,7 +297,16 @@ Below the breakdown, a line of reasons summarises the grade in words. One of
 them is worth knowing: **"main subject uncertain — camera focused on someone
 else"** appears when the camera's AF point sits on a different face than the
 one used for grading. It never changes the score; it marks a shot worth a
-second look, and only ever appears when two or more faces were found.
+second look, and only ever appears when two or more faces were found. Others
+say why a frame is where it is: **"eyes closing"** (open by the threshold but
+well under what this scene's other frames show), **"face covered or not a
+face"** (a hand or sign over the eyes, or a false face on hair — the eye
+signals were withheld), **"kept as the best of its scene"** (a keep the score
+did not earn, from the one-per-scene guarantee), **"main subject moved to the
+batch's subject"** and **"not the batch's subject"** (the batch's most frequent
+face is the subject; a frame whose main face was someone else was re-scored on
+the subject when she was in it, or scored without face signals when she was
+not).
 
 A row the file has no value for is left out entirely rather than shown as a
 dash — files stripped of EXIF by re-saving tools are common, and a column of
@@ -329,10 +345,12 @@ and the grading reasons; if RAW demosaic fails, a warning notes the viewer is
 - **Original** (`B`) — before/after toggle.
 - **Focus** (`F`) — a green box marking the region used for grading.
 - **Faces** (`A`) — grey boxes around detected faces with the main subject in
-  red; click a face to make it the main subject and re-grade the photo.
+  red; click a face to make it the main subject and re-grade the photo. A
+  face picked this way is kept as the main subject by the batch's subject
+  pass on later runs.
 - **Eyes** (`E`) — eye contours.
-- **AF point** (`P`) — an orange box where the camera focused (Sony, Canon
-  CR3, Nikon).
+- **AF point** (`P`) — an orange box where the camera focused (Sony ARW and
+  camera JPEG, Canon CR3 and JPEG, Nikon NEF and JPEG).
 - **Zoom to focus** (`Z`) — fills the screen with the grading region.
 
 The overlays follow the crop, rotation and straighten, so they mark the same
@@ -879,7 +897,19 @@ A live formula readout shows how the score is built. Below it:
 
 - **Face-priority mode** with its sub-values — **Focus missed the face**,
   **Focus on the face**, **No face**, **Eyes open**, **Eyes closed**, and
-  **Eyes-closed threshold (EAR)**.
+  **Eyes-closed threshold (EAR)**. With the mode on, a photo with no face
+  cannot reach the keep score (it tops out at 50 − 10, under keep 65), so a
+  shoot of birds, landscapes or backs turned gets its keeps from the scene
+  guarantee alone. When faces were found in fewer than 20% of the photos,
+  the status line says so after the analysis — turn the mode off here (or
+  run the CLI with `--no-face-priority`) to grade such a batch on score.
+- The three **Eyes closing** values judge half-shut eyes against the scene:
+  when a photo's eye opening (EAR) is under the **Eyes-closing ratio**
+  (default 70%) of the scene's usual value — the median over five or more
+  measured faces — and under the **Eyes-closing cap** (0.45), it gets the
+  **Eyes closing (vs. the scene)** penalty (10) instead of the eyes-open
+  bonus. An absolute threshold cannot see these: an EAR of 0.36 is open for
+  one face and mid-blink for another. A penalty of 0 turns it off.
 - ROI trust spins — **Eye**, **Face**, **Estimated subject**, **Whole
   frame** — how much each focus-region type is trusted.
 - Bonuses — **Face detected**, **Eyes detected**, **Face size**, and **Face
@@ -937,6 +967,9 @@ GUI-only.
 - `--target-keep PCT` — target keep ratio in percent; the threshold is
   derived from the batch's score distribution.
 - `--keep-above SCORE` — absolute keep score (overrides the target ratio).
+- `--no-face-priority` — turn face-priority mode off for this run, so a batch
+  with few or no faces (birds, landscapes, backs turned) is graded on score
+  alone.
 - `--recursive` / `--no-recursive` — include or exclude subfolders.
 - `-q` / `--quiet` — hide the progress bar.
 - `-v` / `--verbose` — detailed logging.

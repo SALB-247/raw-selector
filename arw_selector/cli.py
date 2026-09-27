@@ -140,6 +140,16 @@ def print_summary(session: SelectionSession, elapsed: float) -> None:
         bar = "█" * int(ratio / 2.5)
         print(f"  {label}  {count:>5}장  {ratio:>5.1f}%  {bar}")
 
+    # Face-priority mode with hardly any faces: nothing can reach the keep
+    # score, so say why every keep is a scene guarantee (see
+    # scoring.FACE_RATIO_HINT_BELOW).
+    from .core.scoring import FACE_RATIO_HINT_BELOW, face_ratio
+
+    ratio = face_ratio(session.records)
+    if ratio is not None and session.config.score.face_priority and ratio < FACE_RATIO_HINT_BELOW:
+        print(f"\n  얼굴이 있는 컷이 {ratio * 100:.0f}%뿐입니다 — 얼굴 우선 모드에서는 "
+              f"얼굴 없는 컷이 keep 점수에 닿지 못합니다. --no-face-priority 로 점수 판정을 켜십시오.")
+
     failed = session.failed
     if failed:
         print(f"\n  분석 실패 {len(failed)}장:")
@@ -187,6 +197,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-above", type=float, metavar="SCORE",
         help="keep 절대 점수. 지정하면 목표 비율 대신 이 값을 씁니다",
     )
+    parser.add_argument(
+        "--no-face-priority", action="store_true",
+        help="얼굴 우선 모드를 끕니다 (풍경·새처럼 얼굴 없는 배치를 점수로 판정)",
+    )
     parser.add_argument("--recursive", action="store_true", default=None, help="하위 폴더 포함")
     parser.add_argument("--no-recursive", dest="recursive", action="store_false")
     parser.add_argument("-q", "--quiet", action="store_true", help="진행률 숨김")
@@ -216,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
         # off - with both on, the ratio wins
         config.score.keep_above = args.keep_above
         config.score.target_keep_ratio = None
+    if args.no_face_priority:
+        config.score.face_priority = False
     if args.recursive is not None:
         config.recursive = args.recursive
 

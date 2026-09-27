@@ -126,6 +126,37 @@ class FocusResult:
     no landmarks could be obtained.
     """
 
+    face_presence: float = -1.0
+    """FaceMesh's face presence score (0~1) for the main subject's crop;
+    -1 if not measured. A clean frontal face reads about 1.0; a hand,
+    forearm or sign over the eyes, a false face on hair, and a strong
+    profile all read below 0.3 (A1 shoot labels: best faces p10 0.96,
+    covered faces median 0.24). Read together with face_turn - see
+    scoring.face_hidden."""
+
+    face_turn: float = -1.0
+    """How far the main subject's face is turned, from the landmarks
+    (face_mesh.turn): 0 = nose on the cheek midline, 1 = on a cheek,
+    above 1 = beyond it. -1 if not measured. A real profile reads 1.4~2.3
+    while a covered frontal face reads 0.1~1.2, which is what tells the
+    two apart when the presence is low."""
+
+    face_ids: tuple[tuple[float, ...], ...] = ()
+    """SFace identity embedding of each detected face (aligned with
+    faces), 128 floats, or () for a face that got none (too small, beyond
+    MAX_ID_FACES, or no model). Who is in the frame - the batch's subject
+    pass (subject.py) clusters them to tell the subject from a bystander,
+    a mascot head or a poster face."""
+
+    roi_contrast: float = -1.0
+    """Standard deviation of the ROI patch with the frame noise taken out
+    (8-bit, at the measurement scale); -1 if not measured. Below
+    focus.CONTRAST_FLOOR_STD the sharpness was measured against the floor
+    rather than the patch's own variance, and the score gives the eye
+    signals proportionally less credit (scoring.eye_signal_weight): a hazy
+    face behind glass (std 9~17) or a motion-blurred face used to keep the
+    full eye package and stay a keep on it."""
+
     af_face: int = -1
     """The face number the camera's AF pointed at (an index into faces). -1
     if there is none.
@@ -183,6 +214,12 @@ class ImageRecord:
     # filled in by the grouping/scoring stages
     group_id: int | None = None
     group_rank: int | None = None
+    group_eye_reference: float | None = None
+    """The usual eye opening (median EAR) of the measured faces in this
+    frame's scene, set by scoring.grade_records; None when the scene has
+    too few measured faces. A frame whose EAR falls well below it is
+    "closing" (config.ScoreConfig.eyes_closing_ratio) even when it is
+    above the absolute closed threshold."""
     score: float = 0.0
     grade: Grade = Grade.REVIEW
     reasons: list = field(default_factory=list)
@@ -197,6 +234,16 @@ class ImageRecord:
     manual_grade: Grade | None = None  # the grade the user overrode in the GUI
 
     manual_main_face: int | None = None
+    subject_state: str | None = None
+    """What the batch's subject pass made of the main face: "subject" (a
+    major identity, or rescued as the subject with her face covered),
+    "other" (a minor identity with no subject face in the frame - the
+    face signals are withheld from the score), None (no verdict: no face,
+    pinned by hand, or the pass was off). Set per session, like the
+    scene; not cached."""
+    subject_switched: bool = False
+    """The main face was moved to the batch's subject by the pass and the
+    frame re-scored on it."""
     """The main subject face number the user picked directly on screen.
 
     It is the escape hatch for when the automatic pick is wrong (a

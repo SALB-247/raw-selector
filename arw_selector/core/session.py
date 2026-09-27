@@ -8,6 +8,7 @@ the kind of bug that is extremely hard to debug.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,15 +37,26 @@ class SelectionSession:
         progress_cb: ProgressCallback | None = None,
         should_cancel: CancelCheck | None = None,
         paths: list[Path] | None = None,
+        before_subjects: Callable[[list[ImageRecord]], object] | None = None,
+        subject_cb: ProgressCallback | None = None,
     ) -> list[ImageRecord]:
         """Analyses and assigns grades as well.
 
         Given paths, only those files are looked at. Used when you want to
         check a few frames without going round the whole folder.
-        """
-        if paths:
-            from .cache import default_cache_path
 
+        before_subjects, if given, runs on the analysed records once they
+        are grouped and before the batch's subject pass: the place for
+        the GUI to put the user's saved main-subject picks back, so the
+        pass leaves those frames alone instead of moving them first and
+        having the picks undo it - a re-score on every run. subject_cb
+        gets the pass's re-scores as (done, total); should_cancel stops
+        them as it stops the analysis.
+        """
+        from .cache import default_cache_path
+        from .subject import assign_subjects
+
+        if paths:
             self.records = analyze_paths(
                 paths,
                 config=self.config,
@@ -61,6 +73,14 @@ class SelectionSession:
                 progress_cb=progress_cb,
                 should_cancel=should_cancel,
             )
+        # The batch's subject (subject.py) needs the scenes for its
+        # neighbour rule; regrade() groups again, cheaply.
+        grouping.assign_groups(self.records, self.config.group)
+        if before_subjects is not None:
+            before_subjects(self.records)
+        assign_subjects(self.records, self.config,
+                        cache_path=default_cache_path(self.folder) if use_cache else None,
+                        progress_cb=subject_cb, should_cancel=should_cancel)
         self.regrade()
         return self.records
 
@@ -105,5 +125,8 @@ def analyze_and_grade(
     config = config or Config()
     records = analyze_paths(paths, config=config, cache_path=cache_path)
     grouping.assign_groups(records, config.group)
+    from .subject import assign_subjects
+
+    assign_subjects(records, config, cache_path=cache_path)
     scoring.grade_records(records, config.score)
     return records

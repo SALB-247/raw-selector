@@ -14,10 +14,12 @@ With the 468 points they become 0.41% / 23.97% respectively. The eye picks
 up only the eyelid contour, and the skin only what is left after the facial
 features really are subtracted.
 
-**It is not used for analysis (culling).** There is no reason to add a
-per-frame cost to the path that sweeps 4000 frames, and YuNet's 5 points
-are enough there. It is used only where precision decides the result, such
-as the masks in the adjustment window.
+In analysis (culling) it runs once per frame on the main face only
+(1.3ms): the eye aspect ratio for the eye state, the model's own face
+presence score, and the landmark turn - the two together tell a face
+covered by a hand from a real profile (scoring.face_hidden). Everywhere
+else it is used only where precision decides the result, such as the
+masks in the adjustment window.
 """
 
 from __future__ import annotations
@@ -53,6 +55,12 @@ FACE_OVAL = (
     379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93,
     234, 127, 162, 21, 54, 103, 67, 109,
 )
+
+NOSE_TIP = 1
+CHEEK_LEFT = 234
+CHEEK_RIGHT = 454
+"""The nose tip and the outermost cheek points of the face oval, for the
+landmark turn (see turn())."""
 
 LEFT_EYE = (33, 246, 161, 160, 159, 158, 157, 173, 133,
             155, 154, 153, 145, 144, 163, 7)
@@ -116,9 +124,37 @@ def landmarks(image_bgr: np.ndarray,
 
     face_box is (x, y, w, h), in the same coordinate system as image_bgr.
     """
+    return landmarks_with_score(image_bgr, face_box)[0]
+
+
+def turn(points: np.ndarray) -> float:
+    """How far the face is turned, from the landmarks: 0 = the nose tip on
+    the midline between the cheek points, 1 = on a cheek, above 1 = beyond
+    it (the model keeps fitting a frontal template to a profile, so a
+    real profile reads 1.4~2.3 while a covered frontal face reads
+    0.1~1.2 - measured on the A1 shoot's labelled frames)."""
+    left, right, nose = points[CHEEK_LEFT][0], points[CHEEK_RIGHT][0], points[NOSE_TIP][0]
+    span = right - left
+    if abs(span) < 1e-3:
+        return 1.0
+    return float(abs((nose - left) / span - 0.5) * 2.0)
+
+
+def landmarks_with_score(image_bgr: np.ndarray,
+                         face_box: tuple[float, float, float, float]
+                         ) -> tuple[np.ndarray | None, float]:
+    """(points, presence): the 468 points as landmarks() gives them, and
+    the model's face presence score (sigmoid of its second output, 0~1;
+    -1 when the model has no such output). A clean frontal face scores
+    about 1.0; a palm or forearm over the eyes, a false face found on
+    hair, and a strong profile all score below 0.3 (measured: labelled
+    best faces p10 0.96, covered faces median 0.24).
+
+    face_box is (x, y, w, h), in the same coordinate system as image_bgr.
+    """
     net = _net()
     if net is None or image_bgr is None or image_bgr.size == 0:
-        return None
+        return None, -1.0
 
     height, width = image_bgr.shape[:2]
     x, y, w, h = (float(v) for v in face_box)
@@ -130,7 +166,7 @@ def landmarks(image_bgr: np.ndarray,
     x1 = min(width, int(x + w * (1.0 + FACE_PAD)))
     y1 = min(height, int(y + h * (1.0 + FACE_PAD)))
     if x1 - x0 < 16 or y1 - y0 < 16:
-        return None
+        return None, -1.0
 
     # The type conversion happens **after** the crop. The adjustment engine
     # hands over a 6000x4000 float array, and converting the whole thing to
@@ -151,16 +187,18 @@ def landmarks(image_bgr: np.ndarray,
         outputs = net.forward(net.getUnconnectedOutLayersNames())
     except cv2.error as exc:
         log.debug("Face Mesh 실행 실패: %s", exc)
-        return None
+        return None, -1.0
 
     points = None
+    presence = -1.0
     for out in outputs:
         values = np.asarray(out).reshape(-1)
-        if values.size >= 468 * 3:
+        if values.size >= 468 * 3 and points is None:
             points = values[: 468 * 3].reshape(468, 3).astype(np.float64)
-            break
+        elif values.size == 1 and np.isfinite(values[0]):
+            presence = float(1.0 / (1.0 + np.exp(-float(values[0]))))
     if points is None or not np.isfinite(points).all():
-        return None
+        return None, presence
 
     # model coordinates (0~192) -> the cropped patch -> the original
     scale_x = (x1 - x0) / float(INPUT_SIZE)
@@ -168,7 +206,7 @@ def landmarks(image_bgr: np.ndarray,
     mapped = points.copy()
     mapped[:, 0] = points[:, 0] * scale_x + x0
     mapped[:, 1] = points[:, 1] * scale_y + y0
-    return mapped
+    return mapped, presence
 
 
 def polygon(points: np.ndarray, indices) -> np.ndarray:

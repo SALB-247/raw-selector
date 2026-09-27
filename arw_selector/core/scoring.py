@@ -224,6 +224,81 @@ def _face_defocus_penalty(focus, config: ScoreConfig) -> float:
     return config.penalty_face_defocus * magnitude * max(0.5, confidence)
 
 
+FACE_PRESENCE_MIN = 0.3
+"""Below this FaceMesh presence the main face is not one the eye signals
+can be read from (see face_hidden). Labelled clean faces on the A1 shoot
+sit at p10 0.96; hands, forearms, signs and false faces on hair at a
+median of 0.24; 0.3 and 0.4 gave the same label result."""
+
+FACE_TURN_MAX = 1.3
+"""Up to this landmark turn a low-presence face counts as covered rather
+than turned away. Real profiles on the A1 shoot read 1.4~2.3, covered
+frontal faces 0.1~1.2; 1.0 and 1.5 gave the same label result."""
+
+EYE_REFERENCE_MIN_FRAMES = 5
+"""A scene needs this many measured, unhidden faces before its median EAR
+is used as the eye reference for the closing call."""
+
+EYE_SIGNAL_CONTRAST_FLOOR = 22.0
+"""Mirrors focus.CONTRAST_FLOOR_STD (a test keeps them equal). Below this
+ROI contrast the eye signals - the eye bonus, the eyes-open bonus and the
+focus-on-face bonus - are credited in proportion (eye_signal_weight).
+
+The floor already stops the *sharpness* of a hazy or blurred eye region
+from inflating, but the eye package (+30 by default) does not depend on
+sharpness at all, so a hazy face behind glass or a motion-blurred face
+still reached keep on it (A1 shoot labels: 16 labelled-reject keeps at
+65~69). Weighting the package by contrast / floor put the hazy scenes in
+review: labelled-reject frames kept 22 -> 16 and labelled-best frames
+rejected 23 -> 21 on the 500-frame batch, at the cost of four dim indoor
+best frames (contrast 17~21) dropping from keep to review."""
+
+
+def eye_signal_weight(focus) -> float:
+    """0~1: how much of the eye package an eye ROI earns. 1 at or above
+    the contrast floor, proportional below it, 1 when not measured (old
+    cache rows) or when the ROI is not the eyes."""
+    contrast = getattr(focus, "roi_contrast", -1.0)
+    if focus.source is not FocusSource.EYE or contrast < 0.0:
+        return 1.0
+    return float(np.clip(contrast / EYE_SIGNAL_CONTRAST_FLOOR, 0.0, 1.0))
+
+
+def face_hidden(focus) -> bool:
+    """Whether the main face is covered (a hand, forearm or sign over the
+    eyes) or a false face (hair, a jersey), as opposed to a real face seen
+    from the side: FaceMesh presence below FACE_PRESENCE_MIN with a
+    frontal landmark turn (below FACE_TURN_MAX).
+
+    On such a frame the eye signals are withheld - the eye bonus, the
+    focus-on-face bonus and the open/closed call - because the eye ROI
+    holds the hand, and a sharp hand used to top its burst on them (A1
+    shoot labels: 25 labelled-reject frames flagged against 3 best, and
+    labelled-reject frames kept 26 -> 22, labelled-best frames rejected
+    76 -> 38 on the 500-frame batch). The face bonus itself stays: the
+    detector did find a face-like thing and the frame is still about
+    that person. Frames from before v12 of the cache carry -1 for both
+    and are never hidden."""
+    presence = getattr(focus, "face_presence", -1.0)
+    turn = getattr(focus, "face_turn", -1.0)
+    return 0.0 <= presence < FACE_PRESENCE_MIN and 0.0 <= turn < FACE_TURN_MAX
+
+
+def _eyes_closing(record: ImageRecord, config: ScoreConfig) -> bool:
+    """Whether the main subject's eyes are closing relative to the scene:
+    measured, not closed outright, and below eyes_closing_ratio of the
+    scene's usual EAR (record.group_eye_reference) as well as below
+    eyes_closing_below. Never without a reference."""
+    focus = record.focus
+    reference = getattr(record, "group_eye_reference", None)
+    eyes_open = getattr(focus, "eyes_open", -1.0)
+    if reference is None or eyes_open < 0.0 or _eyes_closed(focus, config):
+        return False
+    return (config.penalty_eyes_closing > 0
+            and eyes_open < config.eyes_closing_ratio * reference
+            and eyes_open < config.eyes_closing_below)
+
+
 def _eyes_closed(focus, config: ScoreConfig) -> bool:
     """Whether to take the main subject as having their eyes closed.
 
@@ -253,6 +328,9 @@ LINE_EYE_DETECTED = "eye_detected"
 LINE_EYES_CLOSED = "eyes_closed"
 LINE_EYES_OPEN = "eyes_open"
 LINE_EYES_UNKNOWN = "eyes_unknown"
+LINE_EYES_CLOSING = "eyes_closing"
+LINE_FACE_HIDDEN = "face_hidden"
+LINE_SUBJECT_OTHER = "subject_other"
 LINE_HIGHLIGHT_CLIP = "highlight_clip"
 LINE_SHADOW_CLIP = "shadow_clip"
 LINE_EXTREME_LUMA = "extreme_luma"
@@ -274,6 +352,11 @@ REASON_SHADOW_CLIP = "shadow_clip"
 REASON_EYES_UNKNOWN = "eyes_unknown"
 REASON_EYES_CLOSED = "eyes_closed"
 REASON_EYES_OPEN = "eyes_open"
+REASON_EYES_CLOSING = "eyes_closing"
+REASON_FACE_HIDDEN = "face_hidden"
+REASON_SCENE_BEST = "scene_best"
+REASON_SUBJECT_OTHER = "subject_other"
+REASON_SUBJECT_SWITCHED = "subject_switched"
 REASON_FRAME_BLACK = "frame_black"
 REASON_FRAME_WHITE = "frame_white"
 REASON_BATCH_BOTTOM = "batch_bottom"
@@ -382,15 +465,27 @@ def score_breakdown(
     # multiplier depend on the mode turns that mismatch fatal - with the
     # face bonuses still attached at a multiplier of 1.0, measured, 42
     # frames pin to 100 and the ranking disappears.
-    if config.face_priority:
+    if config.face_priority and getattr(record, "subject_state", None) == "other":
+        # The batch's subject is not in this frame - the face the detector
+        # found is a bystander, a mascot head or a poster (subject.py).
+        # None of the face signals belong to the shot, so none reach the
+        # score; it stands on its sharpness alone, without the no-face
+        # penalty either (a face *was* found, just not the one).
+        lines.append(ScoreLine(LINE_SUBJECT_OTHER, 0.0))
+    elif config.face_priority:
+        # A covered or false face: the eye ROI holds the hand, so nothing
+        # the eyes say may reach the score (see face_hidden).
+        hidden = face_hidden(focus)
+        eye_weight = eye_signal_weight(focus)
         # Favour a frame where the focus landed on the face, and lower one
         # with no face at all because it has none of the evidence this mode
         # was meant to look at. Take this out and frames with no face
         # overtake frames with a face on frame sharpness alone.
-        if focus.face_count and focus.source in (FocusSource.EYE, FocusSource.FACE):
+        if focus.face_count and focus.source in (FocusSource.EYE, FocusSource.FACE) and not hidden:
             if config.bonus_focus_on_face:
                 lines.append(ScoreLine(
-                    LINE_FOCUS_ON_FACE, config.bonus_focus_on_face))
+                    LINE_FOCUS_ON_FACE, config.bonus_focus_on_face * eye_weight,
+                    {"contrast_weight": eye_weight}))
         elif not focus.face_count:
             if config.penalty_no_face:
                 lines.append(ScoreLine(LINE_NO_FACE, -config.penalty_no_face))
@@ -417,28 +512,39 @@ def score_breakdown(
                 lines.append(ScoreLine(
                     LINE_FACE_SIZE,
                     config.bonus_face_size * min(1.0, focus.face_area_ratio / 0.10)))
-        if focus.source is FocusSource.EYE and config.bonus_eye:
+        if focus.source is FocusSource.EYE and config.bonus_eye and not hidden:
             # The eye bonus is weighted for the same reason. An 'eye
             # region' is caught on audience faces too, so leaving it off
             # makes it a detour around the size weighting.
             lines.append(ScoreLine(
-                LINE_EYE_DETECTED, config.bonus_eye * face_weight,
-                dict(weight_params)))
+                LINE_EYE_DETECTED, config.bonus_eye * face_weight * eye_weight,
+                dict(weight_params, contrast_weight=eye_weight)))
 
         # Eye state - open, +; closed, -. It is an item focus does not
         # screen out at all (closed eyes are in focus too), so the two are
         # pulled apart in both directions here. A frame that could not be
         # measured is neither - what is unknown is treated as neither good
         # nor bad. Do otherwise and a distant profile receives the same
-        # bonus as a frontal portrait.
+        # bonus as a frontal portrait. A covered face is "not measured"
+        # whatever the landmarks say: they were fitted to a hand.
         eyes_open = getattr(focus, "eyes_open", -1.0)
         eye_params = {"ear": eyes_open, "threshold": config.eyes_closed_below}
-        if _eyes_closed(focus, config):
+        if hidden:
+            lines.append(ScoreLine(LINE_FACE_HIDDEN, 0.0, {
+                "presence": getattr(focus, "face_presence", -1.0),
+                "turn": getattr(focus, "face_turn", -1.0)}))
+        elif _eyes_closed(focus, config):
             lines.append(ScoreLine(
                 LINE_EYES_CLOSED, -config.penalty_eyes_closed, eye_params))
+        elif _eyes_closing(record, config):
+            lines.append(ScoreLine(
+                LINE_EYES_CLOSING, -config.penalty_eyes_closing, {
+                    "ear": eyes_open, "reference": record.group_eye_reference,
+                    "ratio": config.eyes_closing_ratio}))
         elif eyes_open >= 0.0:
             lines.append(ScoreLine(
-                LINE_EYES_OPEN, config.bonus_eyes_open, eye_params))
+                LINE_EYES_OPEN, config.bonus_eyes_open * eye_weight,
+                dict(eye_params, contrast_weight=eye_weight)))
         else:
             lines.append(ScoreLine(LINE_EYES_UNKNOWN, 0.0))
 
@@ -496,6 +602,7 @@ def _reasons(
     config: ScoreConfig,
     threshold: float,
     group_best: float | None = None,
+    keep_above: float | None = None,
 ) -> list[Reason]:
     """The grade scoring reasons. The user has to be able to accept them in
     the GUI.
@@ -554,19 +661,36 @@ def _reasons(
     # showed in the reasons with the mode off, the user would tune the
     # threshold against a value that is not being used.
     eyes_open = getattr(focus, "eyes_open", -1.0)
-    if config.face_priority:
-        if eyes_open < 0.0:
+    if getattr(record, "subject_switched", False):
+        reasons.append(Reason(REASON_SUBJECT_SWITCHED))
+    if config.face_priority and getattr(record, "subject_state", None) == "other":
+        reasons.append(Reason(REASON_SUBJECT_OTHER))
+    elif config.face_priority:
+        if face_hidden(focus):
+            reasons.append(Reason(REASON_FACE_HIDDEN, {
+                "presence": getattr(focus, "face_presence", -1.0)}))
+        elif eyes_open < 0.0:
             reasons.append(Reason(REASON_EYES_UNKNOWN))
         elif _eyes_closed(focus, config):
             reasons.append(Reason(REASON_EYES_CLOSED, {
                 "ear": eyes_open, "threshold": config.eyes_closed_below}))
+        elif _eyes_closing(record, config):
+            reasons.append(Reason(REASON_EYES_CLOSING, {
+                "ear": eyes_open, "reference": record.group_eye_reference,
+                "penalty": config.penalty_eyes_closing}))
         else:
             reasons.append(Reason(REASON_EYES_OPEN, {
-                "ear": eyes_open, "bonus": config.bonus_eyes_open}))
+                "ear": eyes_open, "bonus": config.bonus_eyes_open * eye_signal_weight(focus)}))
     if focus.mean_luma < 8.0:
         reasons.append(Reason(REASON_FRAME_BLACK))
     elif focus.mean_luma > 247.0:
         reasons.append(Reason(REASON_FRAME_WHITE))
+    # A keep the score did not earn: the scene guarantee. Said outright,
+    # or a back-turned frame kept as the best of a bad scene looks like a
+    # scoring error rather than a rule.
+    if (record.grade is Grade.KEEP and keep_above is not None and np.isfinite(keep_above)
+            and record.score < keep_above and record.group_rank == 0):
+        reasons.append(Reason(REASON_SCENE_BEST, {"keep_above": keep_above}))
     if record.score < threshold:
         reasons.append(Reason(REASON_BATCH_BOTTOM, {"threshold": threshold}))
 
@@ -702,6 +826,27 @@ def _effective_keep_above(records: list[ImageRecord], config: ScoreConfig) -> fl
     return others[extra_needed - 1]
 
 
+def assign_eye_references(records: list[ImageRecord]) -> None:
+    """Sets group_eye_reference on every record: the median EAR of the
+    scene's measured, unhidden faces when there are at least
+    EYE_REFERENCE_MIN_FRAMES of them, None otherwise. Stored on the record
+    so that a single frame's score card (score_breakdown) shows exactly
+    the score the grading gave it."""
+    by_group: dict[int | None, list[float]] = {}
+    for record in records:
+        focus = record.focus
+        if (record.ok and focus is not None and focus.eyes_open >= 0.0
+                and not face_hidden(focus)
+                and getattr(record, "subject_state", None) != "other"):
+            by_group.setdefault(record.group_id, []).append(float(focus.eyes_open))
+    references = {
+        group_id: float(np.median(ears))
+        for group_id, ears in by_group.items() if len(ears) >= EYE_REFERENCE_MIN_FRAMES
+    }
+    for record in records:
+        record.group_eye_reference = references.get(record.group_id)
+
+
 def grade_records(
     records: list[ImageRecord], config: ScoreConfig | None = None
 ) -> list[ImageRecord]:
@@ -715,6 +860,7 @@ def grade_records(
     if not records:
         return records
 
+    assign_eye_references(records)
     for record in records:
         record.score = compute_score(record, config)
 
@@ -772,9 +918,36 @@ def grade_records(
         else:
             record.grade = Grade.REVIEW
 
-        record.reasons = _reasons(record, config, threshold, group_best.get(record.group_id))
+        record.reasons = _reasons(record, config, threshold, group_best.get(record.group_id),
+                                  keep_above)
 
     return records
+
+
+FACE_RATIO_HINT_BELOW = 0.2
+"""Below this share of photos with a face, the batch is told that
+face-priority mode is holding every photo under the keep score.
+
+With no face a photo scores at most 50 (the sharpness term) minus the
+no-face penalty, under keep_above 65, so in a bird or landscape batch the
+only keeps are the scene guarantee's. Measured: a 31-frame A1 bird batch
+topped out at 35 points with 13 of 13 keeps by guarantee; the concert
+corpus this mode is tuned on has faces in 88% of its frames. 20% sits well
+clear of both.
+"""
+
+FACE_RATIO_MIN_PHOTOS = 10
+"""The hint needs a batch, not a handful - three frames without a face
+say nothing about the shoot."""
+
+
+def face_ratio(records: list[ImageRecord]) -> float | None:
+    """The share of analysed photos in which a face was found. None when
+    there are too few photos to say (FACE_RATIO_MIN_PHOTOS)."""
+    valid = [r for r in records if r.ok and r.focus is not None]
+    if len(valid) < FACE_RATIO_MIN_PHOTOS:
+        return None
+    return sum(1 for r in valid if r.focus.face_count) / len(valid)
 
 
 def summarize(records: list[ImageRecord]) -> dict[str, int]:

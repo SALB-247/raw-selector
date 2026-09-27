@@ -329,6 +329,33 @@ class ScoreConfig:
     any value.
     """
 
+    penalty_eyes_closing: float = 10.0
+    """The penalty when the main subject's eyes are **closing** - open by
+    the absolute threshold, but well below what the same scene's frames
+    show (see eyes_closing_ratio). Replaces bonus_eyes_open on that frame.
+
+    A 30fps burst catches every stage of a blink and a singer's half-shut
+    eyes; the absolute threshold cannot see them (an EAR of 0.36 is "open"
+    for one face and mid-blink for another), but the burst itself shows
+    what this face's open eyes look like. Measured on the A1 shoot's
+    labels: at 0.7 of the scene median, 8 labelled-reject frames flagged
+    (eyes shut or nearly) against 1 labelled-best (a laugh); the top pick
+    moved onto a labelled best in one more scene and the mean rank of the
+    best frames improved from 4.9 to 4.5 of 10. Half the closed penalty:
+    the call is relative, so it costs less than a definite closed eye.
+    """
+
+    eyes_closing_ratio: float = 0.7
+    """A frame is "closing" when its EAR is below this fraction of the
+    scene's usual EAR (the median over the scene's measured, unhidden
+    faces, at least 5 of them) **and** below eyes_closing_below. 0.6
+    flagged only 2 frames, 0.8 pulled in 8 labelled-best frames (laughing,
+    squinting into the light) - 0.7 sits between."""
+
+    eyes_closing_below: float = 0.45
+    """The closing call is never made above this EAR: a wide-open face in
+    a scene of wider-open ones is not closing."""
+
     bonus_face_size: float = 0.0
     """Points added the larger the face is (proportional to area relative
     to the frame).
